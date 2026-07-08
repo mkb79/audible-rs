@@ -48,8 +48,10 @@ curl -fsSL https://raw.githubusercontent.com/mkb79/audible-rs/main/install.sh | 
 ```
 
 It installs `audible` into `~/.local/bin` (override with `--bin-dir <dir>`)
-and verifies the download against the release checksums. During the
-pre-alpha phase it installs the newest pre-release.
+and verifies the download against the release checksums. By default it
+installs the latest **stable** release; while the project is pre-alpha (no
+stable release yet) it installs the newest pre-release, and once a stable
+release exists you can pass `--pre` to keep tracking pre-releases.
 
 audible-rs is the successor to `audible-cli` and shares the command name
 `audible`. If you already have `audible-cli` installed, the installer asks

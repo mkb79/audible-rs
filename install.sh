@@ -6,9 +6,14 @@
 #   curl -fsSL https://raw.githubusercontent.com/mkb79/audible-rs/main/install.sh | sh
 #
 # Options (flag or environment variable):
-#   --version <tag>   AUDIBLE_VERSION      release to install (default: newest, incl. pre-releases)
+#   --version <tag>   AUDIBLE_VERSION      install a specific release (default: latest stable)
+#   --pre             AUDIBLE_PRERELEASE=1 install the newest release, pre-releases included
 #   --bin-dir <dir>   AUDIBLE_INSTALL_DIR  install location (default: ~/.local/bin)
 #   --force           AUDIBLE_FORCE=1      replace an existing non-audible-rs 'audible' without asking
+#
+# By default the newest stable release is installed. While none exists yet
+# (pre-alpha) it falls back to the newest pre-release; once a stable release
+# is out, use --pre to keep tracking pre-releases.
 #
 # audible-rs is the successor to audible-cli and shares the command name
 # 'audible'. Installing over an existing audible-cli replaces the command
@@ -27,13 +32,15 @@ BIN="audible"
 VERSION="${AUDIBLE_VERSION:-}"
 INSTALL_DIR="${AUDIBLE_INSTALL_DIR:-${HOME}/.local/bin}"
 FORCE="${AUDIBLE_FORCE:-0}"
+PRERELEASE="${AUDIBLE_PRERELEASE:-0}"
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--version) VERSION="${2:?--version needs a value}"; shift 2 ;;
+		--pre|--prerelease) PRERELEASE=1; shift ;;
 		--bin-dir) INSTALL_DIR="${2:?--bin-dir needs a value}"; shift 2 ;;
 		--force) FORCE=1; shift ;;
-		-h|--help) grep '^#' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' | head -n 20; exit 0 ;;
+		-h|--help) grep '^#' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' | head -n 24; exit 0 ;;
 		*) echo "unknown option: $1" >&2; exit 1 ;;
 	esac
 done
@@ -84,13 +91,28 @@ if [ "$os" = "apple-darwin" ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" 
 fi
 target="${arch}-${os}"
 
-# --- resolve the version (newest, including pre-releases, when unset) -----
+# --- resolve the version --------------------------------------------------
+# /releases/latest = newest *stable* (pre-releases excluded); /releases =
+# every release, newest first. Default to stable; --pre (or no stable yet)
+# tracks pre-releases.
+resolve_tag() {
+	dl "$1" 2>/dev/null | grep '"tag_name":' | head -n 1 \
+		| sed -e 's/.*"tag_name":[[:space:]]*"//' -e 's/".*//'
+}
 if [ -z "$VERSION" ]; then
-	info "resolving the latest release…"
-	VERSION="$(dl "https://api.github.com/repos/${REPO}/releases" \
-		| grep '"tag_name":' | head -n 1 \
-		| sed -e 's/.*"tag_name":[[:space:]]*"//' -e 's/".*//')"
-	[ -n "$VERSION" ] || err "could not determine the latest release (pass --version <tag>)"
+	api="https://api.github.com/repos/${REPO}"
+	if [ "$PRERELEASE" = 1 ]; then
+		info "resolving the newest release (pre-releases included)…"
+		VERSION="$(resolve_tag "${api}/releases")"
+	else
+		info "resolving the latest stable release…"
+		VERSION="$(resolve_tag "${api}/releases/latest")"
+		if [ -z "$VERSION" ]; then
+			info "no stable release yet — installing the newest pre-release (use --pre to keep tracking pre-releases)"
+			VERSION="$(resolve_tag "${api}/releases")"
+		fi
+	fi
+	[ -n "$VERSION" ] || err "could not determine a release to install (pass --version <tag>)"
 fi
 num="${VERSION#v}"
 archive="${BIN}-${num}-${target}.tar.gz"

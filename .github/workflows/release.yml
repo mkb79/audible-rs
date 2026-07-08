@@ -105,12 +105,25 @@ jobs:
         working-directory: dist
         run: sha256sum *.tar.gz | tee SHA256SUMS
 
+      - name: Determine release type
+        id: rel
+        shell: bash
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          # SemVer marks a pre-release with a hyphen suffix (v1.2.3-alpha,
+          # -beta, -rc.1, …); a bare vX.Y.Z is a full release.
+          if [[ "$tag" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # Signature verification (minisign) is added later — see AUD-141.
-      - name: Publish pre-release
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          prerelease: true
+          prerelease: ${{ steps.rel.outputs.prerelease }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
