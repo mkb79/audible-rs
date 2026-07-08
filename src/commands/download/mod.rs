@@ -58,6 +58,15 @@ pub(crate) use reorganize::{hint_reorganize, key_affects_filenames};
 /// `audible download`.
 pub struct DownloadCommand;
 
+// Help-section headings for `download --help` (AUD-18): the many options
+// group into what to select, which artifacts, general behavior, and the two
+// specialized paths (decrypt, Widevine).
+const H_SELECTION: &str = "Selection";
+const H_ARTIFACTS: &str = "Artifacts";
+const H_BEHAVIOR: &str = "Download behavior";
+const H_DECRYPT: &str = "Decryption";
+const H_WIDEVINE: &str = "Widevine (streaming / DASH)";
+
 #[async_trait::async_trait]
 impl super::Command for DownloadCommand {
     fn name(&self) -> &'static str {
@@ -65,7 +74,7 @@ impl super::Command for DownloadCommand {
     }
 
     fn clap(&self) -> clap::Command {
-        let cmd = clap::Command::new(self.name())
+        let base = clap::Command::new(self.name())
             .about("Download owned titles (aaxc, with resume)")
             .long_about(format!(
                 "Download owned titles (aaxc, chapters, cover, pdf), with resume. \
@@ -73,9 +82,17 @@ impl super::Command for DownloadCommand {
                  path when a CDM is configured (see `account widevine`); force it with \
                  --widevine.\n\n{}",
                 crate::config::filename_template::help_text()
-            ))
-            .arg(
+            ));
+        // Selection group heads the help: the shared --asin/--title source
+        // args plus --missing/--include-archived (all added by add_source_args).
+        let cmd = add_source_args(base)
+            .mut_arg("asin", |a| a.help_heading(H_SELECTION))
+            .mut_arg("title", |a| a.help_heading(H_SELECTION))
+            .mut_arg("missing", |a| a.help_heading(H_SELECTION))
+            .mut_arg("include_archived", |a| a.help_heading(H_SELECTION));
+        cmd.arg(
                 Arg::new("kind")
+                    .help_heading(H_ARTIFACTS)
                     .long("kind")
                     .value_name("KIND,...")
                     .default_value("audio")
@@ -85,6 +102,7 @@ impl super::Command for DownloadCommand {
             )
             .arg(
                 Arg::new("quality")
+                    .help_heading(H_ARTIFACTS)
                     .long("quality")
                     .value_name("QUALITY")
                     .value_parser(["high", "normal"])
@@ -93,30 +111,35 @@ impl super::Command for DownloadCommand {
             )
             .arg(
                 Arg::new("cover_size")
+                    .help_heading(H_ARTIFACTS)
                     .long("cover-size")
                     .value_name("PX")
                     .help("Cover size(s) in px, comma-separated (overrides config)"),
             )
             .arg(
                 Arg::new("chapter_type")
+                    .help_heading(H_ARTIFACTS)
                     .long("chapter-type")
                     .value_name("TYPE,...")
                     .help("Chapter title layout(s): flat, tree or both, comma-separated (overrides config)"),
             )
             .arg(
                 Arg::new("dir")
+                    .help_heading(H_BEHAVIOR)
                     .long("dir")
                     .value_name("DIR")
                     .help("Download directory (overrides the configured download_dir)"),
             )
             .arg(
                 Arg::new("license_only")
+                    .help_heading(H_BEHAVIOR)
                     .long("license-only")
                     .action(ArgAction::SetTrue)
                     .help("Only request the license and print what was granted"),
             )
             .arg(
                 Arg::new("force")
+                    .help_heading(H_BEHAVIOR)
                     .long("force")
                     .action(ArgAction::SetTrue)
                     .conflicts_with("skip_existing")
@@ -124,12 +147,14 @@ impl super::Command for DownloadCommand {
             )
             .arg(
                 Arg::new("skip_existing")
+                    .help_heading(H_BEHAVIOR)
                     .long("skip-existing")
                     .action(ArgAction::SetTrue)
                     .help("Skip artifacts already recorded in the database (overrides config)"),
             )
             .arg(
                 Arg::new("relicense")
+                    .help_heading(H_BEHAVIOR)
                     .long("relicense")
                     .action(ArgAction::SetTrue)
                     .conflicts_with("skip_existing")
@@ -137,6 +162,7 @@ impl super::Command for DownloadCommand {
             )
             .arg(
                 Arg::new("no_db_write")
+                    .help_heading(H_BEHAVIOR)
                     .long("no-db-write")
                     .action(ArgAction::SetTrue)
                     .requires("dir")
@@ -149,6 +175,7 @@ impl super::Command for DownloadCommand {
             )
             .arg(
                 Arg::new("jobs")
+                    .help_heading(H_BEHAVIOR)
                     .long("jobs")
                     .short('j')
                     .value_name("N")
@@ -158,12 +185,14 @@ impl super::Command for DownloadCommand {
             )
             .arg(
                 Arg::new("decrypt")
+                    .help_heading(H_DECRYPT)
                     .long("decrypt")
                     .action(ArgAction::SetTrue)
                     .help("Decrypt the downloaded aaxc to a playable m4b (overrides config)"),
             )
             .arg(
                 Arg::new("decrypt_backend")
+                    .help_heading(H_DECRYPT)
                     .long("decrypt-backend")
                     .value_name("TOOL")
                     .value_parser(["auto", "aaxclean", "ffmpeg"])
@@ -171,12 +200,14 @@ impl super::Command for DownloadCommand {
             )
             .arg(
                 Arg::new("remove_source")
+                    .help_heading(H_DECRYPT)
                     .long("remove-source")
                     .action(ArgAction::SetTrue)
                     .help("Delete the source aaxc after a successful decrypt (overrides config)"),
             )
             .arg(
                 Arg::new("keep_source")
+                    .help_heading(H_DECRYPT)
                     .long("keep-source")
                     .action(ArgAction::SetTrue)
                     .conflicts_with("remove_source")
@@ -184,6 +215,7 @@ impl super::Command for DownloadCommand {
             )
             .arg(
                 Arg::new("widevine")
+                    .help_heading(H_WIDEVINE)
                     .long("widevine")
                     .action(ArgAction::SetTrue)
                     .help(
@@ -193,6 +225,7 @@ impl super::Command for DownloadCommand {
             )
             .arg(
                 Arg::new("codec")
+                    .help_heading(H_WIDEVINE)
                     .long("codec")
                     .value_name("CODEC")
                     .value_parser(["aac", "xhe"])
@@ -201,12 +234,14 @@ impl super::Command for DownloadCommand {
             )
             .arg(
                 Arg::new("spatial")
+                    .help_heading(H_WIDEVINE)
                     .long("spatial")
                     .action(ArgAction::SetTrue)
                     .help("Request Dolby Atmos (Widevine; needs a Widevine L1 device)"),
             )
             .arg(
                 Arg::new("no_spatial")
+                    .help_heading(H_WIDEVINE)
                     .long("no-spatial")
                     .action(ArgAction::SetTrue)
                     .conflicts_with("spatial")
@@ -214,8 +249,7 @@ impl super::Command for DownloadCommand {
             )
             .subcommand(reorganize::reorganize_command())
             .subcommand(orphans::orphans_command())
-            .subcommand(info::info_command());
-        add_source_args(cmd)
+            .subcommand(info::info_command())
     }
 
     async fn run(&self, ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {

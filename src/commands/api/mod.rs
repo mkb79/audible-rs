@@ -54,6 +54,10 @@ impl super::Command for ApiCommand {
 }
 
 /// Send an authenticated request to the Audible API
+//
+// Field order sets the --help layout (AUD-18): the two positionals first,
+// then options grouped by `help_heading` into Request / Input & output files
+// / Behavior, ordered within each group from most to least common.
 #[derive(Debug, Args)]
 struct ApiArgs {
     /// HTTP method (GET, POST, DELETE, …)
@@ -65,67 +69,92 @@ struct ApiArgs {
     #[arg(required_unless_present_any = ["interactive", "request_file"])]
     path: Option<String>,
 
+    // --- Request ---
     /// Auth mode for this request
-    #[arg(long, default_value = "auto", value_parser = parse_auth_mode)]
+    #[arg(long, default_value = "auto", value_parser = parse_auth_mode, help_heading = "Request")]
     auth: AuthMode,
 
+    /// Additional query parameter, repeatable
+    #[arg(long, value_name = "KEY=VALUE", help_heading = "Request")]
+    query: Vec<String>,
+
+    /// Template variable for {{name}} placeholders, repeatable
+    #[arg(long = "var", value_name = "KEY=VALUE", help_heading = "Request")]
+    var: Vec<String>,
+
+    /// Additional request header, repeatable (e.g. -H "Accept: application/json")
+    #[arg(
+        short = 'H',
+        long = "header",
+        value_name = "NAME: VALUE",
+        help_heading = "Request"
+    )]
+    header: Vec<String>,
+
+    /// Content type for a raw (non-JSON) body, e.g. application/xml
+    #[arg(long, value_name = "TYPE", help_heading = "Request")]
+    content_type: Option<String>,
+
     /// JSON request body (a raw body when --content-type is set)
-    #[arg(long, conflicts_with = "body_file")]
+    #[arg(long, conflicts_with = "body_file", help_heading = "Request")]
     body: Option<String>,
 
     /// Read the request body from a file ("-" reads stdin)
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", help_heading = "Request")]
     body_file: Option<String>,
 
-    /// Content type for a raw (non-JSON) body, e.g. application/xml
-    #[arg(long, value_name = "TYPE")]
-    content_type: Option<String>,
-
-    /// Additional query parameter, repeatable
-    #[arg(long, value_name = "KEY=VALUE")]
-    query: Vec<String>,
-
-    /// Additional request header, repeatable (e.g. -H "Accept: application/json")
-    #[arg(short = 'H', long = "header", value_name = "NAME: VALUE")]
-    header: Vec<String>,
-
-    /// Include the response status line and headers in the output (curl -i)
-    #[arg(short = 'i', long = "include")]
-    include_headers: bool,
-
-    /// Write the response to a file instead of stdout (the global -o selects
-    /// the output FORMAT, so the file flag is long-only)
-    #[arg(long = "output-file", value_name = "FILE")]
-    output_file: Option<PathBuf>,
-
-    /// Write the response status line and headers to a file (curl -D)
-    #[arg(short = 'D', long = "dump-header", value_name = "FILE")]
-    dump_header: Option<PathBuf>,
-
+    // --- Input & output files ---
     /// Load the request from a TOML request file (method/path then optional)
-    #[arg(long = "request-file", value_name = "FILE")]
+    #[arg(
+        long = "request-file",
+        value_name = "FILE",
+        help_heading = "Input & output files"
+    )]
     request_file: Option<PathBuf>,
 
     /// Save the composed request to a TOML file and exit (does not send)
-    #[arg(long = "save-request", value_name = "FILE")]
+    #[arg(
+        long = "save-request",
+        value_name = "FILE",
+        help_heading = "Input & output files"
+    )]
     save_request: Option<PathBuf>,
 
-    /// Template variable for {{name}} placeholders, repeatable
-    #[arg(long = "var", value_name = "KEY=VALUE")]
-    var: Vec<String>,
+    /// Write the response to a file instead of stdout (the global -o selects
+    /// the output FORMAT, so the file flag is long-only)
+    #[arg(
+        long = "output-file",
+        value_name = "FILE",
+        help_heading = "Input & output files"
+    )]
+    output_file: Option<PathBuf>,
+
+    /// Write the response status line and headers to a file (curl -D)
+    #[arg(
+        short = 'D',
+        long = "dump-header",
+        value_name = "FILE",
+        help_heading = "Input & output files"
+    )]
+    dump_header: Option<PathBuf>,
+
+    // --- Behavior ---
+    /// Compose the request interactively with guided prompts
+    #[arg(short = 'I', long = "interactive", conflicts_with_all = ["method", "path", "request_file"], help_heading = "Behavior")]
+    interactive: bool,
 
     /// Render the request and print it without sending
-    #[arg(long = "dry-run")]
+    #[arg(long = "dry-run", help_heading = "Behavior")]
     dry_run: bool,
+
+    /// Include the response status line and headers in the output (curl -i)
+    #[arg(short = 'i', long = "include", help_heading = "Behavior")]
+    include_headers: bool,
 
     /// Treat the path as a full https URL and send it verbatim, to a host
     /// other than the Audible API (e.g. to test website cookies). Hidden.
     #[arg(long = "foreign-host", hide = true)]
     foreign_host: bool,
-
-    /// Compose the request interactively with guided prompts
-    #[arg(short = 'I', long = "interactive", conflicts_with_all = ["method", "path", "request_file"])]
-    interactive: bool,
 }
 
 fn parse_auth_mode(s: &str) -> Result<AuthMode, String> {
