@@ -22,12 +22,12 @@ use super::*;
 pub(super) struct LoginArgs {
     /// Use the external-browser flow (print the URL, paste the redirect)
     /// instead of entering your password here
-    #[arg(long, alias = "link")]
+    #[arg(long, alias = "link", help_heading = "Sign-in method")]
     external: bool,
 
     /// Sign in with an Audible username (pre-merger accounts) instead of an
     /// Amazon email; routes the flow to the Audible domain. DE, US and UK only
-    #[arg(long, alias = "with-username")]
+    #[arg(long, alias = "with-username", help_heading = "Sign-in method")]
     audible_username: bool,
 
     #[command(flatten)]
@@ -40,32 +40,32 @@ pub(super) struct LoginArgs {
 #[derive(Debug, Args)]
 struct RegistrationArgs {
     /// Device to register as: iphone (default) or android
-    #[arg(long, value_name = "DEVICE")]
+    #[arg(long, value_name = "DEVICE", help_heading = "Registration")]
     device: Option<String>,
 
     /// Account name (default: asked interactively)
-    #[arg(long)]
+    #[arg(long, help_heading = "Registration")]
     name: Option<String>,
 
     /// Marketplaces this account owns audiobooks on (CSV of country codes),
     /// saved for later data commands like `library sync`/`list`. The sign-in
     /// still registers a single device on one marketplace — this adds no extra
     /// registrations. Default: the registration marketplace
-    #[arg(long, value_name = "CC,...")]
+    #[arg(long, value_name = "CC,...", help_heading = "Registration")]
     marketplaces: Option<String>,
 
     /// Of --marketplaces, the subset the global -m defaults to when it is
     /// omitted on later commands (must be a subset). Default: the registration
     /// marketplace
-    #[arg(long, value_name = "CC,...")]
+    #[arg(long, value_name = "CC,...", help_heading = "Registration")]
     default_marketplaces: Option<String>,
 
     /// Write the new auth file unencrypted (not recommended)
-    #[arg(long)]
+    #[arg(long, help_heading = "Auth file")]
     plain: bool,
 
     /// Overwrite an existing auth file and config entry
-    #[arg(long)]
+    #[arg(long, help_heading = "Auth file")]
     force: bool,
 }
 
@@ -73,20 +73,20 @@ struct RegistrationArgs {
 #[derive(Debug, Args)]
 pub(super) struct ServerArgs {
     /// Sign in with an Audible username (pre-merger accounts); DE/US/UK only
-    #[arg(long, alias = "with-username")]
+    #[arg(long, alias = "with-username", help_heading = "Sign-in method")]
     audible_username: bool,
 
     /// Address to bind. Default 127.0.0.1 (loopback — reach it via an SSH
     /// forward). Pass a reachable IP (or 0.0.0.0) to open it from a phone
-    #[arg(long, default_value = "127.0.0.1")]
+    #[arg(long, default_value = "127.0.0.1", help_heading = "Server")]
     host: String,
 
     /// Port to bind. Default 0 picks a free ephemeral port
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, help_heading = "Server")]
     port: u16,
 
     /// Seconds to wait for the browser sign-in before giving up
-    #[arg(long, default_value_t = 300)]
+    #[arg(long, default_value_t = 300, help_heading = "Server")]
     timeout: u64,
 
     #[command(flatten)]
