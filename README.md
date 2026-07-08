@@ -1,5 +1,10 @@
 # audible-rs
 
+[![Project status: WIP](https://www.repostatus.org/badges/latest/wip.svg)](https://www.repostatus.org/#wip)
+[![Version](https://img.shields.io/badge/version-0.1.0--alpha-orange)](Cargo.toml)
+[![CI](https://github.com/mkb79/audible-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/mkb79/audible-rs/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A command-line tool and Rust library for your own Audible account — a
 ground-up reimplementation of [`mkb79/Audible`](https://github.com/mkb79/Audible)
 and [`mkb79/audible-cli`](https://github.com/mkb79/audible-cli) as a single
