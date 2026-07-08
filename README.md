@@ -36,9 +36,52 @@ Rust crate. It installs one binary, `audible`.
 
 ## Install
 
-Requires a **Rust toolchain** and a **C compiler** (the bundled SQLite is
-built from source via `rusqlite`). Optional: `ffmpeg` or `aaxclean-cli`
-on `PATH` for `download --decrypt`.
+Linux and macOS are supported (x86-64 and arm64). Windows support for the
+core commands is in progress; the plugin and agent subsystems are Unix-only.
+
+### Prebuilt binary (recommended)
+
+Download and install the latest release binary for your platform:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mkb79/audible-rs/main/install.sh | sh
+```
+
+It installs `audible` into `~/.local/bin` (override with `--bin-dir <dir>`)
+and verifies the download against the release checksums. During the
+pre-alpha phase it installs the newest pre-release.
+
+audible-rs is the successor to `audible-cli` and shares the command name
+`audible`. If you already have `audible-cli` installed, the installer asks
+before replacing its command (pass `--force` to skip, or `--bin-dir` to
+install elsewhere); the config directories are separate, so `audible-cli`'s
+data is left untouched. Replacing an older audible-rs is a silent upgrade.
+
+### Manual download
+
+Grab the archive for your target from the
+[Releases](https://github.com/mkb79/audible-rs/releases) page, verify it,
+and place the binary on your `PATH`:
+
+| Platform | Asset |
+| --- | --- |
+| Linux x86-64 | `audible-<version>-x86_64-unknown-linux-musl.tar.gz` |
+| Linux arm64 | `audible-<version>-aarch64-unknown-linux-musl.tar.gz` |
+| macOS Intel | `audible-<version>-x86_64-apple-darwin.tar.gz` |
+| macOS Apple Silicon | `audible-<version>-aarch64-apple-darwin.tar.gz` |
+
+The Linux binaries are statically linked (musl) and run on any distribution.
+Verify the download against `SHA256SUMS` from the same release:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing   # Linux
+shasum -a 256 -c SHA256SUMS --ignore-missing  # macOS
+```
+
+### From source
+
+Requires a **Rust toolchain** and a **C compiler** (the bundled SQLite and
+the TLS backend build from source):
 
 ```sh
 cargo install --git https://github.com/mkb79/audible-rs
@@ -46,8 +89,14 @@ cargo install --git https://github.com/mkb79/audible-rs
 cargo build --release   # binary at target/release/audible
 ```
 
-Linux and macOS are supported. Windows support for the core commands is
-in progress; the plugin and agent subsystems are Unix-only.
+### Optional tools for `download --decrypt`
+
+`audible download --decrypt` needs one of these on `PATH` (or pointed at via
+`AUDIBLE_FFMPEG` / `AUDIBLE_AAXCLEAN_CLI`):
+
+- **ffmpeg** (≥ 4.4), or
+- **[aaxclean-cli](https://github.com/Mbucari/aaxclean-cli) by Mbucari** —
+  purpose-built and noticeably faster.
 
 ## Getting started
 

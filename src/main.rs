@@ -5,6 +5,12 @@ use clap::{Arg, ArgAction};
 use tracing_subscriber::EnvFilter;
 
 use audible_rs::commands::{self, Command};
+
+// Global allocator (AUD-140): mimalloc replaces the platform malloc —
+// it neutralizes musl's slower default allocator for the static Linux
+// release binaries (and is a modest win on glibc/macOS too).
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use audible_rs::config::ctx::Ctx;
 use audible_rs::output::OutputFormat;
 

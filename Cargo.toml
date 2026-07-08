@@ -92,6 +92,11 @@ time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 # Session agent (M5): SIGTERM to the daemon PID, detached process group.
 libc = "0.2"
 
+# Global allocator (AUD-140): mimalloc neutralizes musl's slower default
+# malloc for the static Linux release binaries, and modestly speeds up the
+# glibc/macOS builds too. Set as the global allocator in `main.rs`.
+mimalloc = "0.1"
+
 # Build-time only (Widevine proto codegen, pure Rust — no protoc needed).
 # Not linked into the release binary.
 [build-dependencies]
@@ -107,3 +112,15 @@ wiremock = "0.6"
 # unoptimized test builds.
 [profile.dev.package.argon2]
 opt-level = 3
+
+# Release binaries are distributed (AUD-140): strip symbols to shrink them.
+[profile.release]
+strip = true
+
+# cargo-binstall support (AUD-140): once published to crates.io,
+# `cargo binstall audible-rs` fetches these GitHub-release archives. The tag
+# carries a `v` prefix; the archive name uses the bare version.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/audible-{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "audible-{ version }-{ target }/{ bin }"
