@@ -1,10 +1,9 @@
 //! Entry point of the `audible` CLI binary: builds the clap tree from
 //! the command registry (D10), resolves global flags and dispatches.
 
-use clap::{Arg, ArgAction};
 use tracing_subscriber::EnvFilter;
 
-use audible_rs::commands::{self, Command};
+use audible_rs::commands;
 
 // Global allocator (AUD-140): mimalloc replaces the platform malloc —
 // it neutralizes musl's slower default allocator for the static Linux
@@ -13,90 +12,6 @@ use audible_rs::commands::{self, Command};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use audible_rs::config::ctx::Ctx;
 use audible_rs::output::OutputFormat;
-
-fn parse_output_format(s: &str) -> Result<OutputFormat, String> {
-    s.parse()
-}
-
-/// Help section of the global flags; separates them from
-/// command-specific options in every `--help` output.
-const GLOBAL_OPTIONS: &str = "Global Options";
-
-fn build_cli(registry: &[Box<dyn Command>]) -> clap::Command {
-    let mut root = clap::Command::new("audible")
-        .version(env!("CARGO_PKG_VERSION"))
-        .about("Access your Audible library from the command line")
-        .subcommand_required(true)
-        .arg_required_else_help(true)
-        // Unknown names fall through to plugin discovery (AUD-68).
-        // Built-ins are registered subcommands and therefore always win.
-        .allow_external_subcommands(true)
-        .arg(
-            Arg::new("verbose")
-                .short('v')
-                .long("verbose")
-                .action(ArgAction::Count)
-                .global(true)
-                .help_heading(GLOBAL_OPTIONS)
-                .help("Increase log verbosity (-v info, -vv debug, -vvv trace)")
-                .long_help(
-                    "Increase log verbosity (-v info, -vv debug, -vvv trace).\n\
-                     Verbosity never changes WHAT is logged: credentials appear \
-                     at no level. Explicit flags take precedence over RUST_LOG.",
-                ),
-        )
-        .arg(
-            Arg::new("quiet")
-                .short('q')
-                .long("quiet")
-                .action(ArgAction::SetTrue)
-                .global(true)
-                .help_heading(GLOBAL_OPTIONS)
-                .conflicts_with("verbose")
-                .help("Only log errors"),
-        )
-        .arg(
-            Arg::new("account")
-                .short('a')
-                .long("account")
-                .global(true)
-                .help_heading(GLOBAL_OPTIONS)
-                .value_name("NAME")
-                .help("Account to use (default: AUDIBLE_ACCOUNT, then default_account)"),
-        )
-        .arg(
-            Arg::new("settings")
-                .short('s')
-                .long("settings")
-                .global(true)
-                .help_heading(GLOBAL_OPTIONS)
-                .value_name("NAME")
-                .help("Settings bundle (default: AUDIBLE_SETTINGS, then the account's default_settings, then \"default\")"),
-        )
-        .arg(
-            Arg::new("marketplace")
-                .short('m')
-                .long("marketplace")
-                .global(true)
-                .help_heading(GLOBAL_OPTIONS)
-                .value_name("CC|CSV|all")
-                .help("Marketplace(s): a country code, a comma list, or \"all\" (default: AUDIBLE_MARKETPLACE, then the account's default_marketplaces)"),
-        )
-        .arg(
-            Arg::new("output")
-                .short('o')
-                .long("output")
-                .global(true)
-                .help_heading(GLOBAL_OPTIONS)
-                .value_name("FORMAT")
-                .value_parser(parse_output_format)
-                .help("Output format: table (default), json or plain"),
-        );
-    for command in registry {
-        root = root.subcommand(command.clap());
-    }
-    root
-}
 
 /// Log filter precedence per the config resolution order (§2):
 /// CLI flag → RUST_LOG → default (`warn`).
@@ -127,7 +42,7 @@ fn print_old_command_hint(error: &clap::Error) {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let registry = commands::registry();
-    let matches = match build_cli(&registry).try_get_matches() {
+    let matches = match commands::build_root(&registry).try_get_matches() {
         Ok(matches) => matches,
         Err(error) => {
             print_old_command_hint(&error);

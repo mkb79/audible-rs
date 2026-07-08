@@ -9,6 +9,7 @@ pub mod agent;
 pub mod annotations;
 pub mod api;
 pub mod collections;
+pub mod completions;
 pub mod config;
 pub mod db;
 pub mod download;
@@ -25,12 +26,102 @@ pub mod setup;
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
+use clap::{Arg, ArgAction};
 use secrecy::SecretString;
 
 use crate::auth::authfile::AuthFileError;
 use crate::auth::legacy::LegacyError;
 use crate::auth::{AuthError, Authenticator};
 use crate::config::ctx::Ctx;
+use crate::output::OutputFormat;
+
+/// Help section of the global flags; separates them from
+/// command-specific options in every `--help` output.
+pub(crate) const GLOBAL_OPTIONS: &str = "Global Options";
+
+fn parse_output_format(s: &str) -> Result<OutputFormat, String> {
+    s.parse()
+}
+
+/// Builds the full top-level `audible` clap tree: the root with its global
+/// flags plus every registered subcommand. Used both to parse/dispatch
+/// (`main`) and by the meta-commands that need the whole tree, e.g.
+/// `completions` (AUD-143) and, later, man-page generation.
+pub fn build_root(registry: &[Box<dyn Command>]) -> clap::Command {
+    let mut root = clap::Command::new("audible")
+        .version(env!("CARGO_PKG_VERSION"))
+        .about("Access your Audible library from the command line")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        // Unknown names fall through to plugin discovery (AUD-68).
+        // Built-ins are registered subcommands and therefore always win.
+        .allow_external_subcommands(true)
+        .arg(
+            Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .action(ArgAction::Count)
+                .global(true)
+                .help_heading(GLOBAL_OPTIONS)
+                .help("Increase log verbosity (-v info, -vv debug, -vvv trace)")
+                .long_help(
+                    "Increase log verbosity (-v info, -vv debug, -vvv trace).\n\
+                     Verbosity never changes WHAT is logged: credentials appear \
+                     at no level. Explicit flags take precedence over RUST_LOG.",
+                ),
+        )
+        .arg(
+            Arg::new("quiet")
+                .short('q')
+                .long("quiet")
+                .action(ArgAction::SetTrue)
+                .global(true)
+                .help_heading(GLOBAL_OPTIONS)
+                .conflicts_with("verbose")
+                .help("Only log errors"),
+        )
+        .arg(
+            Arg::new("account")
+                .short('a')
+                .long("account")
+                .global(true)
+                .help_heading(GLOBAL_OPTIONS)
+                .value_name("NAME")
+                .help("Account to use (default: AUDIBLE_ACCOUNT, then default_account)"),
+        )
+        .arg(
+            Arg::new("settings")
+                .short('s')
+                .long("settings")
+                .global(true)
+                .help_heading(GLOBAL_OPTIONS)
+                .value_name("NAME")
+                .help("Settings bundle (default: AUDIBLE_SETTINGS, then the account's default_settings, then \"default\")"),
+        )
+        .arg(
+            Arg::new("marketplace")
+                .short('m')
+                .long("marketplace")
+                .global(true)
+                .help_heading(GLOBAL_OPTIONS)
+                .value_name("CC|CSV|all")
+                .help("Marketplace(s): a country code, a comma list, or \"all\" (default: AUDIBLE_MARKETPLACE, then the account's default_marketplaces)"),
+        )
+        .arg(
+            Arg::new("output")
+                .short('o')
+                .long("output")
+                .global(true)
+                .help_heading(GLOBAL_OPTIONS)
+                .value_name("FORMAT")
+                .value_parser(parse_output_format)
+                .help("Output format: table (default), json or plain"),
+        );
+    for command in registry {
+        root = root.subcommand(command.clap());
+    }
+    root
+}
 
 /// A CLI command: clap definition plus async execution against `&Ctx`.
 #[async_trait::async_trait]
@@ -54,6 +145,7 @@ pub fn registry() -> Vec<Box<dyn Command>> {
         Box::new(annotations::AnnotationsCommand),
         Box::new(api::ApiCommand),
         Box::new(collections::CollectionsCommand),
+        Box::new(completions::CompletionsCommand),
         Box::new(config::ConfigCommand),
         Box::new(db::DbCommand),
         Box::new(download::DownloadCommand),
@@ -156,6 +248,14 @@ pub(crate) fn empty_page_error(page: u32, limit: u32, total: u64) -> anyhow::Err
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_tree_is_valid() {
+        // clap's own consistency check over the whole assembled tree
+        // (duplicate flags, bad headings, …) — cheap insurance for the
+        // registry and every subcommand's clap definition.
+        build_root(&registry()).debug_assert();
+    }
 
     #[test]
     fn page_window_maps_limit_and_page_to_sql() {

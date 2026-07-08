@@ -33,6 +33,7 @@ roxmltree = "0.20"  # read-only DASH MPD parsing (Widevine, AUD-56)
 
 # CLI
 clap = { version = "4.6", features = ["derive"] }
+clap_complete = "4"
 async-trait = "0.1"
 
 # Crypto (digest-0.10 / cipher-0.4 lineup, compatible with rsa 0.9)
