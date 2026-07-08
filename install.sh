@@ -77,6 +77,11 @@ case "$(uname -m)" in
 	arm64|aarch64) arch="aarch64" ;;
 	*) err "unsupported architecture $(uname -m)" ;;
 esac
+# On Apple Silicon `uname -m` reports x86_64 under Rosetta 2 — trust the
+# hardware flag so an arm64 Mac always gets its native binary.
+if [ "$os" = "apple-darwin" ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then
+	arch="aarch64"
+fi
 target="${arch}-${os}"
 
 # --- resolve the version (newest, including pre-releases, when unset) -----

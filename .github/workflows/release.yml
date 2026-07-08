@@ -35,9 +35,12 @@ jobs:
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-22.04-arm
             musl: true
-          # macOS: native per arch (Intel + Apple Silicon M1–M5).
+          # macOS: Apple Silicon builds natively; the Intel target is
+          # cross-compiled on the same arm64 runner because GitHub retired
+          # the free x86_64 macOS runners (x86_64-apple-darwin is Tier 2
+          # with host tools since Rust 1.90 — still distributed via rustup).
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-14
           - target: aarch64-apple-darwin
             runner: macos-14
     steps:
