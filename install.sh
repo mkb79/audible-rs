@@ -8,6 +8,13 @@
 # Options (flag or environment variable):
 #   --version <tag>   AUDIBLE_VERSION      release to install (default: newest, incl. pre-releases)
 #   --bin-dir <dir>   AUDIBLE_INSTALL_DIR  install location (default: ~/.local/bin)
+#   --force           AUDIBLE_FORCE=1      replace an existing non-audible-rs 'audible' without asking
+#
+# audible-rs is the successor to audible-cli and shares the command name
+# 'audible'. Installing over an existing audible-cli replaces the command
+# (the config directories are separate, so audible-cli's data is untouched);
+# the installer asks first unless --force is given. Replacing an older
+# audible-rs is treated as an upgrade and proceeds silently.
 #
 # Integrity: the download is verified against the release's SHA256SUMS over
 # HTTPS. (Cryptographic signatures are a planned addition — see AUD-141.)
@@ -19,12 +26,14 @@ BIN="audible"
 
 VERSION="${AUDIBLE_VERSION:-}"
 INSTALL_DIR="${AUDIBLE_INSTALL_DIR:-${HOME}/.local/bin}"
+FORCE="${AUDIBLE_FORCE:-0}"
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--version) VERSION="${2:?--version needs a value}"; shift 2 ;;
 		--bin-dir) INSTALL_DIR="${2:?--bin-dir needs a value}"; shift 2 ;;
-		-h|--help) grep '^#' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' | head -n 14; exit 0 ;;
+		--force) FORCE=1; shift ;;
+		-h|--help) grep '^#' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' | head -n 20; exit 0 ;;
 		*) echo "unknown option: $1" >&2; exit 1 ;;
 	esac
 done
@@ -32,6 +41,18 @@ done
 err() { echo "error: $*" >&2; exit 1; }
 info() { echo "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Ask (via the terminal, so it works under `curl | sh`) before replacing a
+# non-audible-rs command; --force skips it, a non-interactive run refuses.
+confirm_replace() {
+	[ "$FORCE" = 1 ] && return 0
+	if [ -r /dev/tty ]; then
+		printf 'replace it? [y/N] ' > /dev/tty
+		read -r ans < /dev/tty 2>/dev/null || ans=""
+		case "$ans" in y|Y|yes|Yes) return 0 ;; esac
+	fi
+	return 1
+}
 
 # --- downloader -----------------------------------------------------------
 if have curl; then
@@ -70,7 +91,36 @@ num="${VERSION#v}"
 archive="${BIN}-${num}-${target}.tar.gz"
 base="https://github.com/${REPO}/releases/download/${VERSION}"
 
+dest="${INSTALL_DIR}/${BIN}"
 info "installing ${BIN} ${VERSION} (${target}) into ${INSTALL_DIR}"
+
+# --- guard: distinguish an audible-rs upgrade from replacing audible-cli --
+if [ -e "$dest" ]; then
+	if head -n 1 "$dest" 2>/dev/null | grep -q '^#!'; then
+		# a text script with a shebang: audible-cli (Python) or a local wrapper
+		if head -n 8 "$dest" 2>/dev/null | grep -qiE 'python|audible[_-]cli'; then
+			info "warning: ${dest} looks like audible-cli (the Python tool)."
+			info "audible-rs uses the same 'audible' command (it is the successor) — this REPLACES it."
+			info "The config directories are separate, so audible-cli's data is untouched."
+		else
+			info "warning: a different '${BIN}' script already exists at ${dest}."
+		fi
+		confirm_replace || err "aborted — re-run with --force, or --bin-dir <dir> to install elsewhere"
+	else
+		# a compiled binary: our own audible-rs (→ upgrade) or something else
+		old="$("$dest" --version 2>/dev/null | awk 'NR==1 && $1=="audible" {print $2}')"
+		if [ -n "$old" ]; then
+			if [ "$old" = "$num" ]; then
+				info "audible-rs ${num} is already installed — reinstalling"
+			else
+				info "upgrading audible-rs ${old} → ${num}"
+			fi
+		else
+			info "warning: a different '${BIN}' binary already exists at ${dest}."
+			confirm_replace || err "aborted — re-run with --force, or --bin-dir <dir> to install elsewhere"
+		fi
+	fi
+fi
 
 # --- download to a temp dir ----------------------------------------------
 tmp="$(mktemp -d)"
@@ -99,13 +149,13 @@ stage="${BIN}-${num}-${target}"
 [ -f "${tmp}/${stage}/${BIN}" ] || err "unexpected archive layout (${stage}/${BIN} missing)"
 mkdir -p "$INSTALL_DIR"
 if have install; then
-	install -m 0755 "${tmp}/${stage}/${BIN}" "${INSTALL_DIR}/${BIN}"
+	install -m 0755 "${tmp}/${stage}/${BIN}" "$dest"
 else
-	cp "${tmp}/${stage}/${BIN}" "${INSTALL_DIR}/${BIN}" && chmod 0755 "${INSTALL_DIR}/${BIN}"
+	cp "${tmp}/${stage}/${BIN}" "$dest" && chmod 0755 "$dest"
 fi
-info "installed ${INSTALL_DIR}/${BIN}"
+info "installed ${dest}"
 
-# --- PATH hint ------------------------------------------------------------
+# --- PATH hints -----------------------------------------------------------
 case ":${PATH}:" in
 	*":${INSTALL_DIR}:"*) : ;;
 	*)
@@ -114,6 +164,13 @@ case ":${PATH}:" in
 		info "  export PATH=\"${INSTALL_DIR}:\$PATH\""
 		;;
 esac
+# Another 'audible' earlier on PATH would shadow the one just installed.
+resolved="$(command -v "$BIN" 2>/dev/null || true)"
+if [ -n "$resolved" ] && [ "$resolved" != "$dest" ]; then
+	info ""
+	info "note: '${resolved}' comes earlier on your PATH and will run instead of ${dest}."
+	info "put ${INSTALL_DIR} before it in PATH to use the newly installed binary."
+fi
 
 # --- optional decrypt tools ----------------------------------------------
 info ""

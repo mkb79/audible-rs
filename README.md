@@ -51,6 +51,12 @@ It installs `audible` into `~/.local/bin` (override with `--bin-dir <dir>`)
 and verifies the download against the release checksums. During the
 pre-alpha phase it installs the newest pre-release.
 
+audible-rs is the successor to `audible-cli` and shares the command name
+`audible`. If you already have `audible-cli` installed, the installer asks
+before replacing its command (pass `--force` to skip, or `--bin-dir` to
+install elsewhere); the config directories are separate, so `audible-cli`'s
+data is left untouched. Replacing an older audible-rs is a silent upgrade.
+
 ### Manual download
 
 Grab the archive for your target from the
