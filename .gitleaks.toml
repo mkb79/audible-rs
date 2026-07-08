@@ -1,0 +1,18 @@
+# gitleaks configuration for audible-rs.
+#
+# The test fixtures are synthetic BY CONSTRUCTION: scripts/gen_fixtures.py
+# generates a throwaway RSA-2048 keypair and invented tokens at run time
+# (see the script header — it never reads real credentials). gitleaks
+# still flags the committed fixture keys as private-key/generic-api-key
+# on every history scan; allowlist exactly those paths so real findings
+# stand out. Everything else stays under the default rules.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic test fixtures and their generator (throwaway keys only)"
+paths = [
+  '''tests/fixtures/.*''',
+  '''scripts/gen_fixtures\.py''',
+]

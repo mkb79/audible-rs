@@ -1,0 +1,30 @@
+{
+    "website_cookies": {
+        "session-id": "000-0000000-0000000",
+        "ubid-acbde": "000-0000000-0000000",
+        "x-acbde": "\"synthetic-cookie-value\""
+    },
+    "adp_token": "{enc:c3ludGhldGljIGFkcCB0b2tlbiBlbmMgcGF5bG9hZCBzeW50aGV0aWMgYWRwIHRva2VuIGVuYyBwYXlsb2FkIHN5bnRoZXRpYyBhZHAgdG9rZW4gZW5jIHBheWxvYWQgc3ludGhldGljIGFkcCB0b2tlbiBlbmMgcGF5bG9hZCBzeW50aGV0aWMgYWRwIHRva2VuIGVuYyBwYXlsb2FkIHN5bnRoZXRpYyBhZHAgdG9rZW4gZW5jIHBheWxvYWQgc3ludGhldGljIGFkcCB0b2tlbiBlbmMgcGF5bG9hZCBzeW50aGV0aWMgYWRwIHRva2VuIGVuYyBwYXlsb2FkIA==}{key:c3ludGhldGljIGFkcCB0b2tlbiBrZXkgcGF5bG9hZCBzeW50aGV0aWMgYWRwIHRva2VuIGtleSBwYXlsb2FkIHN5bnRoZXRpYyBhZHAgdG9rZW4ga2V5IHBheWxvYWQgc3ludGhldGljIGFkcCB0b2tlbiBrZXkgcGF5bG9hZCA=}{iv:c3ludGhldGljIGl2IHBheWxvYWQ=}{name:QURQVG9rZW4gdGhyb3dhd2F5IGZpeHR1cmUgLSBub3QgYSByZWFsIHRva2Vu}{serial:Mg==}",
+    "access_token": "Atna|SyntheticAccessTokenForFixturesOnly0123456789",
+    "refresh_token": "Atnr|SyntheticRefreshTokenForFixturesOnly0123456789",
+    "device_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIEqAIBAAKCAQEAxmogPxkp3Q0kpEFYmA+Qak0Z3OHNGqpFJ3Ub9o43fOp1qt77\nFicHk3R5xiU3yoaXb2kfuULYM7Hd5KhEqwdsn5ShwWWUJ3r7NMCcs39PzNPuQnXs\nWbfqUAVA+n7Maxr4w3Mw0omeAhpxwFxi7z/VaJIQ4A+CGSpG2DHXpJdQMTDEMUbV\ntbCmrzAAHwPFIoIG3nDkvIIZ3PidK9+UX8nNOtS1dQznmYuWjo4om6qMcDJtPZoB\nvJMTMaesKfPMWWdFa3LUU9iBYycOYZBa2rIKF18izgDRTOswzA4TFhNo0gQaQO+q\nhF1vlaqa5BjP5KOHMqusPVq7fPQwaSUbpkIfAwIDAQABAoIBABk+U0/z0aGwFGNZ\ndP4TrNn5aTry93dXBmlYuvAJdAHOip3stKFC4fHetceB4LFBom6oP0MAwCUDkimP\nRv1DeoxrCpFibREA0okJoGYt4mc652tJOYLIpWT85iF4lGVkDxY+x41huNqnpqVE\nm8m4o1wkiUUYdALjn/fEtLbFslcKE4VYvM+Q2zJK8+PEHnukS7HejXDxy10gXk7s\nIXEBxxKvmDPPiKo+N9Og/s8JvVAFOVuIq7nQaDs8kod0KvcAk15zcHriPSanegpY\ng7UxE1FkYJUl5LCnHysOT5jCaoRlBUFBMiqVlkK3U7MAeRPHUTeUBhvDWwkF3NEZ\n0VtIajECgYkA3Fl+3c75V45kik6RK/esilw1HlQvpj6mXX9xmQNdcjf25kmLqB4/\nvPL7vXrjGspTxwQE3+57y70gyJWZMLlRok5bnaNxuWewpXX/VvoZkrNZ7+2qU21f\nMmFIrwOxDkqPvH4iocQjCN2W7af9QrO9+yzSSjTkLcU3Q+hqspq9dY2pogerkWvU\n5QJ5AOaEHlgyMyqmn7Mk7GBUrLXcBgSNkHS3DJFhMD2R+wNFDmBezfSMIu/x3Ezz\nfge/XDwXv0JXNjXp6VUay8ia/8bD7G4AfM4jmoQV4h8G3grOEM5uHmcexK6ZPRlF\nnE4cr4E1pbx+9Q9n+eaDMO4VWfamfrLDISANxwKBiGOErA7DrsuDjRcGGvzPlIa8\n1GTJQugDfaHWsFiaM3clnYYuizu3xbOxzk6qlK2B2cqVnxoAHLtMxOSy5AgkeqEi\nYLBWpENHeHmSTGtc83XVOPZq0bVyPT+Evo4Ezc+Vj0tjcIK9EdGsOsFFUNXyVgh+\nGs/XCYM+ghJSgvX9ezn/bDC45Bz+pZ0CeATF5Y7z8yVF7/aYpCBWgID/fkxn1f7k\nr2jvNz1/IVBvBJ4wOFmA8VRAkMwzGn/0kWdZIoewIJo7Lq6pcGDF/NfTxLh+YBcw\nm4lynoz/6mcU3zo3A4AlHfNzjtVQIK1pYKTvRHBDvLVF9OG2A7RaUtONnP/8lFoC\njwKBiAw8IaOtEC36pXRFQWq7ohNu50r/L3x4oYBbcBXnLm3x3sbkhKM6jz1jxZdK\nxvnNl13yGB1HbazB/rFoESnQS1i2OyWl+GQZgPwdgePAcTrwLXPzSsJY2/uf4F2T\nw5NycCxxiIzH7HdvY3ULsA7Xp2RoKMDQ/DfY25xGYw5Mp0p08FrEWRx45II=\n-----END RSA PRIVATE KEY-----\n",
+    "store_authentication_cookie": {
+        "cookie": "synthetic|store|authentication|cookie"
+    },
+    "device_info": {
+        "device_name": "Synthetic Fixture Device",
+        "device_serial_number": "0123456789ABCDEF",
+        "device_type": "A2CZJZGLK2JJVM"
+    },
+    "customer_info": {
+        "account_pool": "Amazon",
+        "user_id": "amzn1.account.SYNTHETICFIXTUREUSER",
+        "home_region": "EU",
+        "name": "Fixture User",
+        "given_name": "Fixture"
+    },
+    "expires": 1767312000.0,
+    "locale_code": "de",
+    "with_username": false,
+    "activation_bytes": null
+}

@@ -1,0 +1,12 @@
+{
+  "_comment": "Metadata for the synthetic legacy auth-file fixtures.",
+  "generator": "audible==0.10.0",
+  "password": "fixture-password-1234",
+  "files": {
+    "plain": "legacy_plain.json",
+    "encrypted_json": "legacy_encrypted_json.json",
+    "encrypted_bytes": "legacy_encrypted_bytes.bin"
+  },
+  "kdf": "PBKDF2-HMAC-SHA256, iterations packed into the salt header",
+  "cipher": "AES-256-CBC, PKCS#7 padding"
+}

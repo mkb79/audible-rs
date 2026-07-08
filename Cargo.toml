@@ -1,0 +1,109 @@
+[package]
+name = "audible-rs"
+version = "0.1.0-alpha"
+edition = "2024"
+authors = ["mkb79 <mkb79@hackitall.de>"]
+license = "MIT"
+description = "CLI and library for Audible, a Rust reimplementation of mkb79/Audible and mkb79/audible-cli"
+repository = "https://github.com/mkb79/audible-rs"
+publish = false
+
+[[bin]]
+name = "audible"
+path = "src/main.rs"
+
+[lib]
+name = "audible_rs"
+path = "src/lib.rs"
+
+[dependencies]
+# Async runtime & HTTP
+tokio = { version = "1.52", features = ["full"] }
+futures = "0.3"
+reqwest = { version = "0.13", features = ["json", "form", "cookies", "stream", "gzip", "brotli", "deflate"] }
+# `account login server` reverse proxy (AUD-60). The hyper stack is already in
+# the tree via reqwest, so these are near-free; qrcode without `image` stays tiny.
+hyper = { version = "1.10", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+regex = "1.12"
+qrcode = { version = "0.14", default-features = false }
+url = "2.5"
+roxmltree = "0.20"  # read-only DASH MPD parsing (Widevine, AUD-56)
+
+# CLI
+clap = { version = "4.6", features = ["derive"] }
+async-trait = "0.1"
+
+# Crypto (digest-0.10 / cipher-0.4 lineup, compatible with rsa 0.9)
+rsa = { version = "0.9", features = ["sha2"] }
+sha2 = "0.10"
+argon2 = { version = "0.5", features = ["std"] }
+chacha20poly1305 = "0.10"
+pbkdf2 = "0.12"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+sha1 = "0.10"
+cmac = "0.7"
+hmac = "0.12"
+
+# Widevine license protocol (AUD-56): prost is the small runtime lib linked
+# into the binary; the codegen (protox/prost-build) is build-time only.
+prost = "0.13"
+
+# Secret handling
+secrecy = { version = "0.10", features = ["serde"] }
+zeroize = "1.8"
+
+# Auth helpers
+totp-rs = "5.7"
+scraper = "0.27"
+
+# Config & serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.1"
+toml_edit = "0.25"
+
+# Filename slugging (NFKD transliteration for the ascii download mode)
+unicode-normalization = "0.1"
+
+# Database (the engine of the library commands; non-optional)
+rusqlite = { version = "0.40", features = ["bundled"] }
+fd-lock = "4.0"
+
+# Output & interactive prompts
+indicatif = "0.18"
+console = "0.16"
+comfy-table = "7.2"
+dialoguer = { version = "0.12", features = ["editor"] }
+
+# Errors & logging
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Encoding & misc
+base64 = "0.22"
+hex = "0.4"
+rand = "0.10"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+# Session agent (M5): SIGTERM to the daemon PID, detached process group.
+libc = "0.2"
+
+# Build-time only (Widevine proto codegen, pure Rust — no protoc needed).
+# Not linked into the release binary.
+[build-dependencies]
+prost-build = "0.13"
+protox = "0.7"
+
+[dev-dependencies]
+insta = "1.47"
+tempfile = "3"
+wiremock = "0.6"
+
+# Argon2id with production parameters (64 MiB) is unusably slow in
+# unoptimized test builds.
+[profile.dev.package.argon2]
+opt-level = 3

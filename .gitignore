@@ -1,0 +1,35 @@
+# Build artifacts
+/target
+
+# Never commit real auth material (synthetic fixtures live in tests/fixtures/)
+*.auth
+*.authfile
+credentials*
+
+# Python virtualenv used by scripts/gen_fixtures.py
+/scripts/.venv
+
+# Project-local MCP server config (Linear); kept out of the public repo
+/.mcp.json
+
+# Personal `audible api` request-file templates (kept locally for later use)
+/requests/
+
+# Login page dumps (AUDIBLE_LOGIN_DUMP_DIR) — contain session form tokens
+/dumps/
+
+# Widevine device blobs (CDMs) — sensitive, never commit
+*.wvd
+
+# Local research snapshots (e.g. AYCL DRM before/after item docs) — account-bound
+# library metadata kept locally for comparison, not for the public repo
+/research/
+__pycache__/
+
+# Local-only working files, kept out of the public repo (they live on disk
+# for local development but are never committed here). Note: only the frozen
+# docs/archive/ is ignored — future public documentation under docs/ is
+# tracked normally.
+/CLAUDE.md
+/.claude/
+/docs/archive/
