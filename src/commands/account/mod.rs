@@ -24,6 +24,7 @@ mod login;
 mod manage;
 mod material;
 mod password;
+mod status;
 
 use login::{LoginArgs, ServerArgs, login, login_server};
 use manage::{
@@ -35,6 +36,7 @@ use material::{
     token_refresh, token_remove, token_status, widevine_fetch, widevine_set,
 };
 use password::{password_remove, password_set, password_source};
+use status::status;
 
 /// `audible account`.
 pub struct AccountCommand;
@@ -108,6 +110,16 @@ impl super::Command for AccountCommand {
             ))
             .subcommand(clap::Command::new("list").about("List accounts"))
             .subcommand(
+                clap::Command::new("status")
+                    .about("Show the account's membership status")
+                    .long_about(
+                        "Show the Audible membership status for the selected \
+                         marketplace(s): plan, whether it renews or was cancelled, the \
+                         next-bill / end date, member-since date and account segment. \
+                         Read-only; one row per marketplace.",
+                    ),
+            )
+            .subcommand(
                 // about/long_about set AFTER augment_args so the ExportArgs
                 // struct doc comment does not override them.
                 ExportArgs::augment_args(clap::Command::new("export"))
@@ -137,6 +149,26 @@ impl super::Command for AccountCommand {
                     ),
             )
             .subcommand(
+                clap::Command::new("rename")
+                    .about(
+                        "Rename an account in the config (repoints default_account; \
+                         the auth file is left in place)",
+                    )
+                    .arg(
+                        clap::Arg::new("old")
+                            .required(true)
+                            .value_name("OLD")
+                            .help("Current account name"),
+                    )
+                    .arg(
+                        clap::Arg::new("new")
+                            .required(true)
+                            .value_name("NEW")
+                            .help("New account name"),
+                    ),
+            )
+            // Session-agent pair, after the config-editing commands.
+            .subcommand(
                 clap::Command::new("unlock")
                     .about("Unlock an account into the running session agent (uses -a/--account)")
                     .long_about(
@@ -154,25 +186,6 @@ impl super::Command for AccountCommand {
                             .long("all")
                             .action(clap::ArgAction::SetTrue)
                             .help("Lock every account, not just the selected one"),
-                    ),
-            )
-            .subcommand(
-                clap::Command::new("rename")
-                    .about(
-                        "Rename an account in the config (repoints default_account; \
-                         the auth file is left in place)",
-                    )
-                    .arg(
-                        clap::Arg::new("old")
-                            .required(true)
-                            .value_name("OLD")
-                            .help("Current account name"),
-                    )
-                    .arg(
-                        clap::Arg::new("new")
-                            .required(true)
-                            .value_name("NEW")
-                            .help("New account name"),
                     ),
             )
             .subcommand(
@@ -402,6 +415,7 @@ impl super::Command for AccountCommand {
             },
             Some(("logout", sub)) => logout(ctx, LogoutArgs::from_arg_matches(sub)?).await,
             Some(("list", _)) => list(ctx),
+            Some(("status", _)) => status(ctx).await,
             Some(("export", sub)) => export(ctx, ExportArgs::from_arg_matches(sub)?).await,
             Some(("remove", sub)) => remove(ctx, RemoveArgs::from_arg_matches(sub)?),
             Some(("set-default", sub)) => set_default(ctx, &name(sub)),
