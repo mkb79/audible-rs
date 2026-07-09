@@ -1,0 +1,47 @@
+name: Update changelog
+
+# On-demand refresh of the committed CHANGELOG.md (AUD-145): regenerates the
+# file from the commit history — including the current [Unreleased] section —
+# and commits it to main when it changed. Run it from the Actions tab
+# whenever you want [Unreleased] visible on GitHub between releases; the
+# release workflow keeps the file current at release time anyway.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    name: regenerate CHANGELOG.md
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Regenerate CHANGELOG.md (including [Unreleased])
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --verbose
+        env:
+          OUTPUT: CHANGELOG.md
+
+      # The chore commit is filtered out of the changelog itself, and a push
+      # made with GITHUB_TOKEN triggers no further workflows.
+      - name: Commit when changed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "CHANGELOG.md is already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "chore: update changelog"
+          git push origin main

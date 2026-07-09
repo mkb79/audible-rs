@@ -1,16 +1,23 @@
 name: Release
 
-# Builds the release binaries and attaches them to a GitHub pre-release.
-# Trigger by pushing a tag (`v0.1.0-alpha`, …) or manually via the Actions
-# tab (workflow_dispatch, giving the tag to build).
+# One-button releases (AUD-145): trigger via the Actions tab
+# (workflow_dispatch) with the version to release — with or without the
+# leading `v`. The prepare job validates it (SemVer, newer than the latest
+# tag), bumps Cargo.toml/Cargo.lock, regenerates CHANGELOG.md for the new
+# version, commits everything as `release: vX.Y.Z` on main, and tags exactly
+# that commit. The build/publish jobs then run in the SAME workflow run —
+# necessary because a tag pushed with GITHUB_TOKEN would not trigger any
+# other workflow.
+#
+# Pushing a `v*` tag by hand still works as a fallback and skips prepare.
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Tag to build and release (e.g. v0.1.0-alpha)'
+      version:
+        description: 'Version to release, with or without the leading v (e.g. 0.1.1 or v0.1.0-alpha.2)'
         required: true
 
 permissions:
@@ -21,8 +28,93 @@ env:
   BIN: audible
 
 jobs:
+  prepare:
+    name: prepare release
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      # Releases always cut from main; full history + tags for the version
+      # check and the changelog.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Validate the version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${{ github.event.inputs.version }}"
+          version="${raw#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'${raw}' is not a SemVer version (expected X.Y.Z or X.Y.Z-prerelease)"
+            exit 1
+          fi
+          tag="v${version}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "::error::tag ${tag} already exists"
+            exit 1
+          fi
+          # Newest existing version in SemVer order — via the semver
+          # reference implementation (sort -V would mis-order prereleases).
+          last="$(git tag -l 'v[0-9]*' | sed 's/^v//' | xargs -r npx --yes semver@7 | tail -n 1)"
+          if [ -n "$last" ] && ! npx --yes semver@7 "$version" -r ">${last}" >/dev/null; then
+            echo "::error::${version} is not newer than the latest release ${last} (SemVer: a prerelease sorts BEFORE its release, and prerelease identifiers compare numerically only when dot-separated — use alpha.2, not a2)"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      # Keep Cargo.lock in sync — the release builds use --locked.
+      - name: Bump the version in Cargo.toml and Cargo.lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="${{ steps.ver.outputs.version }}"
+          awk -v v="$v" 'BEGIN{done=0} !done && /^version = / {print "version = \"" v "\""; done=1; next} {print}' \
+            Cargo.toml > Cargo.toml.new && mv Cargo.toml.new Cargo.toml
+          awk -v v="$v" '/^name = "audible-rs"$/{f=1} f && /^version = /{print "version = \"" v "\""; f=0; next} {print}' \
+            Cargo.lock > Cargo.lock.new && mv Cargo.lock.new Cargo.lock
+          grep -q "^version = \"$v\"$" Cargo.toml
+          grep -A1 '^name = "audible-rs"$' Cargo.lock | grep -q "version = \"$v\""
+
+      # --tag renders the upcoming section as [X.Y.Z] instead of [Unreleased]
+      # (the tag itself is created two steps below).
+      - name: Regenerate CHANGELOG.md
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --tag ${{ steps.ver.outputs.tag }}
+        env:
+          OUTPUT: CHANGELOG.md
+
+      # `release: vX.Y.Z` is filtered out of the changelog (cliff.toml); the
+      # tag points at exactly this commit. --atomic: main and the tag land
+      # together or not at all (a concurrent push to main fails the job
+      # cleanly instead of tagging a half-done state).
+      - name: Commit and tag the release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ver.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "release: ${tag}"
+          git tag "$tag"
+          git push --atomic origin main "refs/tags/${tag}"
+
   build:
     name: build ${{ matrix.target }}
+    # Tag push: prepare is skipped, build the pushed tag. Dispatch: build the
+    # tag that prepare just created (always() lets us run after a skip).
+    needs: prepare
+    if: always() && (github.event_name == 'push' || needs.prepare.result == 'success')
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -46,7 +138,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.prepare.outputs.tag || github.ref }}
 
       # musl needs a C toolchain (bundled SQLite) + cmake (aws-lc-sys builds
       # from source for musl — no prebuilt bindings). musl-gcc is used ONLY as
@@ -75,7 +167,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          tag="${{ needs.prepare.outputs.tag || github.ref_name }}"
           version="${tag#v}"
           stage="${BIN}-${version}-${{ matrix.target }}"
           mkdir "$stage"
@@ -91,11 +183,21 @@ jobs:
 
   release:
     name: publish release
-    needs: build
+    # prepare is in needs only to expose its tag output; on a tag push it is
+    # skipped, so gate on build alone.
+    needs: [prepare, build]
+    if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      # Full history: git-cliff derives the release notes from the commits
+      # and tags (AUD-145).
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag || github.ref }}
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -109,7 +211,7 @@ jobs:
         id: rel
         shell: bash
         run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          tag="${{ needs.prepare.outputs.tag || github.ref_name }}"
           # SemVer marks a pre-release with a hyphen suffix (v1.2.3-alpha,
           # -beta, -rc.1, …); a bare vX.Y.Z is a full release.
           if [[ "$tag" == *-* ]]; then
@@ -118,13 +220,23 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Release body = the tag's section from the generated changelog, so the
+      # GitHub release and CHANGELOG.md always say the same thing (AUD-145).
+      - name: Generate release notes
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: RELEASE_NOTES.md
+
       # Signature verification (minisign) is added later — see AUD-141.
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.prepare.outputs.tag || github.ref_name }}
           prerelease: ${{ steps.rel.outputs.prerelease }}
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz
