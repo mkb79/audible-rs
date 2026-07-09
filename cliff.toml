@@ -2,13 +2,16 @@
 # release bodies from the Conventional-Commit history (squash-merge keeps one
 # commit per issue on main, so the history is the changelog source).
 #
-#   git cliff --unreleased                    # preview the [Unreleased] section
-#   git cliff --tag vX.Y.Z -o CHANGELOG.md    # before tagging a release: regenerate with the
-#                                             # upcoming tag, so [Unreleased] becomes [X.Y.Z]
-#   git cliff --latest                        # the newest release's section — what CI publishes
-#                                             # as the release body (at that point the tag exists,
-#                                             # so the former [Unreleased] content IS --latest;
-#                                             # --unreleased would be empty on a tagged HEAD)
+# Nothing here is maintained by hand:
+#   - Releases run via the "Release" workflow_dispatch: its prepare job bumps
+#     Cargo, regenerates CHANGELOG.md with `--tag vX.Y.Z` (so [Unreleased]
+#     becomes the [X.Y.Z] section), commits `release: vX.Y.Z`, tags exactly
+#     that commit, and publishes the tag's section (`--latest`) as the GitHub
+#     release body. On a tagged HEAD, --latest IS the former [Unreleased]
+#     content — --unreleased would be empty there.
+#   - The "Update changelog" workflow_dispatch refreshes the committed file
+#     (including [Unreleased]) between releases, on demand.
+#   - Locally, `git cliff --unreleased` previews the upcoming section.
 #
 # Content policy: the changelog is for USERS, not developers. Inclusion is
 # decided by commit TYPE (intent), not by path — feat/fix/perf/security are
@@ -77,6 +80,8 @@ commit_parsers = [
   { message = "^fix", group = "<!-- 1 -->Fixed" },
   { message = "^perf", group = "<!-- 2 -->Performance" },
   { message = "^revert", group = "<!-- 4 -->Reverted" },
+  # The release workflow's own bump commit (`release: vX.Y.Z`) — never an entry.
+  { message = "^release", skip = true },
   # Everything else — developer-facing types (ci, chore, docs, style, test,
   # refactor, build) and stray prefixes like the initial snapshot commit —
   # is not user-visible and stays out.
