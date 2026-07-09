@@ -131,10 +131,11 @@ pub(super) async fn list_missing(
     Ok(())
 }
 
-/// `library list --leaving` — subscription (Plus/AYCL) titles with a
-/// defined access-end date, soonest first (AUD-153). Purchased titles are
-/// permanent and never listed; the `2099` sentinel ("no real end") is
-/// excluded. Reuses `--limit`/`--page`.
+/// `library list --leaving` — titles whose consumption right ends on a set
+/// date (`customer_rights.is_consumable_until`), soonest first (AUD-153) —
+/// the ones that will leave the library. Permanent titles have no such date
+/// (or the `2099` sentinel) and are never listed. Does not depend on the
+/// unstable `is_ayce` flag. Reuses `--limit`/`--page`.
 pub(super) async fn list_leaving(ctx: &Ctx, limit: u32, page: u32) -> Result<()> {
     let db = ctx.open_library_db().await?;
     maybe_auto_sync(ctx, &db).await?;
@@ -152,7 +153,7 @@ pub(super) async fn list_leaving(ctx: &Ctx, limit: u32, page: u32) -> Result<()>
             let total = db.count_books_leaving(marketplaces).await?;
             return Err(crate::commands::empty_page_error(page, limit, total));
         }
-        eprintln!("no subscription titles with a known expiry (owned titles are permanent)");
+        eprintln!("no titles with a known access-end date (permanent titles are not shown)");
         return Ok(());
     }
     ctx.print(&crate::output::Output::table(

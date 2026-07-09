@@ -114,9 +114,9 @@ impl super::Command for LibraryCommand {
                             .conflicts_with("missing")
                             .help_heading("Selection")
                             .help(
-                                "Only subscription (Plus/AYCL) titles with a known \
-                                 expiry, soonest first — the ones leaving your library; \
-                                 owned titles are permanent and never shown",
+                                "Only titles whose access ends on a set date, soonest \
+                                 first — the ones leaving your library; titles you keep \
+                                 permanently are never shown",
                             ),
                     )
                     .arg(

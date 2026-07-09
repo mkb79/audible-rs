@@ -746,12 +746,17 @@ impl Db {
         .await
     }
 
-    /// Subscription (Plus/AYCL) items with a defined access-end date
+    /// Items whose consumption right ends on a set date
     /// (`customer_rights.is_consumable_until`), soonest first — the titles
-    /// that will leave the library, unlike purchased ones which are permanent
-    /// (`library list --leaving`, AUD-153). Purchased items lack the field
-    /// (`is_ayce = false`); the `2099-…` sentinel ("no real end") is excluded.
-    /// The date is returned as `YYYY-MM-DD`.
+    /// that will leave the library (`library list --leaving`, AUD-153).
+    /// Permanent titles (owned outright, or subscription titles you keep
+    /// indefinitely) have no such date, or the `2099-…` sentinel ("no real
+    /// end"), and are excluded. This deliberately does NOT filter on
+    /// `is_ayce`: that flag reflects current Plus-catalog membership, not how
+    /// a title was acquired, and is unstable (it flips between API calls and
+    /// is `true` even for purchased titles that are also in Plus). The
+    /// access-end date is the reliable "will leave" signal. Date returned as
+    /// `YYYY-MM-DD`.
     pub async fn books_leaving(
         &self,
         marketplaces: Vec<String>,
@@ -769,7 +774,6 @@ impl Db {
                  FROM items
                  WHERE is_deleted = 0
                    AND marketplace IN ({})
-                   AND json_extract(doc, '$.is_ayce') = 1
                    AND json_extract(doc, '$.customer_rights.is_consumable_until') IS NOT NULL
                    AND json_extract(doc, '$.customer_rights.is_consumable_until') < '2099'
                  ORDER BY 4 ASC, asin, marketplace
@@ -808,7 +812,6 @@ impl Db {
                 "SELECT COUNT(*) FROM items
                  WHERE is_deleted = 0
                    AND marketplace IN ({})
-                   AND json_extract(doc, '$.is_ayce') = 1
                    AND json_extract(doc, '$.customer_rights.is_consumable_until') IS NOT NULL
                    AND json_extract(doc, '$.customer_rights.is_consumable_until') < '2099'",
                 in_placeholders(marketplaces.len())
@@ -1178,17 +1181,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn books_leaving_lists_only_expiring_subscription_titles_soonest_first() {
+    async fn books_leaving_lists_titles_with_an_ending_right_soonest_first() {
         let (_dir, db) = open_temp().await;
         db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
         db.apply_page(
             MP.into(),
             vec![
-                leaving_item("A_FAR", true, Some("2031-12-31T22:00:00Z")),
+                // A real end date shows regardless of the (unstable) is_ayce
+                // flag — A_FAR carries is_ayce=false and must still appear.
+                leaving_item("A_FAR", false, Some("2031-12-31T22:00:00Z")),
                 leaving_item("A_SOON", true, Some("2026-08-01T00:00:00Z")),
+                // Excluded: the 2099 sentinel ("no real end") …
                 leaving_item("A_SENTINEL", true, Some("2099-12-31T00:00:00Z")),
-                leaving_item("A_AYCL_NODATE", true, None),
-                leaving_item("A_OWNED", false, Some("2026-08-01T00:00:00Z")),
+                // … and a permanent title with no end date at all.
+                leaving_item("A_PERMANENT", true, None),
             ],
             vec![],
             default_log(),
@@ -1202,8 +1208,8 @@ mod tests {
             .await
             .unwrap();
         let asins: Vec<&str> = rows.iter().map(|row| row.asin.as_str()).collect();
-        // Only AYCL titles with a real (non-2099) date, soonest first. Owned
-        // (is_ayce=false), the 2099 sentinel, and the dateless AYCL are excluded.
+        // Only titles with a real (non-2099) access-end date, soonest first;
+        // is_ayce is irrelevant. Sentinel and dateless titles are excluded.
         assert_eq!(asins, vec!["A_SOON", "A_FAR"]);
         assert_eq!(rows[0].leaving, "2026-08-01"); // date only, no time part
         assert_eq!(
