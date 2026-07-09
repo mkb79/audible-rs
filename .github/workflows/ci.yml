@@ -10,6 +10,15 @@ on:
 permissions:
   contents: read
 
+# Rapid successive pushes to a PR branch supersede the running checks —
+# cancel them and test only the newest state. Never cancel on main: every
+# merge commit gets its full run (a squash merge produces a commit that was
+# never tested as-merged, especially with back-to-back merges), and direct
+# pushes to main stay fully tested (AUD-150).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
 
