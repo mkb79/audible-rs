@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: the CI jobs only need to read the checkout (CodeQL
+# actions/missing-workflow-permissions, AUD-149).
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
