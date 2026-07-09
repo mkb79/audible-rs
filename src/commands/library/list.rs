@@ -131,11 +131,12 @@ pub(super) async fn list_missing(
     Ok(())
 }
 
-/// `library list --leaving` — titles whose consumption right ends on a set
-/// date (`customer_rights.is_consumable_until`), soonest first (AUD-153) —
-/// the ones that will leave the library. Permanent titles have no such date
-/// (or the `2099` sentinel) and are never listed. Does not depend on the
-/// unstable `is_ayce` flag. Reuses `--limit`/`--page`.
+/// `library list --leaving` — unpurchased (subscription) titles whose
+/// consumption right ends on a set date, soonest first (AUD-153) — the ones
+/// that will leave the library. Purchased titles (`origin_type = Purchase`,
+/// kept permanently) are never listed, nor are titles without a real end
+/// date (the `2099` sentinel). Uses `origin_type`, not the unstable
+/// `is_ayce` flag. Reuses `--limit`/`--page`.
 pub(super) async fn list_leaving(ctx: &Ctx, limit: u32, page: u32) -> Result<()> {
     let db = ctx.open_library_db().await?;
     maybe_auto_sync(ctx, &db).await?;
