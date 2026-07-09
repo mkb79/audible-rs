@@ -148,6 +148,20 @@ pub struct MissingDownloadsRow {
     pub missing: String,
 }
 
+/// A row of `library list --leaving` (AUD-153): a subscription (Plus/AYCL)
+/// title with a defined access-end date.
+#[derive(Debug, Clone)]
+pub struct LeavingRow {
+    /// Marketplace the row belongs to.
+    pub marketplace: String,
+    /// Audible ASIN.
+    pub asin: String,
+    /// `Title: Subtitle`.
+    pub full_title: String,
+    /// Access-end date `YYYY-MM-DD` (`customer_rights.is_consumable_until`).
+    pub leaving: String,
+}
+
 /// A row of the `v_books` view.
 #[derive(Debug, Clone)]
 pub struct BookRow {
@@ -732,6 +746,83 @@ impl Db {
         .await
     }
 
+    /// Subscription (Plus/AYCL) items with a defined access-end date
+    /// (`customer_rights.is_consumable_until`), soonest first — the titles
+    /// that will leave the library, unlike purchased ones which are permanent
+    /// (`library list --leaving`, AUD-153). Purchased items lack the field
+    /// (`is_ayce = false`); the `2099-…` sentinel ("no real end") is excluded.
+    /// The date is returned as `YYYY-MM-DD`.
+    pub async fn books_leaving(
+        &self,
+        marketplaces: Vec<String>,
+        limit: u32,
+        offset: u64,
+    ) -> Result<Vec<LeavingRow>, DbError> {
+        let offset = offset.min(i64::MAX as u64) as i64;
+        self.call(move |conn| {
+            if marketplaces.is_empty() {
+                return Ok(Vec::new());
+            }
+            let sql = format!(
+                "SELECT marketplace, asin, full_title,
+                        substr(json_extract(doc, '$.customer_rights.is_consumable_until'), 1, 10)
+                 FROM items
+                 WHERE is_deleted = 0
+                   AND marketplace IN ({})
+                   AND json_extract(doc, '$.is_ayce') = 1
+                   AND json_extract(doc, '$.customer_rights.is_consumable_until') IS NOT NULL
+                   AND json_extract(doc, '$.customer_rights.is_consumable_until') < '2099'
+                 ORDER BY 4 ASC, asin, marketplace
+                 LIMIT ? OFFSET ?",
+                in_placeholders(marketplaces.len())
+            );
+            let mut statement = conn.prepare_cached(&sql)?;
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(marketplaces.len() + 2);
+            for marketplace in &marketplaces {
+                params.push(marketplace);
+            }
+            params.push(&limit);
+            params.push(&offset);
+            let rows = statement
+                .query_map(params.as_slice(), |row| {
+                    Ok(LeavingRow {
+                        marketplace: row.get(0)?,
+                        asin: row.get(1)?,
+                        full_title: row.get(2)?,
+                        leaving: row.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    /// Count for [`Self::books_leaving`] (page-end detection).
+    pub async fn count_books_leaving(&self, marketplaces: Vec<String>) -> Result<u64, DbError> {
+        self.call(move |conn| {
+            if marketplaces.is_empty() {
+                return Ok(0);
+            }
+            let sql = format!(
+                "SELECT COUNT(*) FROM items
+                 WHERE is_deleted = 0
+                   AND marketplace IN ({})
+                   AND json_extract(doc, '$.is_ayce') = 1
+                   AND json_extract(doc, '$.customer_rights.is_consumable_until') IS NOT NULL
+                   AND json_extract(doc, '$.customer_rights.is_consumable_until') < '2099'",
+                in_placeholders(marketplaces.len())
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(marketplaces.len());
+            for marketplace in &marketplaces {
+                params.push(marketplace);
+            }
+            let count: i64 = conn.query_row(&sql, params.as_slice(), |row| row.get(0))?;
+            Ok(count as u64)
+        })
+        .await
+    }
+
     /// ASINs of active items missing a download record of at least one of
     /// the given kinds, newest purchases first (`download --missing`).
     /// Audio is format-aware (AUD-96): it counts as present only when a
@@ -1062,6 +1153,64 @@ mod tests {
     use crate::db::test_util::{MP, default_log, episode, item, open_temp};
     #[allow(unused_imports)]
     use crate::db::*;
+
+    /// An item with an explicit AYCL flag and consumption-end date, for the
+    /// `books_leaving` tests.
+    fn leaving_item(asin: &str, is_ayce: bool, until: Option<&str>) -> UpsertItem {
+        let mut rights = serde_json::json!({ "is_consumable": true });
+        if let Some(date) = until {
+            rights["is_consumable_until"] = date.into();
+        }
+        let doc = serde_json::json!({
+            "asin": asin,
+            "title": asin,
+            "is_ayce": is_ayce,
+            "customer_rights": rights,
+        });
+        UpsertItem {
+            asin: asin.into(),
+            doc: doc.to_string(),
+            title: asin.into(),
+            subtitle: None,
+            full_title: asin.into(),
+            series: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn books_leaving_lists_only_expiring_subscription_titles_soonest_first() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        db.apply_page(
+            MP.into(),
+            vec![
+                leaving_item("A_FAR", true, Some("2031-12-31T22:00:00Z")),
+                leaving_item("A_SOON", true, Some("2026-08-01T00:00:00Z")),
+                leaving_item("A_SENTINEL", true, Some("2099-12-31T00:00:00Z")),
+                leaving_item("A_AYCL_NODATE", true, None),
+                leaving_item("A_OWNED", false, Some("2026-08-01T00:00:00Z")),
+            ],
+            vec![],
+            default_log(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let rows = db
+            .books_leaving(vec![MP.to_owned()], u32::MAX, 0)
+            .await
+            .unwrap();
+        let asins: Vec<&str> = rows.iter().map(|row| row.asin.as_str()).collect();
+        // Only AYCL titles with a real (non-2099) date, soonest first. Owned
+        // (is_ayce=false), the 2099 sentinel, and the dateless AYCL are excluded.
+        assert_eq!(asins, vec!["A_SOON", "A_FAR"]);
+        assert_eq!(rows[0].leaving, "2026-08-01"); // date only, no time part
+        assert_eq!(
+            db.count_books_leaving(vec![MP.to_owned()]).await.unwrap(),
+            2
+        );
+    }
 
     #[tokio::test]
     async fn sync_state_is_created_once_and_groups_are_pinned() {

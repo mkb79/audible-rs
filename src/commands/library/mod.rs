@@ -84,15 +84,6 @@ impl super::Command for LibraryCommand {
             .subcommand(
                 clap::Command::new("list")
                     .about("List your library (from the local database)")
-                    .arg(limit())
-                    .arg(
-                        Arg::new("page")
-                            .long("page")
-                            .value_name("N")
-                            .default_value("1")
-                            .value_parser(clap::value_parser!(u32).range(1..))
-                            .help("Show the N-th page of --limit rows"),
-                    )
                     .arg(
                         Arg::new("remote")
                             .long("remote")
@@ -109,9 +100,23 @@ impl super::Command for LibraryCommand {
                             .default_missing_value("audio")
                             .value_parser(["audio", "chapter", "pdf", "cover", "annotation", "all"])
                             .conflicts_with("remote")
+                            .help_heading("Selection")
                             .help(
                                 "Only items lacking a download record of these kinds \
                                  (no value: audio; `all` covers every kind)",
+                            ),
+                    )
+                    .arg(
+                        Arg::new("leaving")
+                            .long("leaving")
+                            .action(ArgAction::SetTrue)
+                            .conflicts_with("remote")
+                            .conflicts_with("missing")
+                            .help_heading("Selection")
+                            .help(
+                                "Only subscription (Plus/AYCL) titles with a known \
+                                 expiry, soonest first — the ones leaving your library; \
+                                 owned titles are permanent and never shown",
                             ),
                     )
                     .arg(
@@ -119,11 +124,23 @@ impl super::Command for LibraryCommand {
                             .long("include-archived")
                             .action(ArgAction::SetTrue)
                             .requires("missing")
+                            .help_heading("Selection")
                             .help(
                                 "Also list archived titles — --missing skips them by \
                                  default (archive state is as of the last library sync)",
                             ),
-                    ),
+                    )
+                    .arg(limit())
+                    .arg(
+                        Arg::new("page")
+                            .long("page")
+                            .value_name("N")
+                            .default_value("1")
+                            .value_parser(clap::value_parser!(u32).range(1..))
+                            .help_heading("Pagination")
+                            .help("Show the N-th page of --limit rows"),
+                    )
+                    .mut_arg("limit", |arg| arg.help_heading("Pagination")),
             )
             .subcommand(
                 clap::Command::new("search")
@@ -241,6 +258,9 @@ impl super::Command for LibraryCommand {
                 .await
             }
             Some(("list", sub)) if sub.get_flag("remote") => list_remote(ctx, limit(sub)).await,
+            Some(("list", sub)) if sub.get_flag("leaving") => {
+                list_leaving(ctx, raw_limit(sub), page(sub)).await
+            }
             Some(("list", sub)) if sub.contains_id("missing") => {
                 list_missing(
                     ctx,
@@ -282,4 +302,4 @@ pub use sync::{SyncOptions, SyncSummary, sync_library};
 pub(crate) use sync::{maybe_auto_sync, sync};
 
 use changes::{changes, changes_prune};
-use list::{export, list, list_missing, list_remote, search};
+use list::{export, list, list_leaving, list_missing, list_remote, search};

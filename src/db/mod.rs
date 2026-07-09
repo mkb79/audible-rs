@@ -30,8 +30,9 @@ pub use downloads::{
 };
 pub use episodes::{EpisodeRow, PodcastRow, UpsertEpisode};
 pub use items::{
-    ApplyOutcome, BookRow, ChangedItem, ExportBookRow, ItemRemoval, MissingDownloadsRow, SeriesRef,
-    Settings, SyncLogEntry, UpsertItem, prepare_fts_query, state_token_iso,
+    ApplyOutcome, BookRow, ChangedItem, ExportBookRow, ItemRemoval, LeavingRow,
+    MissingDownloadsRow, SeriesRef, Settings, SyncLogEntry, UpsertItem, prepare_fts_query,
+    state_token_iso,
 };
 pub use series::{SeriesItemRow, SeriesRow};
 pub use stats::DbStats;

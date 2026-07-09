@@ -131,6 +131,46 @@ pub(super) async fn list_missing(
     Ok(())
 }
 
+/// `library list --leaving` — subscription (Plus/AYCL) titles with a
+/// defined access-end date, soonest first (AUD-153). Purchased titles are
+/// permanent and never listed; the `2099` sentinel ("no real end") is
+/// excluded. Reuses `--limit`/`--page`.
+pub(super) async fn list_leaving(ctx: &Ctx, limit: u32, page: u32) -> Result<()> {
+    let db = ctx.open_library_db().await?;
+    maybe_auto_sync(ctx, &db).await?;
+    let marketplaces = ctx.marketplaces()?;
+
+    let (query_limit, offset) = crate::commands::page_window(limit, page);
+    let rows = if limit == 0 && page > 1 {
+        Vec::new() // page 1 holds everything; no need to query
+    } else {
+        db.books_leaving(marketplaces.clone(), query_limit, offset)
+            .await?
+    };
+    if rows.is_empty() {
+        if page > 1 {
+            let total = db.count_books_leaving(marketplaces).await?;
+            return Err(crate::commands::empty_page_error(page, limit, total));
+        }
+        eprintln!("no subscription titles with a known expiry (owned titles are permanent)");
+        return Ok(());
+    }
+    ctx.print(&crate::output::Output::table(
+        vec!["mp", "asin", "title", "leaving"],
+        rows.iter()
+            .map(|row| {
+                vec![
+                    row.marketplace.clone(),
+                    row.asin.clone(),
+                    row.full_title.clone(),
+                    row.leaving.clone(),
+                ]
+            })
+            .collect(),
+    ));
+    Ok(())
+}
+
 /// `--remote`: lists straight from the API, bypassing the database.
 /// Single-host: `-m` must select exactly one marketplace.
 pub(super) async fn list_remote(ctx: &Ctx, limit: u32) -> Result<()> {
