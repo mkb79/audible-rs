@@ -126,6 +126,30 @@ and global selectors `-a/--account`, `-m/--marketplace`,
 `-s/--settings`. Run `audible --help` for the full command tree, or
 `audible <command> --help` for any subcommand.
 
+## Shell completions
+
+Quickest — `audible completions --install` writes the script to the right
+directory for your shell (bash, zsh or fish; detected from `$SHELL`), then
+open a new shell:
+
+```sh
+audible completions --install          # current shell
+audible completions bash --install     # or name a shell
+```
+
+(zsh: the target dir must be on your `$fpath`.) To place it yourself
+instead, print the script and redirect it where your shell looks:
+
+```sh
+audible completions bash > ~/.local/share/bash-completion/completions/audible
+audible completions zsh  > ~/.local/share/zsh/site-functions/_audible
+audible completions fish > ~/.config/fish/completions/audible.fish
+```
+
+`audible completions <shell>` also covers `powershell` and `elvish`
+(print-and-redirect only). Or let the installer set it up in one step:
+`install.sh --completions` runs `--install` for the shells it finds.
+
 ## Commands
 
 Commands are grouped by noun; each has subcommands (`audible <noun>

@@ -9,6 +9,7 @@
 #   --version <tag>   AUDIBLE_VERSION      install a specific release (default: latest stable)
 #   --pre             AUDIBLE_PRERELEASE=1 install the newest release, pre-releases included
 #   --bin-dir <dir>   AUDIBLE_INSTALL_DIR  install location (default: ~/.local/bin)
+#   --completions     AUDIBLE_COMPLETIONS=1 also install shell completions (bash/zsh/fish found)
 #   --force           AUDIBLE_FORCE=1      replace an existing non-audible-rs 'audible' without asking
 #
 # By default the newest stable release is installed. While none exists yet
@@ -33,14 +34,16 @@ VERSION="${AUDIBLE_VERSION:-}"
 INSTALL_DIR="${AUDIBLE_INSTALL_DIR:-${HOME}/.local/bin}"
 FORCE="${AUDIBLE_FORCE:-0}"
 PRERELEASE="${AUDIBLE_PRERELEASE:-0}"
+COMPLETIONS="${AUDIBLE_COMPLETIONS:-0}"
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--version) VERSION="${2:?--version needs a value}"; shift 2 ;;
 		--pre|--prerelease) PRERELEASE=1; shift ;;
 		--bin-dir) INSTALL_DIR="${2:?--bin-dir needs a value}"; shift 2 ;;
+		--completions) COMPLETIONS=1; shift ;;
 		--force) FORCE=1; shift ;;
-		-h|--help) grep '^#' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' | head -n 24; exit 0 ;;
+		-h|--help) grep '^#' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' | head -n 25; exit 0 ;;
 		*) echo "unknown option: $1" >&2; exit 1 ;;
 	esac
 done
@@ -72,6 +75,20 @@ else
 	err "need curl or wget"
 fi
 have tar || err "need tar"
+
+# Place completion scripts for whichever of bash/zsh/fish are present, by
+# delegating to the freshly-installed binary (it owns the correct per-shell
+# target directory). Opt-in (--completions), since it writes outside
+# INSTALL_DIR into the shells' completion directories.
+install_completions() {
+	wrote=0
+	for sh in bash zsh fish; do
+		if have "$sh" && "$dest" completions "$sh" --install; then
+			wrote=1
+		fi
+	done
+	[ "$wrote" = 1 ] || info "  no supported shell (bash/zsh/fish) found — skipped"
+}
 
 # --- detect the target triple --------------------------------------------
 case "$(uname -s)" in
@@ -181,6 +198,13 @@ else
 	cp "${tmp}/${stage}/${BIN}" "$dest" && chmod 0755 "$dest"
 fi
 info "installed ${dest}"
+
+# --- shell completions (opt-in) ------------------------------------------
+if [ "$COMPLETIONS" = 1 ]; then
+	info ""
+	info "installing shell completions:"
+	install_completions
+fi
 
 # --- PATH hints -----------------------------------------------------------
 case ":${PATH}:" in
