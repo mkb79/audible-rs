@@ -181,6 +181,11 @@ This README is a starting overview. Fuller documentation will live under
 `docs/` as the project matures; until then, `--help` on any command is
 the authoritative reference.
 
+Changes between releases are tracked in [CHANGELOG.md](CHANGELOG.md)
+(Keep a Changelog format). The file — like the GitHub release notes — is
+generated from the commit history with [git-cliff](https://git-cliff.org),
+so both always match; don't edit it by hand.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

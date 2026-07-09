@@ -1,0 +1,88 @@
+# git-cliff configuration (AUD-145) — generates CHANGELOG.md and the GitHub
+# release bodies from the Conventional-Commit history (squash-merge keeps one
+# commit per issue on main, so the history is the changelog source).
+#
+#   git cliff --unreleased                    # preview the [Unreleased] section
+#   git cliff --tag vX.Y.Z -o CHANGELOG.md    # before tagging a release: regenerate with the
+#                                             # upcoming tag, so [Unreleased] becomes [X.Y.Z]
+#   git cliff --latest                        # the newest release's section — what CI publishes
+#                                             # as the release body (at that point the tag exists,
+#                                             # so the former [Unreleased] content IS --latest;
+#                                             # --unreleased would be empty on a tagged HEAD)
+#
+# Content policy: the changelog is for USERS, not developers. Inclusion is
+# decided by commit TYPE (intent), not by path — feat/fix/perf/security are
+# in; ci/chore/docs/style/test/refactor/build are out. Changes under
+# .github/ or to install.sh can be user-visible (release assets, installer
+# behavior); they carry feat(release)/fix(release) and thus stay in.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
+(pre-1.0: breaking changes may occur in any release).
+
+This file is generated from the commit history by [git-cliff](https://git-cliff.org)
+— do not edit it by hand (see `cliff.toml`).
+"""
+# Keep a Changelog layout: `## [version] - date` with a compare link when a
+# previous tag exists; commits grouped into KaC categories; breaking changes
+# flagged inline.
+body = """
+{%- if version -%}
+    {%- if previous.version %}
+## [{{ version | trim_start_matches(pat="v") }}](https://github.com/mkb79/audible-rs/compare/{{ previous.version }}..{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
+    {%- else %}
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+    {%- endif -%}
+{%- else %}
+## [Unreleased]{% if previous.version %}(https://github.com/mkb79/audible-rs/compare/{{ previous.version }}..HEAD){% endif %}
+{%- endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+
+{% for commit in commits -%}
+- {% if commit.breaking %}**BREAKING:** {% endif -%}
+{% if commit.scope %}*{{ commit.scope }}*: {% endif -%}
+{{ commit.message | upper_first }} \
+([{{ commit.id | truncate(length=7, end="") }}](https://github.com/mkb79/audible-rs/commit/{{ commit.id }}))
+{% endfor %}
+{%- endfor %}
+"""
+footer = ""
+trim = true
+# Link PR numbers mentioned in squash-merge subjects, e.g. "(#4)".
+postprocessors = [
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/mkb79/audible-rs/pull/${1}))" },
+]
+
+[git]
+conventional_commits = true
+# Drop commits that don't follow Conventional Commits (e.g. the initial
+# public-snapshot commit).
+filter_unconventional = true
+split_commits = false
+protect_breaking_commits = true
+# Map commit types to Keep a Changelog sections; everything not matched is
+# skipped. The <!-- N --> prefixes only fix the section order and are
+# stripped by the template.
+commit_parsers = [
+  { message = "^feat", group = "<!-- 0 -->Added" },
+  { message = "^fix\\(security\\)", group = "<!-- 3 -->Security" },
+  { message = "^security", group = "<!-- 3 -->Security" },
+  { message = "^fix", group = "<!-- 1 -->Fixed" },
+  { message = "^perf", group = "<!-- 2 -->Performance" },
+  { message = "^revert", group = "<!-- 4 -->Reverted" },
+  # Everything else — developer-facing types (ci, chore, docs, style, test,
+  # refactor, build) and stray prefixes like the initial snapshot commit —
+  # is not user-visible and stays out.
+  { message = ".*", skip = true },
+]
+filter_commits = false
+tag_pattern = "v[0-9].*"
+topo_order = false
+sort_commits = "newest"

@@ -96,6 +96,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Full history: git-cliff derives the release notes from the commits
+      # and tags (AUD-145).
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -118,13 +125,23 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Release body = the tag's section from the generated changelog, so the
+      # GitHub release and CHANGELOG.md always say the same thing (AUD-145).
+      - name: Generate release notes
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: RELEASE_NOTES.md
+
       # Signature verification (minisign) is added later — see AUD-141.
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           prerelease: ${{ steps.rel.outputs.prerelease }}
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz
