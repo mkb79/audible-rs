@@ -131,13 +131,16 @@ pub(super) async fn list_missing(
     Ok(())
 }
 
-/// `library list --leaving` — unpurchased (subscription) titles whose
-/// consumption right ends on a set date, soonest first (AUD-153) — the ones
-/// that will leave the library. Purchased titles (`origin_type = Purchase`,
-/// kept permanently) are never listed, nor are titles without a real end
-/// date (the `2099` sentinel). Uses `origin_type`, not the unstable
-/// `is_ayce` flag. Reuses `--limit`/`--page`.
-pub(super) async fn list_leaving(ctx: &Ctx, limit: u32, page: u32) -> Result<()> {
+/// `library list --borrowed` — titles the user did not purchase (access via
+/// a subscription/grant), i.e. `origin_type != Purchase` (AUD-153). Owned
+/// titles are never listed. Columns: the `plan` the customer is eligible for
+/// (none = not currently playable) and `leaving`, the access-end date when
+/// one is set (none for open-ended access). Dated titles come first. Uses
+/// `origin_type`, not the unstable `is_ayce` flag. Reuses `--limit`/`--page`.
+///
+/// The two optional columns render as `—` when empty in the human table, but
+/// stay empty strings in `-o json`/`plain` so consumers can test emptiness.
+pub(super) async fn list_borrowed(ctx: &Ctx, limit: u32, page: u32) -> Result<()> {
     let db = ctx.open_library_db().await?;
     maybe_auto_sync(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;
@@ -146,26 +149,34 @@ pub(super) async fn list_leaving(ctx: &Ctx, limit: u32, page: u32) -> Result<()>
     let rows = if limit == 0 && page > 1 {
         Vec::new() // page 1 holds everything; no need to query
     } else {
-        db.books_leaving(marketplaces.clone(), query_limit, offset)
+        db.books_borrowed(marketplaces.clone(), query_limit, offset)
             .await?
     };
     if rows.is_empty() {
         if page > 1 {
-            let total = db.count_books_leaving(marketplaces).await?;
+            let total = db.count_books_borrowed(marketplaces).await?;
             return Err(crate::commands::empty_page_error(page, limit, total));
         }
-        eprintln!("no titles with a known access-end date (permanent titles are not shown)");
+        eprintln!("no borrowed titles — every title in your library is owned");
         return Ok(());
     }
+    // Placeholder for empty optional cells — only in the human table; JSON and
+    // plain keep the empty string so callers can still test for "none".
+    let human = matches!(ctx.output_format(), crate::output::OutputFormat::Table);
+    let cell = |value: &str| match (human, value.is_empty()) {
+        (true, true) => "—".to_string(),
+        _ => value.to_owned(),
+    };
     ctx.print(&crate::output::Output::table(
-        vec!["mp", "asin", "title", "leaving"],
+        vec!["mp", "asin", "title", "plan", "leaving"],
         rows.iter()
             .map(|row| {
                 vec![
                     row.marketplace.clone(),
                     row.asin.clone(),
                     row.full_title.clone(),
-                    row.leaving.clone(),
+                    cell(&row.plan),
+                    cell(&row.leaving),
                 ]
             })
             .collect(),

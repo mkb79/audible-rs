@@ -107,16 +107,16 @@ impl super::Command for LibraryCommand {
                             ),
                     )
                     .arg(
-                        Arg::new("leaving")
-                            .long("leaving")
+                        Arg::new("borrowed")
+                            .long("borrowed")
                             .action(ArgAction::SetTrue)
                             .conflicts_with("remote")
                             .conflicts_with("missing")
                             .help_heading("Selection")
                             .help(
-                                "Only titles whose access ends on a set date, soonest \
-                                 first — the ones leaving your library; titles you keep \
-                                 permanently are never shown",
+                                "Only titles you don't own (access via a subscription \
+                                 or grant); shows the plan you're eligible for and any \
+                                 access-end date, soonest first",
                             ),
                     )
                     .arg(
@@ -258,8 +258,8 @@ impl super::Command for LibraryCommand {
                 .await
             }
             Some(("list", sub)) if sub.get_flag("remote") => list_remote(ctx, limit(sub)).await,
-            Some(("list", sub)) if sub.get_flag("leaving") => {
-                list_leaving(ctx, raw_limit(sub), page(sub)).await
+            Some(("list", sub)) if sub.get_flag("borrowed") => {
+                list_borrowed(ctx, raw_limit(sub), page(sub)).await
             }
             Some(("list", sub)) if sub.contains_id("missing") => {
                 list_missing(
@@ -302,4 +302,4 @@ pub use sync::{SyncOptions, SyncSummary, sync_library};
 pub(crate) use sync::{maybe_auto_sync, sync};
 
 use changes::{changes, changes_prune};
-use list::{export, list, list_leaving, list_missing, list_remote, search};
+use list::{export, list, list_borrowed, list_missing, list_remote, search};

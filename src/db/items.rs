@@ -148,17 +148,22 @@ pub struct MissingDownloadsRow {
     pub missing: String,
 }
 
-/// A row of `library list --leaving` (AUD-153): a subscription (Plus/AYCL)
-/// title with a defined access-end date.
+/// A row of `library list --borrowed` (AUD-153): a title the user did not
+/// purchase (access via a subscription/grant plan).
 #[derive(Debug, Clone)]
-pub struct LeavingRow {
+pub struct BorrowedRow {
     /// Marketplace the row belongs to.
     pub marketplace: String,
     /// Audible ASIN.
     pub asin: String,
     /// `Title: Subtitle`.
     pub full_title: String,
-    /// Access-end date `YYYY-MM-DD` (`customer_rights.is_consumable_until`).
+    /// Name of the plan the user is eligible for (e.g. `Audible-AYCL`,
+    /// `US Minerva`, `Free Tier`); empty when none — a signal that the title
+    /// is not currently playable.
+    pub plan: String,
+    /// Access-end date `YYYY-MM-DD` (`customer_rights.is_consumable_until`),
+    /// or empty when there is no real end (the `2099-…` sentinel or absent).
     pub leaving: String,
 }
 
@@ -746,25 +751,30 @@ impl Db {
         .await
     }
 
-    /// Subscription titles the user did NOT purchase, whose consumption right
-    /// ends on a set date (`customer_rights.is_consumable_until`), soonest
-    /// first — the ones that will leave the library (`library list --leaving`,
-    /// AUD-153). Two conditions, both null-safe:
-    /// - `origin_type != 'Purchase'` — excludes titles bought (with credits or
-    ///   money), which the user keeps permanently. `origin_type` is the
-    ///   reliable ownership marker; NOT `is_ayce`, which reflects current
-    ///   Plus-catalog membership (not acquisition), is `true` even for
-    ///   purchased titles also in Plus, and flips between API calls.
-    /// - a real `is_consumable_until` (set, before the `2099-…` "no real end"
-    ///   sentinel) — the access-end date.
+    /// Titles the user did NOT purchase — access comes from a subscription or
+    /// grant, so they can leave the library (`library list --borrowed`,
+    /// AUD-153). Gated on `origin_type != 'Purchase'` (null-safe SQL `IS NOT`,
+    /// so subscription titles with an absent `origin_type` are kept).
+    /// `origin_type` is the reliable ownership marker; NOT `is_ayce`, which
+    /// reflects current Plus-catalog membership (not acquisition), is `true`
+    /// even for purchased titles also in Plus, and flips between API calls.
     ///
-    /// Date returned as `YYYY-MM-DD`.
-    pub async fn books_leaving(
+    /// Two derived columns:
+    /// - `plan`: the name of the plan the customer is eligible for — the one
+    ///   with the latest end date among `plans[]` where `customer_eligible`
+    ///   is true (e.g. `Audible-AYCL`, `US Minerva`, `Free Tier`). Empty when
+    ///   none is eligible — a hint the title is not currently playable.
+    /// - `leaving`: the access-end date `YYYY-MM-DD`
+    ///   (`customer_rights.is_consumable_until`) when real, else empty (the
+    ///   `2099-…` "no real end" sentinel or absent).
+    ///
+    /// Ordered dated-first (soonest leaving date at the top), then by title.
+    pub async fn books_borrowed(
         &self,
         marketplaces: Vec<String>,
         limit: u32,
         offset: u64,
-    ) -> Result<Vec<LeavingRow>, DbError> {
+    ) -> Result<Vec<BorrowedRow>, DbError> {
         let offset = offset.min(i64::MAX as u64) as i64;
         self.call(move |conn| {
             if marketplaces.is_empty() {
@@ -772,14 +782,20 @@ impl Db {
             }
             let sql = format!(
                 "SELECT marketplace, asin, full_title,
-                        substr(json_extract(doc, '$.customer_rights.is_consumable_until'), 1, 10)
+                        COALESCE((SELECT json_extract(p.value, '$.plan_name')
+                                  FROM json_each(items.doc, '$.plans') p
+                                  WHERE json_extract(p.value, '$.customer_eligible') = 1
+                                  ORDER BY json_extract(p.value, '$.end_date') DESC
+                                  LIMIT 1), '') AS plan,
+                        CASE WHEN json_extract(doc, '$.customer_rights.is_consumable_until') IS NOT NULL
+                               AND json_extract(doc, '$.customer_rights.is_consumable_until') < '2099'
+                             THEN substr(json_extract(doc, '$.customer_rights.is_consumable_until'), 1, 10)
+                             ELSE '' END AS leaving
                  FROM items
                  WHERE is_deleted = 0
                    AND marketplace IN ({})
                    AND json_extract(doc, '$.origin_type') IS NOT 'Purchase'
-                   AND json_extract(doc, '$.customer_rights.is_consumable_until') IS NOT NULL
-                   AND json_extract(doc, '$.customer_rights.is_consumable_until') < '2099'
-                 ORDER BY 4 ASC, asin, marketplace
+                 ORDER BY (leaving = '') ASC, leaving ASC, full_title, asin, marketplace
                  LIMIT ? OFFSET ?",
                 in_placeholders(marketplaces.len())
             );
@@ -792,11 +808,12 @@ impl Db {
             params.push(&offset);
             let rows = statement
                 .query_map(params.as_slice(), |row| {
-                    Ok(LeavingRow {
+                    Ok(BorrowedRow {
                         marketplace: row.get(0)?,
                         asin: row.get(1)?,
                         full_title: row.get(2)?,
-                        leaving: row.get(3)?,
+                        plan: row.get(3)?,
+                        leaving: row.get(4)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -805,8 +822,8 @@ impl Db {
         .await
     }
 
-    /// Count for [`Self::books_leaving`] (page-end detection).
-    pub async fn count_books_leaving(&self, marketplaces: Vec<String>) -> Result<u64, DbError> {
+    /// Count for [`Self::books_borrowed`] (page-end detection).
+    pub async fn count_books_borrowed(&self, marketplaces: Vec<String>) -> Result<u64, DbError> {
         self.call(move |conn| {
             if marketplaces.is_empty() {
                 return Ok(0);
@@ -815,9 +832,7 @@ impl Db {
                 "SELECT COUNT(*) FROM items
                  WHERE is_deleted = 0
                    AND marketplace IN ({})
-                   AND json_extract(doc, '$.origin_type') IS NOT 'Purchase'
-                   AND json_extract(doc, '$.customer_rights.is_consumable_until') IS NOT NULL
-                   AND json_extract(doc, '$.customer_rights.is_consumable_until') < '2099'",
+                   AND json_extract(doc, '$.origin_type') IS NOT 'Purchase'",
                 in_placeholders(marketplaces.len())
             );
             let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(marketplaces.len());
@@ -1161,18 +1176,39 @@ mod tests {
     #[allow(unused_imports)]
     use crate::db::*;
 
-    /// An item for the `books_leaving` tests. `purchased` sets
+    /// An item for the `books_borrowed` tests. `purchased` sets
     /// `origin_type = "Purchase"` (owned); otherwise the field is absent, as
     /// on subscription titles. `until` fills `customer_rights.is_consumable_until`.
-    fn leaving_item(asin: &str, purchased: bool, until: Option<&str>) -> UpsertItem {
+    /// `eligible_plan` adds one `plans[]` entry with `customer_eligible: true`
+    /// under that name, plus a non-eligible `AccessViaMusic` plan to prove it
+    /// is ignored.
+    fn borrowed_item(
+        asin: &str,
+        purchased: bool,
+        until: Option<&str>,
+        eligible_plan: Option<&str>,
+    ) -> UpsertItem {
         let mut rights = serde_json::json!({ "is_consumable": true });
         if let Some(date) = until {
             rights["is_consumable_until"] = date.into();
+        }
+        let mut plans = vec![serde_json::json!({
+            "plan_name": "AccessViaMusic",
+            "customer_eligible": serde_json::Value::Null,
+            "end_date": "2099-12-31T00:00:00Z",
+        })];
+        if let Some(name) = eligible_plan {
+            plans.push(serde_json::json!({
+                "plan_name": name,
+                "customer_eligible": true,
+                "end_date": "2099-12-31T00:00:00Z",
+            }));
         }
         let mut doc = serde_json::json!({
             "asin": asin,
             "title": asin,
             "customer_rights": rights,
+            "plans": plans,
         });
         if purchased {
             doc["origin_type"] = "Purchase".into();
@@ -1188,21 +1224,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn books_leaving_lists_unpurchased_titles_with_an_ending_right_soonest_first() {
+    async fn books_borrowed_lists_unpurchased_titles_dated_first_with_eligible_plan() {
         let (_dir, db) = open_temp().await;
         db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
         db.apply_page(
             MP.into(),
             vec![
-                leaving_item("A_FAR", false, Some("2031-12-31T22:00:00Z")),
-                leaving_item("A_SOON", false, Some("2026-08-01T00:00:00Z")),
-                // Excluded: the 2099 sentinel ("no real end") …
-                leaving_item("A_SENTINEL", false, Some("2099-12-31T00:00:00Z")),
-                // … a title with no end date at all …
-                leaving_item("A_NODATE", false, None),
-                // … and — the ownership guard — a PURCHASED title, even one
-                // carrying a real near date, is never a "leaving" title.
-                leaving_item("A_OWNED", true, Some("2026-07-01T00:00:00Z")),
+                // Dated: a real end date floats to the top.
+                borrowed_item("A_DATED", false, Some("2031-12-31T22:00:00Z"), Some("AYCL")),
+                // Open-ended borrows: 2099 sentinel and no date at all — both
+                // listed (they are borrowed) but with an empty `leaving`.
+                borrowed_item(
+                    "A_SENTINEL",
+                    false,
+                    Some("2099-12-31T00:00:00Z"),
+                    Some("Minerva"),
+                ),
+                borrowed_item("A_OPEN", false, None, Some("Minerva")),
+                // Borrowed but no eligible plan → empty `plan` (not playable).
+                borrowed_item("A_LOCKED", false, None, None),
+                // Purchased → excluded entirely.
+                borrowed_item("A_OWNED", true, None, Some("AYCL")),
             ],
             vec![],
             default_log(),
@@ -1212,18 +1254,27 @@ mod tests {
         .unwrap();
 
         let rows = db
-            .books_leaving(vec![MP.to_owned()], u32::MAX, 0)
+            .books_borrowed(vec![MP.to_owned()], u32::MAX, 0)
             .await
             .unwrap();
         let asins: Vec<&str> = rows.iter().map(|row| row.asin.as_str()).collect();
-        // Only unpurchased titles with a real (non-2099) access-end date,
-        // soonest first. The purchased title is excluded despite its date;
-        // sentinel and dateless titles are excluded too.
-        assert_eq!(asins, vec!["A_SOON", "A_FAR"]);
-        assert_eq!(rows[0].leaving, "2026-08-01"); // date only, no time part
+        // All four unpurchased titles, dated first then by title; the
+        // purchased one is excluded.
+        assert_eq!(asins, vec!["A_DATED", "A_LOCKED", "A_OPEN", "A_SENTINEL"]);
+        // The dated row carries the real date; the eligible plan name is
+        // resolved and the non-eligible AccessViaMusic plan is ignored.
+        assert_eq!(rows[0].leaving, "2031-12-31");
+        assert_eq!(rows[0].plan, "AYCL");
+        // No eligible plan → empty plan; open-ended → empty leaving.
+        let locked = rows.iter().find(|r| r.asin == "A_LOCKED").unwrap();
+        assert_eq!(locked.plan, "");
+        assert_eq!(locked.leaving, "");
+        let sentinel = rows.iter().find(|r| r.asin == "A_SENTINEL").unwrap();
+        assert_eq!(sentinel.leaving, "");
+        assert_eq!(sentinel.plan, "Minerva");
         assert_eq!(
-            db.count_books_leaving(vec![MP.to_owned()]).await.unwrap(),
-            2
+            db.count_books_borrowed(vec![MP.to_owned()]).await.unwrap(),
+            4
         );
     }
 
