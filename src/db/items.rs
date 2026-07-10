@@ -148,6 +148,27 @@ pub struct MissingDownloadsRow {
     pub missing: String,
 }
 
+/// A row of `library list --borrowed` (AUD-153): a title the user did not
+/// purchase (access via a subscription/grant plan).
+#[derive(Debug, Clone)]
+pub struct BorrowedRow {
+    /// Marketplace the row belongs to.
+    pub marketplace: String,
+    /// Audible ASIN.
+    pub asin: String,
+    /// `Title: Subtitle`.
+    pub full_title: String,
+    /// Comma-separated names of the plans the user is eligible for
+    /// (e.g. `Audible-AYCL`, `US Minerva`, `Free Tier`) — the ones through
+    /// which the title is currently playable. Empty when none.
+    pub eligible: String,
+    /// Comma-separated names of the other plans the title belongs to that the
+    /// user is NOT eligible for (e.g. `SpecialBenefit`, or the membership plan
+    /// once a subscription lapses). The generic `AccessViaMusic` route is
+    /// omitted as noise. Empty when there is none.
+    pub not_eligible: String,
+}
+
 /// A row of the `v_books` view.
 #[derive(Debug, Clone)]
 pub struct BookRow {
@@ -732,6 +753,103 @@ impl Db {
         .await
     }
 
+    /// Titles the user did NOT purchase — access comes from a subscription or
+    /// grant, so they can leave the library (`library list --borrowed`,
+    /// AUD-153). Gated on `origin_type != 'Purchase'` (null-safe SQL `IS NOT`,
+    /// so subscription titles with an absent `origin_type` are kept).
+    /// `origin_type` is the reliable ownership marker; NOT `is_ayce`, which
+    /// reflects current Plus-catalog membership (not acquisition), is `true`
+    /// even for purchased titles also in Plus, and flips between API calls.
+    ///
+    /// Splits the item's `plans[]` (each `{plan_name, customer_eligible}`) by
+    /// eligibility, sorted and comma-joined:
+    /// - `eligible`: plans with `customer_eligible = true` — those you can
+    ///   currently play through. Empty when none.
+    /// - `not_eligible`: the remaining plans (`customer_eligible` false/null),
+    ///   minus the generic `AccessViaMusic` route (near-universal noise) —
+    ///   e.g. a promo `SpecialBenefit`, or the membership plan you'd need once
+    ///   a subscription lapses. Empty when none.
+    ///
+    /// Ordered by title, then by the `(asin, marketplace)` key so pagination
+    /// (`--limit`/`--page`) is stable.
+    pub async fn books_borrowed(
+        &self,
+        marketplaces: Vec<String>,
+        limit: u32,
+        offset: u64,
+    ) -> Result<Vec<BorrowedRow>, DbError> {
+        let offset = offset.min(i64::MAX as u64) as i64;
+        self.call(move |conn| {
+            if marketplaces.is_empty() {
+                return Ok(Vec::new());
+            }
+            let sql = format!(
+                "SELECT marketplace, asin, full_title,
+                        COALESCE((SELECT group_concat(name, ', ') FROM (
+                                    SELECT DISTINCT json_extract(p.value, '$.plan_name') AS name
+                                    FROM json_each(items.doc, '$.plans') p
+                                    WHERE json_extract(p.value, '$.customer_eligible') = 1
+                                    ORDER BY name)), '') AS eligible,
+                        COALESCE((SELECT group_concat(name, ', ') FROM (
+                                    SELECT DISTINCT json_extract(p.value, '$.plan_name') AS name
+                                    FROM json_each(items.doc, '$.plans') p
+                                    WHERE json_extract(p.value, '$.customer_eligible') IS NOT 1
+                                      AND json_extract(p.value, '$.plan_name') <> 'AccessViaMusic'
+                                    ORDER BY name)), '') AS not_eligible
+                 FROM items
+                 WHERE is_deleted = 0
+                   AND marketplace IN ({})
+                   AND json_extract(doc, '$.origin_type') IS NOT 'Purchase'
+                 ORDER BY full_title, asin, marketplace
+                 LIMIT ? OFFSET ?",
+                in_placeholders(marketplaces.len())
+            );
+            let mut statement = conn.prepare_cached(&sql)?;
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(marketplaces.len() + 2);
+            for marketplace in &marketplaces {
+                params.push(marketplace);
+            }
+            params.push(&limit);
+            params.push(&offset);
+            let rows = statement
+                .query_map(params.as_slice(), |row| {
+                    Ok(BorrowedRow {
+                        marketplace: row.get(0)?,
+                        asin: row.get(1)?,
+                        full_title: row.get(2)?,
+                        eligible: row.get(3)?,
+                        not_eligible: row.get(4)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    /// Count for [`Self::books_borrowed`] (page-end detection).
+    pub async fn count_books_borrowed(&self, marketplaces: Vec<String>) -> Result<u64, DbError> {
+        self.call(move |conn| {
+            if marketplaces.is_empty() {
+                return Ok(0);
+            }
+            let sql = format!(
+                "SELECT COUNT(*) FROM items
+                 WHERE is_deleted = 0
+                   AND marketplace IN ({})
+                   AND json_extract(doc, '$.origin_type') IS NOT 'Purchase'",
+                in_placeholders(marketplaces.len())
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(marketplaces.len());
+            for marketplace in &marketplaces {
+                params.push(marketplace);
+            }
+            let count: i64 = conn.query_row(&sql, params.as_slice(), |row| row.get(0))?;
+            Ok(count as u64)
+        })
+        .await
+    }
+
     /// ASINs of active items missing a download record of at least one of
     /// the given kinds, newest purchases first (`download --missing`).
     /// Audio is format-aware (AUD-96): it counts as present only when a
@@ -1062,6 +1180,119 @@ mod tests {
     use crate::db::test_util::{MP, default_log, episode, item, open_temp};
     #[allow(unused_imports)]
     use crate::db::*;
+
+    /// An item for the `books_borrowed` tests. `purchased` sets
+    /// `origin_type = "Purchase"` (owned); otherwise the field is absent, as
+    /// on subscription titles. `plans` is a list of `(plan_name, eligible)`,
+    /// where `eligible` is `Some(true|false)` or `None` (JSON null).
+    fn borrowed_item(asin: &str, purchased: bool, plans: &[(&str, Option<bool>)]) -> UpsertItem {
+        let plans: Vec<serde_json::Value> = plans
+            .iter()
+            .map(|(name, eligible)| {
+                serde_json::json!({
+                    "plan_name": name,
+                    "customer_eligible": match eligible {
+                        Some(value) => serde_json::Value::Bool(*value),
+                        None => serde_json::Value::Null,
+                    },
+                })
+            })
+            .collect();
+        let mut doc = serde_json::json!({
+            "asin": asin,
+            "title": asin,
+            "plans": plans,
+        });
+        if purchased {
+            doc["origin_type"] = "Purchase".into();
+        }
+        UpsertItem {
+            asin: asin.into(),
+            doc: doc.to_string(),
+            title: asin.into(),
+            subtitle: None,
+            full_title: asin.into(),
+            series: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn books_borrowed_splits_plans_by_eligibility() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        db.apply_page(
+            MP.into(),
+            vec![
+                // Eligible plan + the generic AccessViaMusic route (ignored).
+                borrowed_item(
+                    "A_ELIG",
+                    false,
+                    &[("Audible-AYCL", Some(true)), ("AccessViaMusic", None)],
+                ),
+                // Eligible, plus a promo the user is NOT on (kept as not_eligible).
+                borrowed_item(
+                    "B_PROMO",
+                    false,
+                    &[
+                        ("US Minerva", Some(true)),
+                        ("AccessViaMusic", None),
+                        ("SpecialBenefit", None),
+                    ],
+                ),
+                // No eligible plan (false + null) → membership plan surfaces as
+                // not_eligible; eligible is empty.
+                borrowed_item(
+                    "C_LAPSED",
+                    false,
+                    &[("US Minerva", Some(false)), ("AccessViaMusic", None)],
+                ),
+                // Two eligible plans → sorted and comma-joined.
+                borrowed_item(
+                    "D_MULTI",
+                    false,
+                    &[("Plan B", Some(true)), ("Plan A", Some(true))],
+                ),
+                // Purchased → excluded entirely.
+                borrowed_item("E_OWNED", true, &[("Audible-AYCL", Some(true))]),
+            ],
+            vec![],
+            default_log(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let rows = db
+            .books_borrowed(vec![MP.to_owned()], u32::MAX, 0)
+            .await
+            .unwrap();
+        let seen: Vec<(&str, &str, &str)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.asin.as_str(),
+                    row.eligible.as_str(),
+                    row.not_eligible.as_str(),
+                )
+            })
+            .collect();
+        // Ordered by title; the purchased title is excluded. AccessViaMusic is
+        // dropped from not_eligible; false and null both count as not eligible;
+        // multiple eligible plans are sorted and joined.
+        assert_eq!(
+            seen,
+            vec![
+                ("A_ELIG", "Audible-AYCL", ""),
+                ("B_PROMO", "US Minerva", "SpecialBenefit"),
+                ("C_LAPSED", "", "US Minerva"),
+                ("D_MULTI", "Plan A, Plan B", ""),
+            ]
+        );
+        assert_eq!(
+            db.count_books_borrowed(vec![MP.to_owned()]).await.unwrap(),
+            4
+        );
+    }
 
     #[tokio::test]
     async fn sync_state_is_created_once_and_groups_are_pinned() {

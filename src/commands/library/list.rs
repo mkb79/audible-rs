@@ -131,6 +131,62 @@ pub(super) async fn list_missing(
     Ok(())
 }
 
+/// `library list --borrowed` — titles the user did not purchase (access via
+/// a subscription/grant), i.e. `origin_type != Purchase` (AUD-153). Owned
+/// titles are never listed. Splits the item's plans into `eligible` (the ones
+/// you can play through) and `not_eligible` (other plans the title is in that
+/// you're not on — e.g. a promo, or the membership plan you'd need once a
+/// subscription lapses; the generic AccessViaMusic route is omitted). Ordered
+/// by title. Uses `origin_type`, not the unstable `is_ayce` flag. Reuses
+/// `--limit`/`--page`.
+///
+/// In the human table an empty `eligible` shows as `none` (nothing plays it
+/// right now) and an empty `not_eligible` as `—`; `-o json`/`plain` keep the
+/// empty string so consumers can test emptiness.
+pub(super) async fn list_borrowed(ctx: &Ctx, limit: u32, page: u32) -> Result<()> {
+    let db = ctx.open_library_db().await?;
+    maybe_auto_sync(ctx, &db).await?;
+    let marketplaces = ctx.marketplaces()?;
+
+    let (query_limit, offset) = crate::commands::page_window(limit, page);
+    let rows = if limit == 0 && page > 1 {
+        Vec::new() // page 1 holds everything; no need to query
+    } else {
+        db.books_borrowed(marketplaces.clone(), query_limit, offset)
+            .await?
+    };
+    if rows.is_empty() {
+        if page > 1 {
+            let total = db.count_books_borrowed(marketplaces).await?;
+            return Err(crate::commands::empty_page_error(page, limit, total));
+        }
+        eprintln!("no borrowed titles — every title in your library is owned");
+        return Ok(());
+    }
+    // Placeholders for empty cells — only in the human table; JSON and plain
+    // keep the empty string so callers can still test for "none".
+    let human = matches!(ctx.output_format(), crate::output::OutputFormat::Table);
+    let placeholder = |value: &str, empty: &str| match (human, value.is_empty()) {
+        (true, true) => empty.to_string(),
+        _ => value.to_owned(),
+    };
+    ctx.print(&crate::output::Output::table(
+        vec!["mp", "asin", "title", "eligible", "not_eligible"],
+        rows.iter()
+            .map(|row| {
+                vec![
+                    row.marketplace.clone(),
+                    row.asin.clone(),
+                    row.full_title.clone(),
+                    placeholder(&row.eligible, "none"),
+                    placeholder(&row.not_eligible, "—"),
+                ]
+            })
+            .collect(),
+    ));
+    Ok(())
+}
+
 /// `--remote`: lists straight from the API, bypassing the database.
 /// Single-host: `-m` must select exactly one marketplace.
 pub(super) async fn list_remote(ctx: &Ctx, limit: u32) -> Result<()> {
