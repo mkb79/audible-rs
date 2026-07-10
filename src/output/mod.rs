@@ -57,6 +57,10 @@ pub enum Output {
     KeyValue(Vec<(String, String)>),
     /// A raw JSON payload.
     Json(serde_json::Value),
+    /// Pre-rendered text, emitted verbatim in every format — for views whose
+    /// layout is custom (e.g. the sectioned `stats` report). The command
+    /// itself chooses the layout per format (a JSON payload uses [`Output::Json`]).
+    Text(String),
 }
 
 impl Output {
@@ -127,6 +131,8 @@ pub fn render(output: &Output, format: OutputFormat) -> String {
         (Output::Json(value), _) => {
             serde_json::to_string_pretty(value).expect("values always serialize")
         }
+
+        (Output::Text(text), _) => text.clone(),
     }
 }
 
