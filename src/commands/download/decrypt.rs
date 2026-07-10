@@ -133,6 +133,8 @@ async fn ffmpeg_version(path: &Path) -> Option<(u32, u32)> {
 }
 
 /// Decrypts `aaxc` to `out` (lossless m4b) using the aaxc content `key`/`iv`.
+/// The m4b is written moov-first (faststart) like the source aaxc, so it
+/// plays before it is fully transferred (HTTP streaming, e.g. Audiobookshelf).
 /// Removes a partial output on failure; surfaces the tool's error (never the
 /// key/iv, which are only on argv).
 pub(super) async fn run(tool: &Tool, aaxc: &Path, key: &str, iv: &str, out: &Path) -> Result<()> {
@@ -145,6 +147,7 @@ pub(super) async fn run(tool: &Tool, aaxc: &Path, key: &str, iv: &str, out: &Pat
                 .arg(key)
                 .arg("--audible_iv")
                 .arg(iv)
+                .arg("--moov_faststart")
                 .arg("-o")
                 .arg(out);
             cmd
@@ -165,6 +168,8 @@ pub(super) async fn run(tool: &Tool, aaxc: &Path, key: &str, iv: &str, out: &Pat
                 .arg("copy")
                 .arg("-map_metadata")
                 .arg("0")
+                .arg("-movflags")
+                .arg("+faststart")
                 .arg(out);
             cmd
         }
@@ -186,7 +191,8 @@ pub(super) async fn run(tool: &Tool, aaxc: &Path, key: &str, iv: &str, out: &Pat
 }
 
 /// Decrypts a CENC-encrypted MP4 (`input`) to `out` (lossless) using the
-/// Widevine content `kid`/`key` (both 32-hex-char / 16 bytes). Removes a partial
+/// Widevine content `kid`/`key` (both 32-hex-char / 16 bytes). The output is
+/// written moov-first (faststart), as in [`run`]. Removes a partial
 /// output on failure; the key is only on argv, never logged by us. Wired into
 /// the Widevine download flow in AUD-56e.
 #[allow(dead_code)]
@@ -206,6 +212,7 @@ pub(super) async fn run_cenc(
                 .arg(kid)
                 .arg("--encryption_key")
                 .arg(key)
+                .arg("--moov_faststart")
                 .arg("-o")
                 .arg(out);
             cmd
@@ -225,6 +232,8 @@ pub(super) async fn run_cenc(
                 .arg("copy")
                 .arg("-map_metadata")
                 .arg("0")
+                .arg("-movflags")
+                .arg("+faststart")
                 .arg(out);
             cmd
         }
