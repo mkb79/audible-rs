@@ -22,6 +22,7 @@ pub(crate) mod prompt;
 pub mod series;
 pub mod settings;
 pub mod setup;
+pub mod stats;
 
 use std::path::Path;
 
@@ -155,6 +156,7 @@ pub fn registry() -> Vec<Box<dyn Command>> {
         Box::new(series::SeriesCommand),
         Box::new(settings::SettingsCommand),
         Box::new(setup::SetupCommand),
+        Box::new(stats::StatsCommand),
     ]
 }
 
