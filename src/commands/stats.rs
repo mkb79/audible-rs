@@ -14,9 +14,11 @@
 //!
 //! Every request also asks for `response_groups=total_listening_stats`, which
 //! adds the account's **all-time** listening total for that store; a parallel
-//! `stats/status/finished` request gives the all-time count of finished
-//! titles. Both appear in each store's footer. Durations render as `HH:MM`,
-//! gaining a `Nd ` day prefix past 24h. Sums are milliseconds;
+//! `stats/status/finished` request gives the **all-time** count of finished
+//! titles. Both are all-time and labelled as such in the footer (finished can
+//! only be all-time: its per-title timestamps are unreliable — historical
+//! finishes collapse onto a single bulk-migration date). Durations render as
+//! `HH:MM`, gaining a `Nd ` day prefix past 24h. Sums are milliseconds;
 //! `interval_identifier` is `YYYY-MM` (monthly) or `YYYY` (yearly). Read-only.
 
 use anyhow::{Result, bail};
@@ -387,7 +389,7 @@ impl Report {
                 }
             }
             out.push_str(&format!(
-                "{}: {} in {label} · {} all-time · {} finished\n\n",
+                "{}: {} in {label} · all-time: {} listened, {} finished\n\n",
                 store.marketplace,
                 dur(store.window_total),
                 dur(store.all_time),
@@ -397,7 +399,7 @@ impl Report {
         // A grand total only helps when more than one store was queried.
         if self.stores.len() > 1 {
             out.push_str(&format!(
-                "all stores: {} in {label} · {} all-time · {} finished",
+                "all stores: {} in {label} · all-time: {} listened, {} finished",
                 dur(self.window_total()),
                 dur(self.all_time()),
                 self.finished(),
@@ -440,7 +442,7 @@ impl Report {
                     "marketplace": store.marketplace,
                     "window_minutes": store.window_total,
                     "all_time_minutes": store.all_time,
-                    "finished_titles": store.finished,
+                    "all_time_finished_titles": store.finished,
                     "intervals": intervals,
                 })
             })
@@ -451,7 +453,7 @@ impl Report {
             "marketplaces": marketplaces,
             "window_minutes": self.window_total(),
             "all_time_minutes": self.all_time(),
-            "finished_titles": self.finished(),
+            "all_time_finished_titles": self.finished(),
         });
         match self.span {
             Span::Year(year) => {
@@ -544,9 +546,11 @@ mod tests {
         }
         .to_table();
         assert!(table.contains("== de =="));
-        assert!(table.contains("de: 01:13 in 2026 · 5d 00:49 all-time · 24 finished"));
+        assert!(table.contains("de: 01:13 in 2026 · all-time: 5d 00:49 listened, 24 finished"));
         assert!(table.contains("(no listening in this span)"));
-        assert!(table.contains("all stores: 01:13 in 2026 · 5d 00:49 all-time · 24 finished"));
+        assert!(
+            table.contains("all stores: 01:13 in 2026 · all-time: 5d 00:49 listened, 24 finished")
+        );
         assert!(!table.contains("2026-04")); // zero interval not drawn
     }
 
@@ -575,8 +579,8 @@ mod tests {
         assert_eq!(json["to"], 2026);
         assert_eq!(json["window_minutes"], 1965);
         assert_eq!(json["all_time_minutes"], 5000);
-        assert_eq!(json["finished_titles"], 24);
-        assert_eq!(json["marketplaces"][0]["finished_titles"], 24);
+        assert_eq!(json["all_time_finished_titles"], 24);
+        assert_eq!(json["marketplaces"][0]["all_time_finished_titles"], 24);
         assert_eq!(
             json["marketplaces"][0]["intervals"]
                 .as_array()
