@@ -13,9 +13,11 @@
 //!   range is fetched in ≤5-year chunks, concurrently).
 //!
 //! Every request also asks for `response_groups=total_listening_stats`, which
-//! adds the account's **all-time** listening total for that store. Sums are
-//! milliseconds; `interval_identifier` is `YYYY-MM` (monthly) or `YYYY`
-//! (yearly). Read-only.
+//! adds the account's **all-time** listening total for that store; a parallel
+//! `stats/status/finished` request gives the all-time count of finished
+//! titles. Both appear in each store's footer. Durations render as `HH:MM`,
+//! gaining a `Nd ` day prefix past 24h. Sums are milliseconds;
+//! `interval_identifier` is `YYYY-MM` (monthly) or `YYYY` (yearly). Read-only.
 
 use anyhow::{Result, bail};
 use clap::Arg;
@@ -107,8 +109,29 @@ async fn stats(ctx: &Ctx, span: Span) -> Result<()> {
     Ok(())
 }
 
-/// Fetches one store's rows (months or years) plus its all-time total.
+/// Fetches one store's stats — its intervals + all-time total, concurrently
+/// with the finished-title count.
 async fn fetch_store(client: &Client, marketplace: &str, span: Span) -> Result<StoreStats> {
+    let ((rows, all_time), finished) = futures::try_join!(
+        fetch_rows(client, marketplace, span),
+        fetch_finished(client, marketplace),
+    )?;
+    let window_total = rows.iter().map(|(_, minutes)| *minutes).sum();
+    Ok(StoreStats {
+        marketplace: marketplace.to_owned(),
+        rows,
+        window_total,
+        all_time,
+        finished,
+    })
+}
+
+/// The listening intervals (months or years) and all-time total for a store.
+async fn fetch_rows(
+    client: &Client,
+    marketplace: &str,
+    span: Span,
+) -> Result<(Vec<(String, i64)>, i64)> {
     let (mut rows, all_time) = match span {
         Span::Year(year) => {
             let agg = fetch(client, marketplace, "monthly", format!("{year}-01"), 12).await?;
@@ -148,13 +171,31 @@ async fn fetch_store(client: &Client, marketplace: &str, span: Span) -> Result<S
     }
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     rows.dedup_by(|a, b| a.0 == b.0);
-    let window_total = rows.iter().map(|(_, minutes)| *minutes).sum();
-    Ok(StoreStats {
-        marketplace: marketplace.to_owned(),
-        rows,
-        window_total,
-        all_time,
-    })
+    Ok((rows, all_time))
+}
+
+/// All-time count of distinct titles marked finished on this store
+/// (`stats/status/finished`; the list also carries un-marked entries, which
+/// are excluded).
+async fn fetch_finished(client: &Client, marketplace: &str) -> Result<i64> {
+    let body: FinishedStatus = client
+        .request(Method::GET, "/1.0/stats/status/finished")
+        .country_code(marketplace)
+        .query("start_date", "2001-01-01T00:00:00Z")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let mut finished = std::collections::HashSet::new();
+    for item in body.mark_as_finished_status_list {
+        if item.is_marked_as_finished
+            && let Some(asin) = item.asin
+        {
+            finished.insert(asin);
+        }
+    }
+    Ok(finished.len() as i64)
 }
 
 /// One `/1.0/stats/aggregates` request for the given interval family
@@ -224,6 +265,21 @@ struct TotalAgg {
     aggregated_sum: Option<serde_json::Value>,
 }
 
+/// Partial model of `/1.0/stats/status/finished`.
+#[derive(Debug, Default, Deserialize)]
+struct FinishedStatus {
+    #[serde(default)]
+    mark_as_finished_status_list: Vec<FinishedItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FinishedItem {
+    #[serde(default)]
+    asin: Option<String>,
+    #[serde(default)]
+    is_marked_as_finished: bool,
+}
+
 /// Milliseconds (number, scientific notation, or numeric string) → whole
 /// minutes, floored.
 fn minutes_of(sum: &Option<serde_json::Value>) -> i64 {
@@ -266,6 +322,8 @@ struct StoreStats {
     window_total: i64,
     /// Lifetime total for the store (`total_listening_stats`).
     all_time: i64,
+    /// Distinct titles marked finished on the store (all-time).
+    finished: i64,
 }
 
 impl StoreStats {
@@ -280,13 +338,15 @@ struct Report {
     stores: Vec<StoreStats>,
 }
 
-/// `73` → `"1h 13m"`, `5` → `"5m"`.
-fn hm(minutes: i64) -> String {
-    let (hours, mins) = (minutes / 60, minutes % 60);
-    if hours == 0 {
-        format!("{mins}m")
+/// Minutes → `HH:MM`, gaining a `Nd ` day prefix once it reaches a full day
+/// (so the hours field stays 00–23): `06:39`, `23:59`, `1d 00:23`, `5d 00:49`.
+fn dur(minutes: i64) -> String {
+    let (days, rest) = (minutes / 1440, minutes % 1440);
+    let (hours, mins) = (rest / 60, rest % 60);
+    if days > 0 {
+        format!("{days}d {hours:02}:{mins:02}")
     } else {
-        format!("{hours}h {mins}m")
+        format!("{hours:02}:{mins:02}")
     }
 }
 
@@ -299,6 +359,10 @@ impl Report {
 
     fn all_time(&self) -> i64 {
         self.stores.iter().map(|store| store.all_time).sum()
+    }
+
+    fn finished(&self) -> i64 {
+        self.stores.iter().map(|store| store.finished).sum()
     }
 
     fn to_table(&self) -> String {
@@ -319,22 +383,24 @@ impl Report {
                     // interval always shows at least one block.
                     let filled = ((*minutes * BAR_WIDTH + peak - 1) / peak).max(1);
                     let bar = "▇".repeat(filled as usize);
-                    out.push_str(&format!("{interval}  {minutes:>5} min  {bar}\n"));
+                    out.push_str(&format!("{interval}  {:>8}  {bar}\n", dur(*minutes)));
                 }
             }
             out.push_str(&format!(
-                "{}: {} in {label} · {} all-time\n\n",
+                "{}: {} in {label} · {} all-time · {} finished\n\n",
                 store.marketplace,
-                hm(store.window_total),
-                hm(store.all_time),
+                dur(store.window_total),
+                dur(store.all_time),
+                store.finished,
             ));
         }
         // A grand total only helps when more than one store was queried.
         if self.stores.len() > 1 {
             out.push_str(&format!(
-                "all stores: {} in {label} · {} all-time",
-                hm(self.window_total()),
-                hm(self.all_time()),
+                "all stores: {} in {label} · {} all-time · {} finished",
+                dur(self.window_total()),
+                dur(self.all_time()),
+                self.finished(),
             ));
         } else {
             while out.ends_with('\n') {
@@ -374,6 +440,7 @@ impl Report {
                     "marketplace": store.marketplace,
                     "window_minutes": store.window_total,
                     "all_time_minutes": store.all_time,
+                    "finished_titles": store.finished,
                     "intervals": intervals,
                 })
             })
@@ -384,6 +451,7 @@ impl Report {
             "marketplaces": marketplaces,
             "window_minutes": self.window_total(),
             "all_time_minutes": self.all_time(),
+            "finished_titles": self.finished(),
         });
         match self.span {
             Span::Year(year) => {
@@ -437,7 +505,16 @@ mod tests {
         );
     }
 
-    fn store(marketplace: &str, rows: &[(&str, i64)], all_time: i64) -> StoreStats {
+    #[test]
+    fn dur_formats_hh_mm_with_days_past_a_day() {
+        assert_eq!(dur(2), "00:02");
+        assert_eq!(dur(399), "06:39");
+        assert_eq!(dur(1439), "23:59");
+        assert_eq!(dur(1463), "1d 00:23"); // 24h 23m
+        assert_eq!(dur(7249), "5d 00:49"); // all-time example
+    }
+
+    fn store(marketplace: &str, rows: &[(&str, i64)], all_time: i64, finished: i64) -> StoreStats {
         let rows: Vec<(String, i64)> = rows
             .iter()
             .map(|(label, minutes)| ((*label).to_owned(), *minutes))
@@ -448,26 +525,28 @@ mod tests {
             rows,
             window_total,
             all_time,
+            finished,
         }
     }
 
     #[test]
-    fn table_shows_sections_footer_all_time_and_grand_total() {
+    fn table_shows_sections_footer_all_time_finished_and_grand_total() {
         let de = store(
             "de",
             &[("2026-03", 72), ("2026-04", 0), ("2026-06", 1)],
             7249,
+            24,
         );
-        let us = store("us", &[], 0);
+        let us = store("us", &[], 0, 0);
         let table = Report {
             span: Span::Year(2026),
             stores: vec![de, us],
         }
         .to_table();
         assert!(table.contains("== de =="));
-        assert!(table.contains("de: 1h 13m in 2026 · 120h 49m all-time"));
+        assert!(table.contains("de: 01:13 in 2026 · 5d 00:49 all-time · 24 finished"));
         assert!(table.contains("(no listening in this span)"));
-        assert!(table.contains("all stores: 1h 13m in 2026 · 120h 49m all-time"));
+        assert!(table.contains("all stores: 01:13 in 2026 · 5d 00:49 all-time · 24 finished"));
         assert!(!table.contains("2026-04")); // zero interval not drawn
     }
 
@@ -475,20 +554,20 @@ mod tests {
     fn single_store_has_no_grand_total_line() {
         let table = Report {
             span: Span::Year(2026),
-            stores: vec![store("de", &[("2026-03", 72)], 100)],
+            stores: vec![store("de", &[("2026-03", 72)], 100, 3)],
         }
         .to_table();
         assert!(!table.contains("all stores"));
     }
 
     #[test]
-    fn json_reports_window_all_time_and_granularity() {
+    fn json_reports_window_all_time_finished_and_granularity() {
         let json = Report {
             span: Span::Since {
                 from: 2015,
                 to: 2026,
             },
-            stores: vec![store("de", &[("2015", 1861), ("2016", 104)], 5000)],
+            stores: vec![store("de", &[("2015", 1861), ("2016", 104)], 5000, 24)],
         }
         .to_json();
         assert_eq!(json["granularity"], "yearly");
@@ -496,6 +575,8 @@ mod tests {
         assert_eq!(json["to"], 2026);
         assert_eq!(json["window_minutes"], 1965);
         assert_eq!(json["all_time_minutes"], 5000);
+        assert_eq!(json["finished_titles"], 24);
+        assert_eq!(json["marketplaces"][0]["finished_titles"], 24);
         assert_eq!(
             json["marketplaces"][0]["intervals"]
                 .as_array()
