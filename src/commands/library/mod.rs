@@ -115,8 +115,8 @@ impl super::Command for LibraryCommand {
                             .help_heading("Selection")
                             .help(
                                 "Only titles you don't own (access via a subscription \
-                                 or grant); shows the plan you're eligible for and any \
-                                 access-end date, soonest first",
+                                 or grant); shows the plans you're eligible for vs the \
+                                 other plans the title needs",
                             ),
                     )
                     .arg(

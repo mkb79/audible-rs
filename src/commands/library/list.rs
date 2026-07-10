@@ -133,13 +133,16 @@ pub(super) async fn list_missing(
 
 /// `library list --borrowed` — titles the user did not purchase (access via
 /// a subscription/grant), i.e. `origin_type != Purchase` (AUD-153). Owned
-/// titles are never listed. Columns: the `plan` the customer is eligible for
-/// (none = not currently playable) and `leaving`, the access-end date when
-/// one is set (none for open-ended access). Dated titles come first. Uses
-/// `origin_type`, not the unstable `is_ayce` flag. Reuses `--limit`/`--page`.
+/// titles are never listed. Splits the item's plans into `eligible` (the ones
+/// you can play through) and `not_eligible` (other plans the title is in that
+/// you're not on — e.g. a promo, or the membership plan you'd need once a
+/// subscription lapses; the generic AccessViaMusic route is omitted). Ordered
+/// by title. Uses `origin_type`, not the unstable `is_ayce` flag. Reuses
+/// `--limit`/`--page`.
 ///
-/// The two optional columns render as `—` when empty in the human table, but
-/// stay empty strings in `-o json`/`plain` so consumers can test emptiness.
+/// In the human table an empty `eligible` shows as `none` (nothing plays it
+/// right now) and an empty `not_eligible` as `—`; `-o json`/`plain` keep the
+/// empty string so consumers can test emptiness.
 pub(super) async fn list_borrowed(ctx: &Ctx, limit: u32, page: u32) -> Result<()> {
     let db = ctx.open_library_db().await?;
     maybe_auto_sync(ctx, &db).await?;
@@ -160,23 +163,23 @@ pub(super) async fn list_borrowed(ctx: &Ctx, limit: u32, page: u32) -> Result<()
         eprintln!("no borrowed titles — every title in your library is owned");
         return Ok(());
     }
-    // Placeholder for empty optional cells — only in the human table; JSON and
-    // plain keep the empty string so callers can still test for "none".
+    // Placeholders for empty cells — only in the human table; JSON and plain
+    // keep the empty string so callers can still test for "none".
     let human = matches!(ctx.output_format(), crate::output::OutputFormat::Table);
-    let cell = |value: &str| match (human, value.is_empty()) {
-        (true, true) => "—".to_string(),
+    let placeholder = |value: &str, empty: &str| match (human, value.is_empty()) {
+        (true, true) => empty.to_string(),
         _ => value.to_owned(),
     };
     ctx.print(&crate::output::Output::table(
-        vec!["mp", "asin", "title", "plan", "leaving"],
+        vec!["mp", "asin", "title", "eligible", "not_eligible"],
         rows.iter()
             .map(|row| {
                 vec![
                     row.marketplace.clone(),
                     row.asin.clone(),
                     row.full_title.clone(),
-                    cell(&row.plan),
-                    cell(&row.leaving),
+                    placeholder(&row.eligible, "none"),
+                    placeholder(&row.not_eligible, "—"),
                 ]
             })
             .collect(),

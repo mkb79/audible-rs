@@ -158,13 +158,15 @@ pub struct BorrowedRow {
     pub asin: String,
     /// `Title: Subtitle`.
     pub full_title: String,
-    /// Name of the plan the user is eligible for (e.g. `Audible-AYCL`,
-    /// `US Minerva`, `Free Tier`); empty when none — a signal that the title
-    /// is not currently playable.
-    pub plan: String,
-    /// Access-end date `YYYY-MM-DD` (`customer_rights.is_consumable_until`),
-    /// or empty when there is no real end (the `2099-…` sentinel or absent).
-    pub leaving: String,
+    /// Comma-separated names of the plans the user is eligible for
+    /// (e.g. `Audible-AYCL`, `US Minerva`, `Free Tier`) — the ones through
+    /// which the title is currently playable. Empty when none.
+    pub eligible: String,
+    /// Comma-separated names of the other plans the title belongs to that the
+    /// user is NOT eligible for (e.g. `SpecialBenefit`, or the membership plan
+    /// once a subscription lapses). The generic `AccessViaMusic` route is
+    /// omitted as noise. Empty when there is none.
+    pub not_eligible: String,
 }
 
 /// A row of the `v_books` view.
@@ -759,16 +761,17 @@ impl Db {
     /// reflects current Plus-catalog membership (not acquisition), is `true`
     /// even for purchased titles also in Plus, and flips between API calls.
     ///
-    /// Two derived columns:
-    /// - `plan`: the name of the plan the customer is eligible for — the one
-    ///   with the latest end date among `plans[]` where `customer_eligible`
-    ///   is true (e.g. `Audible-AYCL`, `US Minerva`, `Free Tier`). Empty when
-    ///   none is eligible — a hint the title is not currently playable.
-    /// - `leaving`: the access-end date `YYYY-MM-DD`
-    ///   (`customer_rights.is_consumable_until`) when real, else empty (the
-    ///   `2099-…` "no real end" sentinel or absent).
+    /// Splits the item's `plans[]` (each `{plan_name, customer_eligible}`) by
+    /// eligibility, sorted and comma-joined:
+    /// - `eligible`: plans with `customer_eligible = true` — those you can
+    ///   currently play through. Empty when none.
+    /// - `not_eligible`: the remaining plans (`customer_eligible` false/null),
+    ///   minus the generic `AccessViaMusic` route (near-universal noise) —
+    ///   e.g. a promo `SpecialBenefit`, or the membership plan you'd need once
+    ///   a subscription lapses. Empty when none.
     ///
-    /// Ordered dated-first (soonest leaving date at the top), then by title.
+    /// Ordered by title, then by the `(asin, marketplace)` key so pagination
+    /// (`--limit`/`--page`) is stable.
     pub async fn books_borrowed(
         &self,
         marketplaces: Vec<String>,
@@ -782,20 +785,22 @@ impl Db {
             }
             let sql = format!(
                 "SELECT marketplace, asin, full_title,
-                        COALESCE((SELECT json_extract(p.value, '$.plan_name')
-                                  FROM json_each(items.doc, '$.plans') p
-                                  WHERE json_extract(p.value, '$.customer_eligible') = 1
-                                  ORDER BY json_extract(p.value, '$.end_date') DESC
-                                  LIMIT 1), '') AS plan,
-                        CASE WHEN json_extract(doc, '$.customer_rights.is_consumable_until') IS NOT NULL
-                               AND json_extract(doc, '$.customer_rights.is_consumable_until') < '2099'
-                             THEN substr(json_extract(doc, '$.customer_rights.is_consumable_until'), 1, 10)
-                             ELSE '' END AS leaving
+                        COALESCE((SELECT group_concat(name, ', ') FROM (
+                                    SELECT DISTINCT json_extract(p.value, '$.plan_name') AS name
+                                    FROM json_each(items.doc, '$.plans') p
+                                    WHERE json_extract(p.value, '$.customer_eligible') = 1
+                                    ORDER BY name)), '') AS eligible,
+                        COALESCE((SELECT group_concat(name, ', ') FROM (
+                                    SELECT DISTINCT json_extract(p.value, '$.plan_name') AS name
+                                    FROM json_each(items.doc, '$.plans') p
+                                    WHERE json_extract(p.value, '$.customer_eligible') IS NOT 1
+                                      AND json_extract(p.value, '$.plan_name') <> 'AccessViaMusic'
+                                    ORDER BY name)), '') AS not_eligible
                  FROM items
                  WHERE is_deleted = 0
                    AND marketplace IN ({})
                    AND json_extract(doc, '$.origin_type') IS NOT 'Purchase'
-                 ORDER BY (leaving = '') ASC, leaving ASC, full_title, asin, marketplace
+                 ORDER BY full_title, asin, marketplace
                  LIMIT ? OFFSET ?",
                 in_placeholders(marketplaces.len())
             );
@@ -812,8 +817,8 @@ impl Db {
                         marketplace: row.get(0)?,
                         asin: row.get(1)?,
                         full_title: row.get(2)?,
-                        plan: row.get(3)?,
-                        leaving: row.get(4)?,
+                        eligible: row.get(3)?,
+                        not_eligible: row.get(4)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1178,36 +1183,24 @@ mod tests {
 
     /// An item for the `books_borrowed` tests. `purchased` sets
     /// `origin_type = "Purchase"` (owned); otherwise the field is absent, as
-    /// on subscription titles. `until` fills `customer_rights.is_consumable_until`.
-    /// `eligible_plan` adds one `plans[]` entry with `customer_eligible: true`
-    /// under that name, plus a non-eligible `AccessViaMusic` plan to prove it
-    /// is ignored.
-    fn borrowed_item(
-        asin: &str,
-        purchased: bool,
-        until: Option<&str>,
-        eligible_plan: Option<&str>,
-    ) -> UpsertItem {
-        let mut rights = serde_json::json!({ "is_consumable": true });
-        if let Some(date) = until {
-            rights["is_consumable_until"] = date.into();
-        }
-        let mut plans = vec![serde_json::json!({
-            "plan_name": "AccessViaMusic",
-            "customer_eligible": serde_json::Value::Null,
-            "end_date": "2099-12-31T00:00:00Z",
-        })];
-        if let Some(name) = eligible_plan {
-            plans.push(serde_json::json!({
-                "plan_name": name,
-                "customer_eligible": true,
-                "end_date": "2099-12-31T00:00:00Z",
-            }));
-        }
+    /// on subscription titles. `plans` is a list of `(plan_name, eligible)`,
+    /// where `eligible` is `Some(true|false)` or `None` (JSON null).
+    fn borrowed_item(asin: &str, purchased: bool, plans: &[(&str, Option<bool>)]) -> UpsertItem {
+        let plans: Vec<serde_json::Value> = plans
+            .iter()
+            .map(|(name, eligible)| {
+                serde_json::json!({
+                    "plan_name": name,
+                    "customer_eligible": match eligible {
+                        Some(value) => serde_json::Value::Bool(*value),
+                        None => serde_json::Value::Null,
+                    },
+                })
+            })
+            .collect();
         let mut doc = serde_json::json!({
             "asin": asin,
             "title": asin,
-            "customer_rights": rights,
             "plans": plans,
         });
         if purchased {
@@ -1224,27 +1217,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn books_borrowed_lists_unpurchased_titles_dated_first_with_eligible_plan() {
+    async fn books_borrowed_splits_plans_by_eligibility() {
         let (_dir, db) = open_temp().await;
         db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
         db.apply_page(
             MP.into(),
             vec![
-                // Dated: a real end date floats to the top.
-                borrowed_item("A_DATED", false, Some("2031-12-31T22:00:00Z"), Some("AYCL")),
-                // Open-ended borrows: 2099 sentinel and no date at all — both
-                // listed (they are borrowed) but with an empty `leaving`.
+                // Eligible plan + the generic AccessViaMusic route (ignored).
                 borrowed_item(
-                    "A_SENTINEL",
+                    "A_ELIG",
                     false,
-                    Some("2099-12-31T00:00:00Z"),
-                    Some("Minerva"),
+                    &[("Audible-AYCL", Some(true)), ("AccessViaMusic", None)],
                 ),
-                borrowed_item("A_OPEN", false, None, Some("Minerva")),
-                // Borrowed but no eligible plan → empty `plan` (not playable).
-                borrowed_item("A_LOCKED", false, None, None),
+                // Eligible, plus a promo the user is NOT on (kept as not_eligible).
+                borrowed_item(
+                    "B_PROMO",
+                    false,
+                    &[
+                        ("US Minerva", Some(true)),
+                        ("AccessViaMusic", None),
+                        ("SpecialBenefit", None),
+                    ],
+                ),
+                // No eligible plan (false + null) → membership plan surfaces as
+                // not_eligible; eligible is empty.
+                borrowed_item(
+                    "C_LAPSED",
+                    false,
+                    &[("US Minerva", Some(false)), ("AccessViaMusic", None)],
+                ),
+                // Two eligible plans → sorted and comma-joined.
+                borrowed_item(
+                    "D_MULTI",
+                    false,
+                    &[("Plan B", Some(true)), ("Plan A", Some(true))],
+                ),
                 // Purchased → excluded entirely.
-                borrowed_item("A_OWNED", true, None, Some("AYCL")),
+                borrowed_item("E_OWNED", true, &[("Audible-AYCL", Some(true))]),
             ],
             vec![],
             default_log(),
@@ -1257,21 +1266,28 @@ mod tests {
             .books_borrowed(vec![MP.to_owned()], u32::MAX, 0)
             .await
             .unwrap();
-        let asins: Vec<&str> = rows.iter().map(|row| row.asin.as_str()).collect();
-        // All four unpurchased titles, dated first then by title; the
-        // purchased one is excluded.
-        assert_eq!(asins, vec!["A_DATED", "A_LOCKED", "A_OPEN", "A_SENTINEL"]);
-        // The dated row carries the real date; the eligible plan name is
-        // resolved and the non-eligible AccessViaMusic plan is ignored.
-        assert_eq!(rows[0].leaving, "2031-12-31");
-        assert_eq!(rows[0].plan, "AYCL");
-        // No eligible plan → empty plan; open-ended → empty leaving.
-        let locked = rows.iter().find(|r| r.asin == "A_LOCKED").unwrap();
-        assert_eq!(locked.plan, "");
-        assert_eq!(locked.leaving, "");
-        let sentinel = rows.iter().find(|r| r.asin == "A_SENTINEL").unwrap();
-        assert_eq!(sentinel.leaving, "");
-        assert_eq!(sentinel.plan, "Minerva");
+        let seen: Vec<(&str, &str, &str)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.asin.as_str(),
+                    row.eligible.as_str(),
+                    row.not_eligible.as_str(),
+                )
+            })
+            .collect();
+        // Ordered by title; the purchased title is excluded. AccessViaMusic is
+        // dropped from not_eligible; false and null both count as not eligible;
+        // multiple eligible plans are sorted and joined.
+        assert_eq!(
+            seen,
+            vec![
+                ("A_ELIG", "Audible-AYCL", ""),
+                ("B_PROMO", "US Minerva", "SpecialBenefit"),
+                ("C_LAPSED", "", "US Minerva"),
+                ("D_MULTI", "Plan A, Plan B", ""),
+            ]
+        );
         assert_eq!(
             db.count_books_borrowed(vec![MP.to_owned()]).await.unwrap(),
             4
