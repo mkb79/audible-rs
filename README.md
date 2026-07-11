@@ -1,7 +1,7 @@
 # audible-rs
 
 [![Project status: WIP](https://www.repostatus.org/badges/latest/wip.svg)](https://www.repostatus.org/#wip)
-[![Version](https://img.shields.io/badge/version-0.1.0--alpha-orange)](Cargo.toml)
+[![Version](https://img.shields.io/github/v/release/mkb79/audible-rs?include_prereleases&label=version)](https://github.com/mkb79/audible-rs/releases)
 [![CI](https://github.com/mkb79/audible-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/mkb79/audible-rs/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
