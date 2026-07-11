@@ -1,9 +1,9 @@
 //! Plugin system (archived architecture §9, AUD-68; discovery revised in
 //! AUD-163): discovery of `audible-<name>` executables (Tier A) and
 //! `cmd_<name>.py` scripts (Tier B, run with `python3`) — both in the
-//! dedicated plugin dir only — the `--audible-describe` manifest
-//! protocol, and external invocation with verbatim argv pass-through.
-//! **No command override**: a plugin whose
+//! dedicated plugin dir only, installed via `plugin add` — the
+//! `--audible-describe` manifest protocol, and external invocation with
+//! verbatim argv pass-through. **No command override**: a plugin whose
 //! name collides with a built-in is never loaded — and structurally
 //! cannot fire anyway, because built-ins are registered clap subcommands
 //! while externals only reach the plugin path for unknown names. Broker
@@ -172,6 +172,111 @@ fn broken_symlink(name: &str, path: PathBuf, tier: Tier) -> Discovered {
         source: path,
         broken: Some("symlink target missing (moved or deleted?)".to_owned()),
     }
+}
+
+/// A successful [`install`]: what landed where, plus the verified
+/// manifest.
+#[derive(Debug)]
+pub struct Installed {
+    /// Command name (derived from the file name — that is what wins).
+    pub name: String,
+    pub tier: Tier,
+    pub manifest: Manifest,
+    /// The new entry inside the plugin dir.
+    pub target: PathBuf,
+}
+
+/// Installs `source` into `plugin_dir` (AUD-163) — fail-closed: the file
+/// name must follow the naming convention, the name must collide with
+/// neither a built-in nor an installed plugin, and the source must
+/// answer `--audible-describe` with a valid manifest **before** anything
+/// lands. `symlink` links instead of copying (dev workflow — moving or
+/// deleting the original breaks the plugin).
+pub async fn install(
+    plugin_dir: &Path,
+    source: &Path,
+    symlink: bool,
+    builtins: &[String],
+) -> Result<Installed> {
+    let source = source
+        .canonicalize()
+        .with_context(|| format!("cannot read {}", source.display()))?;
+    let file_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("source has no usable file name")?
+        .to_owned();
+    let (name, tier) = match classify_file_name(&file_name) {
+        Some(classified) => classified,
+        None => bail!(
+            "{file_name} does not follow the plugin naming convention — rename it to \
+             audible-<name> (executable) or cmd_<name>.py (python)"
+        ),
+    };
+    if tier == Tier::Executable && !is_executable(&source) {
+        bail!("{} is not executable (chmod +x it first)", source.display());
+    }
+    if tier == Tier::Python && python3().is_none() {
+        bail!("cmd_<name>.py plugins need python3 on PATH");
+    }
+    if builtins.iter().any(|builtin| builtin == &name) {
+        bail!("{name:?} collides with a built-in command (plugins cannot override built-ins)");
+    }
+    if let Some(existing) = discover_in(plugin_dir, builtins, python3())
+        .into_iter()
+        .find(|plugin| plugin.name == name)
+    {
+        bail!(
+            "{name:?} is already installed from {} — `plugin remove {name}` first",
+            existing.source.display()
+        );
+    }
+
+    // Verify before installing: the source must describe itself.
+    let candidate = Discovered {
+        name: name.clone(),
+        tier,
+        source: source.clone(),
+        broken: None,
+    };
+    let manifest = describe(&candidate).await.map_err(|reason| {
+        anyhow::anyhow!("{} is not a usable plugin: {reason}", source.display())
+    })?;
+
+    std::fs::create_dir_all(plugin_dir)
+        .with_context(|| format!("could not create {}", plugin_dir.display()))?;
+    let target = plugin_dir.join(&file_name);
+    if target.symlink_metadata().is_ok() {
+        bail!("{} already exists — remove it first", target.display());
+    }
+    if symlink {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&source, &target)
+            .with_context(|| format!("could not symlink {}", target.display()))?;
+        #[cfg(not(unix))]
+        bail!("--symlink installs are unix-only; install as a copy instead");
+    } else {
+        std::fs::copy(&source, &target)
+            .with_context(|| format!("could not copy to {}", target.display()))?;
+    }
+    Ok(Installed {
+        name,
+        tier,
+        manifest,
+        target,
+    })
+}
+
+/// Classifies a would-be plugin file by its name: `audible-<name>`
+/// (Tier A) or `cmd_<name>.py` (Tier B); `None` for anything else.
+pub(crate) fn classify_file_name(file_name: &str) -> Option<(String, Tier)> {
+    if let Some(name) = file_name.strip_prefix("audible-") {
+        return Some((name.to_owned(), Tier::Executable));
+    }
+    file_name
+        .strip_prefix("cmd_")
+        .and_then(|rest| rest.strip_suffix(".py"))
+        .map(|name| (name.to_owned(), Tier::Python))
 }
 
 /// A Tier-A candidate; broken when the exec bit is missing.
@@ -484,6 +589,65 @@ mod tests {
             plugins[0].broken.as_deref(),
             Some("symlink target missing (moved or deleted?)")
         );
+    }
+
+    #[tokio::test]
+    async fn install_verifies_names_collisions_and_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugins");
+        let src_dir = tmp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let good = demo_plugin(&src_dir, "good", "\"api\"", 0);
+
+        // Copy install: verified manifest, file lands in the dir.
+        let installed = install(&plugin_dir, &good, false, &[]).await.unwrap();
+        assert_eq!(installed.name, "good");
+        assert_eq!(installed.manifest.scopes, ["api"]);
+        assert!(installed.target.is_file());
+        // A second add of the same name is refused.
+        let error = install(&plugin_dir, &good, false, &[])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already installed"), "{error}");
+
+        // Built-in collision is refused before anything runs.
+        let stats = demo_plugin(&src_dir, "stats", "", 0);
+        let error = install(&plugin_dir, &stats, false, &["stats".to_owned()])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("built-in"), "{error}");
+
+        // Naming convention and describe verification are enforced.
+        let misnamed = write_plugin(&src_dir, "myplugin", "#!/bin/sh\nexit 0\n", true);
+        let error = install(&plugin_dir, &misnamed, false, &[])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("naming convention"), "{error}");
+        let undescribed = write_plugin(&src_dir, "audible-mute", "#!/bin/sh\nexit 7\n", true);
+        let error = install(&plugin_dir, &undescribed, false, &[])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a usable plugin"), "{error}");
+        assert!(!plugin_dir.join("audible-mute").exists());
+
+        // Symlink install: the dir entry is a link to the original.
+        let linked = demo_plugin(&src_dir, "linked", "", 0);
+        let installed = install(&plugin_dir, &linked, true, &[]).await.unwrap();
+        assert!(
+            installed
+                .target
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        // Removing the dir entry keeps the original (remove semantics).
+        std::fs::remove_file(&installed.target).unwrap();
+        assert!(linked.is_file());
     }
 
     #[tokio::test]

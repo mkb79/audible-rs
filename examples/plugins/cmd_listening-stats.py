@@ -1,9 +1,9 @@
 """Reference plugin (AUD-70): monthly listening minutes.
 
 Port of audible-cli's ``cmd_listening-stats.py`` onto the audible-rs
-plugin broker. Install: copy this file into the plugin dir (default
-``<data_dir>/plugins``) and make ``audible_plugin_sdk`` importable
-(``pip install <repo>/sdk/python`` or PYTHONPATH). Then::
+plugin broker. Install: ``audible plugin add <path to this file>`` and
+make ``audible_plugin_sdk`` importable (``pip install <repo>/sdk/python``
+or PYTHONPATH). Then::
 
     audible listening-stats [--year 2026] [-m de]
 
@@ -13,8 +13,8 @@ signs the request with the account of the invoking CLI run.
 
 import argparse
 import datetime
-
-from audible_plugin_sdk import Broker, run
+import json
+import sys
 
 MANIFEST = {
     "name": "listening-stats",
@@ -23,6 +23,24 @@ MANIFEST = {
     "scopes": ["api"],
     "help": "usage: audible listening-stats [--year YYYY] [--marketplace CC]",
 }
+
+# Answer the discovery/install probe before importing the SDK: the
+# manifest needs nothing from the broker, so `plugin add`/`plugin list`
+# work even when audible_plugin_sdk is not importable (yet).
+if __name__ == "__main__" and "--audible-describe" in sys.argv:
+    print(json.dumps(MANIFEST))
+    raise SystemExit(0)
+
+try:
+    from audible_plugin_sdk import Broker, run
+except ImportError:
+    print(
+        "error: audible_plugin_sdk is not importable — install it with\n"
+        "  pip install <audible-rs repo>/sdk/python\n"
+        "or add <audible-rs repo>/sdk/python to PYTHONPATH.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2) from None
 
 
 def main(argv):
