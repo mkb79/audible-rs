@@ -2,12 +2,17 @@
 
 Stdlib-only Python client for the audible-rs plugin broker (AUD-69/70).
 
-A plugin is a `cmd_<name>.py` in the plugin dir (default
-`<data_dir>/plugins`, config `[plugins] dir`) or an `audible-<name>`
-executable. It must answer `--audible-describe` with its manifest JSON;
+A plugin is a `cmd_<name>.py` script or an `audible-<name>` executable
+in the plugin dir (default `<data_dir>/plugins`, config `[plugins] dir`)
+— the plugin dir is the **only** place audible looks; `PATH` is not
+scanned. It must answer `--audible-describe` with its manifest JSON;
 `audible_plugin_sdk.run(manifest, main)` does that for you. Declared
 manifest scopes (`api`, `download`, `config`, `invoke`) decide what the
 broker lets the plugin do — the plugin never sees auth material.
+
+Install a plugin by copying (or symlinking) its file into the plugin
+dir. A symlink whose original moved or was deleted shows up in
+`plugin list` as `broken: symlink target missing`.
 
 ```python
 from audible_plugin_sdk import Broker, run

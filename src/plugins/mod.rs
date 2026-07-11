@@ -1,8 +1,9 @@
-//! Plugin system (archived architecture §9, AUD-68): discovery of
-//! `audible-<name>` executables (Tier A, plugin dir + `PATH`) and
-//! `cmd_<name>.py` scripts (Tier B, plugin dir, run with `python3`), the
-//! `--audible-describe` manifest protocol, and external invocation with
-//! verbatim argv pass-through. **No command override**: a plugin whose
+//! Plugin system (archived architecture §9, AUD-68; discovery revised in
+//! AUD-163): discovery of `audible-<name>` executables (Tier A) and
+//! `cmd_<name>.py` scripts (Tier B, run with `python3`) — both in the
+//! dedicated plugin dir only — the `--audible-describe` manifest
+//! protocol, and external invocation with verbatim argv pass-through.
+//! **No command override**: a plugin whose
 //! name collides with a built-in is never loaded — and structurally
 //! cannot fire anyway, because built-ins are registered clap subcommands
 //! while externals only reach the plugin path for unknown names. Broker
@@ -34,7 +35,7 @@ const DESCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
-    /// `audible-<name>` executable (plugin dir or `PATH`).
+    /// `audible-<name>` executable in the plugin dir.
     Executable,
     /// `cmd_<name>.py` in the plugin dir, run via `python3`.
     Python,
@@ -89,25 +90,19 @@ pub fn plugin_dir(ctx: &Ctx) -> PathBuf {
         .unwrap_or_else(|| paths::data_dir().join("plugins"))
 }
 
-/// Discovers every plugin visible to this process: Tier A in the plugin
-/// dir, Tier B in the plugin dir, Tier A on `PATH` — in that precedence
-/// (first occurrence of a name wins, like `PATH` lookup). Names that
+/// Discovers every plugin: Tier A (`audible-<name>`) and Tier B
+/// (`cmd_<name>.py`) in the **plugin dir only** (AUD-163, Docker
+/// cli-plugins model — `PATH` is deliberately not scanned: the
+/// `audible-*` namespace is occupied by non-plugins such as
+/// `audible-quickstart`). First occurrence of a name wins. Names that
 /// collide with built-in commands are kept as broken entries (auditable
 /// in `plugin list`) and additionally warned about.
 pub fn discover(ctx: &Ctx, builtins: &[String]) -> Vec<Discovered> {
-    let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).collect())
-        .unwrap_or_default();
-    discover_in(&plugin_dir(ctx), &path_dirs, builtins, python3())
+    discover_in(&plugin_dir(ctx), builtins, python3())
 }
 
 /// [`discover`] with every environment input explicit (testable).
-fn discover_in(
-    plugin_dir: &Path,
-    path_dirs: &[PathBuf],
-    builtins: &[String],
-    python: Option<PathBuf>,
-) -> Vec<Discovered> {
+fn discover_in(plugin_dir: &Path, builtins: &[String], python: Option<PathBuf>) -> Vec<Discovered> {
     let mut found: Vec<Discovered> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut push = |mut plugin: Discovered| {
@@ -125,40 +120,41 @@ fn discover_in(
         found.push(plugin);
     };
 
-    // Tier A + B in the plugin dir.
     for entry in read_dir_sorted(plugin_dir) {
         let file_name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
-        if !path.is_file() {
+        // A symlink whose target vanished must stay visible instead of
+        // silently dropping out of `plugin list` — with `--symlink`
+        // installs, moving the original is the expected failure mode.
+        let dangling = path
+            .symlink_metadata()
+            .is_ok_and(|meta| meta.file_type().is_symlink())
+            && !path.exists();
+        if !dangling && !path.is_file() {
             continue;
         }
         if let Some(name) = file_name.strip_prefix("audible-") {
-            push(tier_a(name, path));
+            if dangling {
+                push(broken_symlink(name, path, Tier::Executable));
+            } else {
+                push(tier_a(name, path));
+            }
         } else if let Some(name) = file_name
             .strip_prefix("cmd_")
             .and_then(|rest| rest.strip_suffix(".py"))
         {
-            match &python {
-                Some(_) => push(Discovered {
-                    name: name.to_owned(),
-                    tier: Tier::Python,
-                    source: path,
-                    broken: None,
-                }),
-                // Per the spec: no python3 → Tier B is silently skipped.
-                None => tracing::debug!(source = %path.display(), "no python3; skipping"),
-            }
-        }
-    }
-
-    // Tier A on PATH.
-    for dir in path_dirs {
-        for entry in read_dir_sorted(dir) {
-            let file_name = entry.file_name().to_string_lossy().into_owned();
-            if let Some(name) = file_name.strip_prefix("audible-") {
-                let path = entry.path();
-                if path.is_file() {
-                    push(tier_a(name, path));
+            if dangling {
+                push(broken_symlink(name, path, Tier::Python));
+            } else {
+                match &python {
+                    Some(_) => push(Discovered {
+                        name: name.to_owned(),
+                        tier: Tier::Python,
+                        source: path,
+                        broken: None,
+                    }),
+                    // Per the spec: no python3 → Tier B is silently skipped.
+                    None => tracing::debug!(source = %path.display(), "no python3; skipping"),
                 }
             }
         }
@@ -166,6 +162,16 @@ fn discover_in(
 
     found.sort_by(|a, b| a.name.cmp(&b.name));
     found
+}
+
+/// A plugin-dir symlink whose target is gone (AUD-163).
+fn broken_symlink(name: &str, path: PathBuf, tier: Tier) -> Discovered {
+    Discovered {
+        name: name.to_owned(),
+        tier,
+        source: path,
+        broken: Some("symlink target missing (moved or deleted?)".to_owned()),
+    }
 }
 
 /// A Tier-A candidate; broken when the exec bit is missing.
@@ -419,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_tiers_precedence_and_no_override() {
+    fn discovery_is_plugin_dir_only_and_no_override() {
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path().join("plugins");
         let path_dir = tmp.path().join("bin");
@@ -427,21 +433,17 @@ mod tests {
         std::fs::create_dir_all(&path_dir).unwrap();
 
         demo_plugin(&plugin_dir, "stats", "", 0);
+        write_plugin(&plugin_dir, "cmd_stats.py", "print('dup')\n", false);
+        demo_plugin(&plugin_dir, "download", "", 0); // collides with a built-in
         write_plugin(&plugin_dir, "audible-noexec", "#!/bin/sh\n", false);
         write_plugin(&plugin_dir, "cmd_pytool.py", "print('hi')\n", false);
         write_plugin(&plugin_dir, "README.md", "not a plugin\n", false);
-        // PATH provides a duplicate of `stats` (plugin dir wins) and a
-        // collision with a built-in.
-        demo_plugin(&path_dir, "stats", "", 0);
-        demo_plugin(&path_dir, "download", "", 0);
+        // `audible-*` outside the plugin dir is NOT a plugin (AUD-163) —
+        // the PATH scan is gone, so this must never surface.
+        demo_plugin(&path_dir, "elsewhere", "", 0);
 
         let python = Some(PathBuf::from("/usr/bin/python3"));
-        let plugins = discover_in(
-            &plugin_dir,
-            std::slice::from_ref(&path_dir),
-            &["download".to_owned()],
-            python,
-        );
+        let plugins = discover_in(&plugin_dir, &["download".to_owned()], python);
         let names: Vec<&str> = plugins.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["download", "noexec", "pytool", "stats"]);
 
@@ -452,12 +454,36 @@ mod tests {
         );
         assert_eq!(by_name("noexec").broken.as_deref(), Some("not executable"));
         assert_eq!(by_name("pytool").tier, Tier::Python);
-        // Plugin dir won over PATH for `stats`.
-        assert!(by_name("stats").source.starts_with(&plugin_dir));
+        // Same name twice in the dir: the first entry (Tier A) wins.
+        assert_eq!(by_name("stats").tier, Tier::Executable);
 
         // Without python3, Tier B disappears silently.
-        let without = discover_in(&plugin_dir, &[], &[], None);
+        let without = discover_in(&plugin_dir, &[], None);
         assert!(!without.iter().any(|p| p.name == "pytool"));
+    }
+
+    #[test]
+    fn dangling_symlink_is_listed_broken() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugins");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let original = write_plugin(tmp.path(), "cmd_linked.py", "print('hi')\n", false);
+        std::os::unix::fs::symlink(&original, plugin_dir.join("cmd_linked.py")).unwrap();
+
+        // Healthy symlink: a normal Tier-B plugin.
+        let python = Some(PathBuf::from("/usr/bin/python3"));
+        let plugins = discover_in(&plugin_dir, &[], python.clone());
+        assert_eq!(plugins.len(), 1);
+        assert!(plugins[0].broken.is_none());
+
+        // Target moves away: the entry must stay visible, with a reason.
+        std::fs::remove_file(&original).unwrap();
+        let plugins = discover_in(&plugin_dir, &[], python);
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(
+            plugins[0].broken.as_deref(),
+            Some("symlink target missing (moved or deleted?)")
+        );
     }
 
     #[tokio::test]
@@ -473,7 +499,7 @@ mod tests {
         );
         write_plugin(tmp.path(), "audible-slow", "#!/bin/sh\nsleep 5\n", true);
 
-        let plugins = discover_in(tmp.path(), &[], &[], None);
+        let plugins = discover_in(tmp.path(), &[], None);
         let by_name = |name: &str| plugins.iter().find(|p| p.name == name).unwrap();
 
         let manifest = describe(by_name("good")).await.unwrap();
@@ -507,7 +533,7 @@ mod tests {
             true,
         );
 
-        let plugins = discover_in(tmp.path(), &[], &[], None);
+        let plugins = discover_in(tmp.path(), &[], None);
         let by_name = |name: &str| plugins.iter().find(|p| p.name == name).unwrap();
 
         // The last non-empty stderr line lands in the reason, plus the
@@ -538,7 +564,7 @@ mod tests {
             true,
         );
 
-        let plugins = discover_in(tmp.path(), &[], &[], None);
+        let plugins = discover_in(tmp.path(), &[], None);
         let error = describe(&plugins[0]).await.unwrap_err();
         assert!(error.contains("describe failed"), "{error}");
         assert!(!error.contains("timed out"), "{error}");
@@ -567,7 +593,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = test_ctx(tmp.path());
         demo_plugin(tmp.path(), "seven", "", 7);
-        let plugins = discover_in(tmp.path(), &[], &[], None);
+        let plugins = discover_in(tmp.path(), &[], None);
         let code = invoke(&ctx, &plugins[0], &["--flag".into(), "value".into()])
             .await
             .unwrap();
@@ -575,7 +601,7 @@ mod tests {
 
         // A broken plugin never executes.
         write_plugin(tmp.path(), "audible-dead", "#!/bin/sh\n", false);
-        let plugins = discover_in(tmp.path(), &[], &[], None);
+        let plugins = discover_in(tmp.path(), &[], None);
         let dead = plugins.iter().find(|p| p.name == "dead").unwrap();
         let error = invoke(&ctx, dead, &[]).await.unwrap_err().to_string();
         assert!(error.contains("not executable"), "{error}");
@@ -607,7 +633,7 @@ mod tests {
              [ -z \"$AUDIBLE_SOCKET\" ] || exit 5\n",
             true,
         );
-        let plugins = discover_in(tmp.path(), &[], &[], None);
+        let plugins = discover_in(tmp.path(), &[], None);
         let by_name = |name: &str| plugins.iter().find(|p| p.name == name).unwrap();
         assert_eq!(invoke(&ctx, by_name("scoped"), &[]).await.unwrap(), 0);
         assert_eq!(invoke(&ctx, by_name("unscoped"), &[]).await.unwrap(), 0);
