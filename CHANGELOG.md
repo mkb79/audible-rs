@@ -9,6 +9,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 This file is generated from the commit history by [git-cliff](https://git-cliff.org)
 — do not edit it by hand (see `cliff.toml`).
 
+## [0.1.0-alpha.3](https://github.com/mkb79/audible-rs/compare/v0.1.0-alpha.2..v0.1.0-alpha.3) - 2026-07-11
+
+### Added
+
+- *plugins*: Library-gui example plugin — local library dashboard in the browser ([#17](https://github.com/mkb79/audible-rs/pull/17)) ([8eecbb2](https://github.com/mkb79/audible-rs/commit/8eecbb2d39a6bf6e7ea54c5b2b3cee8d030d60c9))
+- *plugins*: Plugin add|remove — install from local files or https URLs ([#16](https://github.com/mkb79/audible-rs/pull/16)) ([744eca6](https://github.com/mkb79/audible-rs/commit/744eca6228968243dac82df3a9ca613db796adf2))
+- *plugins*: Discovery only in the plugin dir (drop the PATH scan) ([#15](https://github.com/mkb79/audible-rs/pull/15)) ([7a1d8e0](https://github.com/mkb79/audible-rs/commit/7a1d8e052401ce762cc2029af622a89b0722caba))
+- *cli*: `audible stats` — listening time per month/year, per marketplace ([#12](https://github.com/mkb79/audible-rs/pull/12)) ([3f9ee0e](https://github.com/mkb79/audible-rs/commit/3f9ee0e2eed18ce8260028f00c7318ecae06290b))
+- *library*: `list --borrowed` lists titles you don't own (eligible vs other plans) ([#11](https://github.com/mkb79/audible-rs/pull/11)) ([2102f1a](https://github.com/mkb79/audible-rs/commit/2102f1aed531204c917fbef05858c50474332362))
+- *account*: `account status` — membership overview (AUD-152) ([#10](https://github.com/mkb79/audible-rs/pull/10)) ([8d441d9](https://github.com/mkb79/audible-rs/commit/8d441d9ef84ea82cb8a022dd489de3cc1b659e0a))
+
+### Fixed
+
+- *plugins*: Describe probes get no TTY and broken reasons carry stderr ([#14](https://github.com/mkb79/audible-rs/pull/14)) ([f9e2cfa](https://github.com/mkb79/audible-rs/commit/f9e2cfa6db189c47aa65b3bb4400938f2d51b81c))
+- *download*: Write decrypted m4b moov-first (faststart) ([#13](https://github.com/mkb79/audible-rs/pull/13)) ([8758374](https://github.com/mkb79/audible-rs/commit/8758374f00c450775863a0837424d51f201c9264))
+
 ## [0.1.0-alpha.2](https://github.com/mkb79/audible-rs/compare/v0.1.0-alpha..v0.1.0-alpha.2) - 2026-07-09
 
 ### Added
