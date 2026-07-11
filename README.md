@@ -11,11 +11,12 @@ and [`mkb79/audible-cli`](https://github.com/mkb79/audible-cli) as a single
 Rust crate. It installs one binary, `audible`.
 
 > [!WARNING]
-> **Pre-alpha — not released yet.** There is no tagged release and no
-> stability guarantee. Commands, flags, the config file and the on-disk
-> database format may change at any time **without a migration path**
-> (before the first release the database is recreated rather than
-> migrated). Use it on a throwaway config first, and expect breakage.
+> **Alpha — no stability guarantee.** Alpha releases are tagged (see
+> [Releases](https://github.com/mkb79/audible-rs/releases)), but commands,
+> flags, the config file and the on-disk database format may change at any
+> time **without a migration path** (before the first stable release the
+> database is recreated rather than migrated). Use it on a throwaway config
+> first, and expect breakage.
 
 ## What it does
 
@@ -49,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/mkb79/audible-rs/main/install.sh | 
 
 It installs `audible` into `~/.local/bin` (override with `--bin-dir <dir>`)
 and verifies the download against the release checksums. By default it
-installs the latest **stable** release; while the project is pre-alpha (no
+installs the latest **stable** release; while the project is in alpha (no
 stable release yet) it installs the newest pre-release, and once a stable
 release exists you can pass `--pre` to keep tracking pre-releases.
 
