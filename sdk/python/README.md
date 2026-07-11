@@ -41,6 +41,60 @@ if __name__ == "__main__":
 ```
 
 Install for development: `pip install <repo>/sdk/python` (or put
-`sdk/python` on `PYTHONPATH`). A complete example lives in
-`examples/plugins/cmd_listening-stats.py`. PyPI publishing happens with
-the release (M8).
+`sdk/python` on `PYTHONPATH`). Complete examples live in
+`examples/plugins/` (`cmd_listening-stats.py` — scope `api`;
+`cmd_library-gui.py` — a local web dashboard on scope `invoke`). PyPI
+publishing happens with the release (M8).
+
+## Plugin authoring patterns
+
+Lessons the example plugins encode — copy them.
+
+**Answer `--audible-describe` before heavy imports.** Discovery,
+`plugin list` and the `plugin add` verification all probe your file
+with `--audible-describe`; the manifest needs nothing from the broker.
+If your module imports the SDK (or any dependency) at the top, the
+probe dies before it can print the manifest and your plugin shows up as
+broken. Instead:
+
+```python
+if __name__ == "__main__" and "--audible-describe" in sys.argv:
+    print(json.dumps(MANIFEST))
+    raise SystemExit(0)
+
+try:
+    from audible_plugin_sdk import Broker, run
+except ImportError:
+    print("error: audible_plugin_sdk is not importable — …", file=sys.stderr)
+    raise SystemExit(2) from None
+```
+
+**Selectors go before the plugin name.** Everything after the plugin
+name on the command line belongs to your plugin, and the broker pins
+the invoking `-a`/`-m`/`-s` selection before your process starts — a
+trailing `-m all` cannot work. If you do not define your own selector
+flags, catch them and guide the user instead of letting argparse fail:
+
+```python
+for flags in (("-a", "--account"), ("-m", "--marketplace"), ("-s", "--settings")):
+    parser.add_argument(*flags, dest="selector", help=argparse.SUPPRESS)
+...
+if args.selector is not None:
+    parser.error("selectors are fixed when the plugin starts — put them "
+                 "before the plugin name: audible -m all <plugin>")
+```
+
+**Recommend a settings bundle instead of changing global config.**
+Invoked built-ins honour the user's `[db]` settings (`auto_sync`, …)
+exactly like terminal runs. If your plugin wants different behaviour —
+a dashboard that must never sync implicitly, say — document a bundle:
+
+```toml
+[settings.gui]
+[settings.gui.db]
+auto_sync = "none"
+```
+
+and start it as `audible -m all -s gui <plugin>`: every invoke of that
+session inherits the bundle, the user's normal CLI behaviour stays
+untouched.
