@@ -10,9 +10,12 @@ scanned. It must answer `--audible-describe` with its manifest JSON;
 manifest scopes (`api`, `download`, `config`, `invoke`) decide what the
 broker lets the plugin do — the plugin never sees auth material.
 
-Install a plugin by copying (or symlinking) its file into the plugin
-dir. A symlink whose original moved or was deleted shows up in
-`plugin list` as `broken: symlink target missing`.
+Install a plugin with `audible plugin add <file>` (verifies the manifest
+before anything lands, then copies) or `audible plugin add --symlink
+<file>` during development — edits to the original apply immediately,
+but moving or deleting the original breaks the plugin (`plugin list`
+shows it as `broken: symlink target missing`). `audible plugin remove
+<name>` deletes only the plugin-dir entry, never a symlink's original.
 
 ```python
 from audible_plugin_sdk import Broker, run

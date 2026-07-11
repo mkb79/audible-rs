@@ -1,8 +1,13 @@
-//! `audible plugin` — inspect discovered plugins (AUD-68): `list` shows
-//! every plugin with tier, version, scopes and broken-status; `info`
-//! prints one plugin's full manifest and source. Both run the
-//! `--audible-describe` protocol on demand, so what is shown is exactly
-//! what would be trusted on invocation.
+//! `audible plugin` — manage and inspect plugins (AUD-68, AUD-163):
+//! `list` shows every plugin in the plugin dir with tier, version,
+//! scopes and broken-status; `info` prints one plugin's full manifest
+//! and source; `add` verifies a plugin file and installs it (copy or
+//! `--symlink`); `remove` deletes the plugin-dir entry (never a
+//! symlink's target). List/info run the `--audible-describe` protocol
+//! on demand, so what is shown is exactly what would be trusted on
+//! invocation.
+
+use std::path::Path;
 
 use anyhow::{Result, bail};
 use clap::Arg;
@@ -24,10 +29,10 @@ impl super::Command for PluginCommand {
 
     fn clap(&self) -> clap::Command {
         clap::Command::new(self.name())
-            .about("Inspect installed plugins")
+            .about("Manage and inspect installed plugins")
             .subcommand_required(true)
             .arg_required_else_help(true)
-            .subcommand(clap::Command::new("list").about("List discovered plugins"))
+            .subcommand(clap::Command::new("list").about("List installed plugins"))
             .subcommand(
                 clap::Command::new("info")
                     .about("Show a plugin's manifest and source")
@@ -38,6 +43,33 @@ impl super::Command for PluginCommand {
                             .help("Plugin name (see `plugin list`)"),
                     ),
             )
+            .subcommand(
+                clap::Command::new("add")
+                    .about("Verify a plugin file and install it into the plugin dir")
+                    .arg(Arg::new("file").required(true).value_name("FILE").help(
+                        "Plugin file — an audible-<name> executable or a cmd_<name>.py script",
+                    ))
+                    .arg(
+                        Arg::new("symlink")
+                            .long("symlink")
+                            .action(clap::ArgAction::SetTrue)
+                            .help(
+                                "Symlink instead of copying, so edits to the original apply \
+                                 immediately; moving or deleting the original breaks the plugin",
+                            ),
+                    ),
+            )
+            .subcommand(
+                clap::Command::new("remove")
+                    .about("Remove a plugin from the plugin dir (a symlink's original is kept)")
+                    .arg(
+                        Arg::new("name")
+                            .required(true)
+                            .value_name("PLUGIN")
+                            .help("Plugin name (see `plugin list`)"),
+                    )
+                    .arg(super::yes_arg()),
+            )
             .subcommands(hosts::subcommands("`hosts`-scoped plugins"))
     }
 
@@ -46,6 +78,22 @@ impl super::Command for PluginCommand {
             Some(("list", _)) => list(ctx).await,
             Some(("info", info)) => {
                 show(ctx, info.get_one::<String>("name").expect("required")).await
+            }
+            Some(("add", args)) => {
+                add(
+                    ctx,
+                    Path::new(args.get_one::<String>("file").expect("required")),
+                    args.get_flag("symlink"),
+                )
+                .await
+            }
+            Some(("remove", args)) => {
+                remove(
+                    ctx,
+                    args.get_one::<String>("name").expect("required"),
+                    args.get_flag("yes"),
+                )
+                .await
             }
             Some(("allow-host", args)) => allow_host(
                 ctx,
@@ -117,6 +165,62 @@ async fn list(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
+/// `plugin add [--symlink] <FILE>` — verify the file (naming, no
+/// collisions, valid manifest) and install it into the plugin dir.
+async fn add(ctx: &Ctx, source: &Path, symlink: bool) -> Result<()> {
+    let installed =
+        plugins::install(&plugins::plugin_dir(ctx), source, symlink, &builtin_names()).await?;
+    let scopes = if installed.manifest.scopes.is_empty() {
+        "none".to_owned()
+    } else {
+        installed.manifest.scopes.join(",")
+    };
+    println!(
+        "installed: {} ({}, scopes: {scopes}) -> {}",
+        installed.name,
+        installed.tier.label(),
+        installed.target.display()
+    );
+    if symlink {
+        eprintln!("note: symlinked — moving or deleting the original breaks the plugin");
+    }
+    Ok(())
+}
+
+/// `plugin remove <NAME>` — delete the plugin-dir entry: the symlink
+/// itself or the copied file, never a symlink's target.
+async fn remove(ctx: &Ctx, name: &str, yes: bool) -> Result<()> {
+    let discovered = plugins::discover(ctx, &builtin_names());
+    let Some(plugin) = discovered.iter().find(|plugin| plugin.name == name) else {
+        bail!(
+            "no plugin named {name:?} (plugin dir: {})",
+            plugins::plugin_dir(ctx).display()
+        );
+    };
+    let is_symlink = plugin
+        .source
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink());
+    let what = if is_symlink {
+        "the symlink (the original file stays)"
+    } else {
+        "the file"
+    };
+    let question = format!(
+        "Remove plugin {name} — deletes {what} {}?",
+        plugin.source.display()
+    );
+    if !super::prompt::confirm(yes, &question)? {
+        eprintln!("aborted");
+        return Ok(());
+    }
+    std::fs::remove_file(&plugin.source).map_err(|error| {
+        anyhow::anyhow!("could not remove {}: {error}", plugin.source.display())
+    })?;
+    println!("removed: {}", plugin.source.display());
+    Ok(())
+}
+
 /// `plugin info <name>` — full manifest plus discovery facts.
 async fn show(ctx: &Ctx, name: &str) -> Result<()> {
     let discovered = plugins::discover(ctx, &builtin_names());
@@ -163,6 +267,11 @@ mod tests {
         assert!(parse(&["plugin", "list"]).is_ok());
         assert!(parse(&["plugin", "info", "stats"]).is_ok());
         assert!(parse(&["plugin", "info"]).is_err());
+        assert!(parse(&["plugin", "add", "cmd_x.py"]).is_ok());
+        assert!(parse(&["plugin", "add", "cmd_x.py", "--symlink"]).is_ok());
+        assert!(parse(&["plugin", "add"]).is_err());
+        assert!(parse(&["plugin", "remove", "x", "--yes"]).is_ok());
+        assert!(parse(&["plugin", "remove"]).is_err());
         assert!(parse(&["plugin"]).is_err());
     }
 
