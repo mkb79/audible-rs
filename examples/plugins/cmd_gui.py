@@ -22,12 +22,11 @@ import argparse
 import hmac
 import json
 import secrets
+import sys
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
-
-from audible_plugin_sdk import Broker, BrokerError, run
 
 MANIFEST = {
     "name": "gui",
@@ -36,6 +35,24 @@ MANIFEST = {
     "scopes": ["invoke"],
     "help": "usage: audible [-m all] gui [--no-open] [--port N]",
 }
+
+# Answer the discovery probe before importing the SDK: the manifest
+# needs nothing from the broker, so `plugin list` shows this plugin as
+# intact even when audible_plugin_sdk is not importable (yet).
+if __name__ == "__main__" and "--audible-describe" in sys.argv:
+    print(json.dumps(MANIFEST))
+    raise SystemExit(0)
+
+try:
+    from audible_plugin_sdk import Broker, BrokerError, run
+except ImportError:
+    print(
+        "error: audible_plugin_sdk is not importable — install it with\n"
+        "  pip install <audible-rs repo>/sdk/python\n"
+        "or add <audible-rs repo>/sdk/python to PYTHONPATH.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2) from None
 
 #: Artifact kinds tracked in the downloads table (db/schema.rs).
 KINDS = ("audio", "cover", "chapter", "pdf")
