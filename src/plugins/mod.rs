@@ -269,7 +269,7 @@ pub async fn install(
 
 /// Classifies a would-be plugin file by its name: `audible-<name>`
 /// (Tier A) or `cmd_<name>.py` (Tier B); `None` for anything else.
-fn classify_file_name(file_name: &str) -> Option<(String, Tier)> {
+pub(crate) fn classify_file_name(file_name: &str) -> Option<(String, Tier)> {
     if let Some(name) = file_name.strip_prefix("audible-") {
         return Some((name.to_owned(), Tier::Executable));
     }

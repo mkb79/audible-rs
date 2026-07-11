@@ -10,12 +10,21 @@ scanned. It must answer `--audible-describe` with its manifest JSON;
 manifest scopes (`api`, `download`, `config`, `invoke`) decide what the
 broker lets the plugin do — the plugin never sees auth material.
 
-Install a plugin with `audible plugin add <file>` (verifies the manifest
-before anything lands, then copies) or `audible plugin add --symlink
-<file>` during development — edits to the original apply immediately,
-but moving or deleting the original breaks the plugin (`plugin list`
-shows it as `broken: symlink target missing`). `audible plugin remove
-<name>` deletes only the plugin-dir entry, never a symlink's original.
+Install a plugin with `audible plugin add <file-or-https-url>` — the
+manifest is verified before anything lands; https installs additionally
+show url, size, sha256 and the requested scopes and ask for
+confirmation (`--yes` skips). The official example plugins install
+straight from the repo, e.g.:
+
+    audible plugin add https://raw.githubusercontent.com/mkb79/audible-rs/main/examples/plugins/cmd_listening-stats.py
+
+(a `main` URL may be newer than your installed binary — pin a release
+via its tag URL, `…/vX.Y.Z/examples/…`). During development
+`audible plugin add --symlink <file>` links instead of copying — edits
+to the original apply immediately, but moving or deleting the original
+breaks the plugin (`plugin list` shows it as `broken: symlink target
+missing`). `audible plugin remove <name>` deletes only the plugin-dir
+entry, never a symlink's original.
 
 ```python
 from audible_plugin_sdk import Broker, run
