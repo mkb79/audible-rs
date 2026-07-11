@@ -165,7 +165,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main(argv):
-    parser = argparse.ArgumentParser(prog="audible gui")
+    parser = argparse.ArgumentParser(
+        prog="audible gui",
+        epilog="Account/marketplace/settings are fixed when the plugin starts: "
+        "put the selectors BEFORE the plugin name, e.g. `audible -m all gui`.",
+    )
     parser.add_argument(
         "--no-open",
         action="store_true",
@@ -177,7 +181,17 @@ def main(argv):
         default=0,
         help="fixed port instead of a random free one",
     )
+    # Catch selector flags placed after the plugin name — the broker has
+    # already pinned the invoking -a/-m/-s selection (AUD-123), so guide
+    # the user instead of failing with "unrecognized arguments".
+    for flags in (("-a", "--account"), ("-m", "--marketplace"), ("-s", "--settings")):
+        parser.add_argument(*flags, dest="selector", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.selector is not None:
+        parser.error(
+            "selectors are fixed when the plugin starts — put them before "
+            "the plugin name: audible -m all gui"
+        )
 
     Handler.api = Api(Broker())
     Handler.token = secrets.token_urlsafe(16)
