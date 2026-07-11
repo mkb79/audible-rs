@@ -1,21 +1,24 @@
-"""GUI plugin (AUD-161, slice 1): local web dashboard for the library.
+"""library-gui plugin (AUD-161): local web dashboard for the library.
 
 Serves a read-only single-page dashboard on 127.0.0.1 showing the
 library with per-item download status — which kinds (audio / cover /
 chapter / pdf) are already recorded in which formats, and which are
-still missing. Data comes exclusively from the ephemeral plugin broker
-via ``invoke`` (re-entrancy, scope ``invoke``); the plugin never sees
-auth material.
+still missing — plus an expandable detail panel per title, sortable
+columns and marketplace/ownership filters. Data comes exclusively from
+the ephemeral plugin broker via ``invoke`` (re-entrancy, scope
+``invoke``); the plugin never sees auth material.
 
-Install: copy this file into the plugin dir (default
-``<data_dir>/plugins``) and make ``audible_plugin_sdk`` importable
+Install: ``audible plugin add [--symlink] <path to this file>`` (or the
+raw GitHub URL) and make ``audible_plugin_sdk`` importable
 (``pip install <repo>/sdk/python`` or PYTHONPATH). Then::
 
-    audible -m all gui [--no-open] [--port N]
+    audible -m all library-gui [--no-open] [--port N]
 
 The session is pinned to the invoking ``-a``/``-m``/``-s`` selection
 (one account per GUI session) — start with ``-m all`` to see every
-marketplace of the account. Stop with Ctrl-C.
+marketplace of the account. Tip for a sync-free dashboard: a settings
+bundle with ``[settings.gui.db] auto_sync = "none"`` started as
+``audible -m all -s gui library-gui``. Stop with Ctrl-C.
 """
 
 import argparse
@@ -29,11 +32,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 MANIFEST = {
-    "name": "gui",
+    "name": "library-gui",
     "version": "0.1.0",
     "description": "Local web dashboard: library + download status",
     "scopes": ["invoke"],
-    "help": "usage: audible [-m all] gui [--no-open] [--port N]",
+    "help": "usage: audible [-m all] library-gui [--no-open] [--port N]",
 }
 
 # Answer the discovery probe before importing the SDK: the manifest
@@ -59,18 +62,41 @@ KINDS = ("audio", "cover", "chapter", "pdf")
 
 
 def slim_item(doc):
-    """The few doc fields the table needs — keeps the browser payload
-    small (full docs easily reach several MB per library)."""
-    authors = [a.get("name", "") for a in doc.get("authors") or []]
+    """The doc fields the table and the per-item detail panel need —
+    keeps the browser payload small (full docs easily reach several MB
+    per library)."""
+
+    def names(field):
+        return [n.get("name", "") for n in (doc.get(field) or []) if n.get("name")]
+
     images = doc.get("product_images") or {}
     cover = images.get("500") or next(iter(images.values()), None)
+    series = (doc.get("series") or [{}])[0]
+    rating = (doc.get("rating") or {}).get("overall_distribution") or {}
+    ladders = [
+        " › ".join(c.get("name", "") for c in (ladder.get("ladder") or []))
+        for ladder in doc.get("category_ladders") or []
+    ]
     return {
         "title": doc.get("title"),
         "subtitle": doc.get("subtitle"),
-        "authors": [a for a in authors if a],
-        "runtime_min": doc.get("runtime_length_min"),
+        "authors": names("authors"),
+        "narrators": names("narrators"),
+        "publisher": doc.get("publisher_name"),
+        "language": doc.get("language"),
+        "release_date": doc.get("release_date") or doc.get("issue_date"),
         "purchase_date": doc.get("purchase_date"),
+        "runtime_min": doc.get("runtime_length_min"),
+        "series": series.get("title"),
+        "series_sequence": series.get("sequence"),
+        "rating": rating.get("display_average_rating"),
+        "num_ratings": rating.get("num_ratings"),
+        "summary": doc.get("publisher_summary"),
+        "categories": [ladder for ladder in ladders if ladder],
         "is_archived": bool(doc.get("is_archived")),
+        # Same ownership marker as `library list --borrowed` (AUD-153):
+        # origin_type == "Purchase" is owned; absent/other = borrowed.
+        "owned": doc.get("origin_type") == "Purchase",
         "cover": cover,
     }
 
@@ -119,8 +145,8 @@ class Api:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "audible-gui/0.1"
-    # Injected by serve(): the shared Api and the session token.
+    server_version = "audible-library-gui/0.1"
+    # Injected by main(): the shared Api and the session token.
     api = None
     token = None
 
@@ -150,8 +176,7 @@ class Handler(BaseHTTPRequestHandler):
         route = urlparse(self.path).path
         try:
             if route == "/":
-                page = PAGE.replace("__TOKEN__", self.token)
-                self._reply(200, "text/html; charset=utf-8", page.encode())
+                self._reply(200, "text/html; charset=utf-8", PAGE.encode())
             elif route == "/api/library":
                 self._reply_json(200, self.api.library())
             elif route == "/api/downloads":
@@ -166,9 +191,9 @@ class Handler(BaseHTTPRequestHandler):
 
 def main(argv):
     parser = argparse.ArgumentParser(
-        prog="audible gui",
+        prog="audible library-gui",
         epilog="Account/marketplace/settings are fixed when the plugin starts: "
-        "put the selectors BEFORE the plugin name, e.g. `audible -m all gui`.",
+        "put the selectors BEFORE the plugin name, e.g. `audible -m all library-gui`.",
     )
     parser.add_argument(
         "--no-open",
@@ -190,7 +215,7 @@ def main(argv):
     if args.selector is not None:
         parser.error(
             "selectors are fixed when the plugin starts — put them before "
-            "the plugin name: audible -m all gui"
+            "the plugin name: audible -m all library-gui"
         )
 
     Handler.api = Api(Broker())
@@ -198,7 +223,7 @@ def main(argv):
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     url = f"http://127.0.0.1:{server.server_address[1]}/?token={Handler.token}"
-    print(f"audible gui listening on {url}", flush=True)
+    print(f"audible library-gui listening on {url}", flush=True)
     print("Ctrl-C stops the dashboard.", flush=True)
     if not args.no_open:
         threading.Timer(0.3, webbrowser.open, [url]).start()
@@ -211,7 +236,8 @@ def main(argv):
     return 0
 
 
-# --- embedded single-page app (no dependencies, no CDN) ---------------
+# --- embedded single-page app (no dependencies, no CDN; the JS reads
+# --- the session token from the page URL) -----------------------------
 
 PAGE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -234,6 +260,16 @@ PAGE = r"""<!DOCTYPE html>
            border-radius: .5rem; background: transparent; color: inherit; }
   header label { display: inline-flex; gap: .3rem; align-items: center; cursor: pointer; }
   header .count { opacity: .7; margin-left: auto; }
+  header select { padding: .3rem .5rem; border-radius: .5rem; color: inherit;
+       background: transparent;
+       border: 1px solid color-mix(in srgb, currentColor 25%, transparent); }
+  header select option { color: CanvasText; background: Canvas; }
+  #mps { display: inline-flex; gap: .35rem; }
+  .mp-chip { padding: .15rem .5rem; border-radius: 1rem; font-size: .82rem;
+       border: 1px solid color-mix(in srgb, currentColor 25%, transparent); }
+  .mp-chip:has(input:checked) { background: color-mix(in srgb, var(--accent) 18%, transparent);
+       border-color: var(--accent); }
+  .mp-chip input { display: none; }
   button { cursor: pointer; border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
            background: transparent; color: inherit; border-radius: .5rem; padding: .35rem .7rem; }
   button:hover { border-color: var(--accent); }
@@ -242,10 +278,39 @@ PAGE = r"""<!DOCTYPE html>
            border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent); }
   th { font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; opacity: .65;
        position: sticky; top: 3.3rem; background: Canvas; }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { opacity: 1; }
+  th.sortable::after { content: "↕"; margin-left: .3rem; opacity: .4; }
+  th.sortable.asc::after { content: "▲"; opacity: 1; }
+  th.sortable.desc::after { content: "▼"; opacity: 1; }
+  th.sortable.asc, th.sortable.desc { opacity: 1; color: var(--accent); }
   td.cover { width: 3.2rem; } td.cover img { width: 2.8rem; height: 2.8rem;
        object-fit: cover; border-radius: .35rem; display: block; }
   td.title b { display: block; } td.title small { opacity: .65; }
+  td.authors { max-width: 16rem; }
+  td.authors span { display: -webkit-box; -webkit-line-clamp: 2;
+       -webkit-box-orient: vertical; overflow: hidden; }
   td.mono { font-family: ui-monospace, monospace; font-size: .8rem; white-space: nowrap; }
+  tr.item { cursor: pointer; }
+  tr.item:hover td { background: color-mix(in srgb, currentColor 5%, transparent); }
+  tr.item.open td { border-bottom-color: transparent; }
+  tr.detail > td { padding: 0 .6rem .9rem; }
+  .detail-panel { display: flex; gap: 1rem; padding: .9rem;
+       border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+       border-radius: .6rem;
+       background: color-mix(in srgb, currentColor 4%, transparent); }
+  .detail-panel > img { width: 10rem; height: 10rem; object-fit: cover;
+       border-radius: .5rem; flex-shrink: 0; }
+  .detail-panel .body { flex: 1; min-width: 0; }
+  .detail-panel .fields { margin: 0; display: grid;
+       grid-template-columns: max-content 1fr; gap: .15rem 1rem;
+       align-content: start; font-size: .85rem; }
+  .detail-panel .fields dt { opacity: .6; }
+  .detail-panel .fields dd { margin: 0; }
+  .detail-panel .summary { margin: .6rem 0 0; font-size: .85rem;
+       line-height: 1.5; max-height: 9rem; overflow-y: auto; opacity: .9; }
+  .detail-files { margin-top: .6rem; font-family: ui-monospace, monospace;
+       font-size: .76rem; opacity: .85; overflow-x: auto; white-space: nowrap; }
   .badge { display: inline-block; margin: 0 .18rem .18rem 0; padding: .1rem .5rem;
            border-radius: 1rem; font-size: .74rem; border: 1px solid transparent; }
   .badge.ok { background: color-mix(in srgb, var(--ok) 18%, transparent);
@@ -259,6 +324,12 @@ PAGE = r"""<!DOCTYPE html>
 <header>
   <h1>audible library</h1>
   <input id="q" type="search" placeholder="filter title / author / asin…">
+  <select id="ownership" title="ownership filter">
+    <option value="all">all</option>
+    <option value="owned">owned</option>
+    <option value="borrowed">borrowed</option>
+  </select>
+  <span id="mps" title="show/hide marketplaces"></span>
   <label><input id="only-missing" type="checkbox"> only incomplete</label>
   <label><input id="show-archived" type="checkbox"> show archived</label>
   <button id="reload">Reload</button>
@@ -267,15 +338,74 @@ PAGE = r"""<!DOCTYPE html>
 <div id="status">loading library…</div>
 <table id="grid" hidden>
   <thead><tr>
-    <th></th><th>Title</th><th>Authors</th><th>MP</th><th>ASIN</th>
-    <th>Runtime</th><th>Downloads</th>
+    <th></th>
+    <th class="sortable" data-key="title">Title</th>
+    <th class="sortable" data-key="authors">Authors</th>
+    <th class="sortable" data-key="mp">MP</th>
+    <th class="sortable" data-key="asin">ASIN</th>
+    <th class="sortable" data-key="runtime">Runtime</th>
+    <th>Downloads</th>
   </tr></thead>
   <tbody></tbody>
 </table>
 <script>
-const TOKEN = "__TOKEN__";
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
 const KINDS = ["audio", "cover", "chapter", "pdf"];
-let items = [], downloads = new Map();
+let items = [], downloads = new Map(), downloadRows = new Map(), openAsin = null;
+let sort = { key: null, dir: 1 };
+let hiddenMps = new Set();
+
+// Sort keys per column; null/absent values sort last in either direction.
+const SORT_VALUE = {
+  title: item => (item.title || "").toLowerCase(),
+  authors: item => item.authors.join(", ").toLowerCase(),
+  mp: item => item.marketplace || "",
+  asin: item => item.asin || "",
+  runtime: item => item.runtime_min,
+};
+
+function sortedItems() {
+  if (!sort.key) return items;
+  const value = SORT_VALUE[sort.key];
+  return [...items].sort((a, b) => {
+    const va = value(a), vb = value(b);
+    if (va == null || va === "") return 1;
+    if (vb == null || vb === "") return -1;
+    const cmp = typeof va === "number"
+      ? va - vb
+      : va.localeCompare(vb, undefined, { sensitivity: "base", numeric: true });
+    return sort.dir * cmp;
+  });
+}
+
+function setSort(key) {
+  sort = { key, dir: sort.key === key ? -sort.dir : 1 };
+  for (const th of document.querySelectorAll("th.sortable")) {
+    th.classList.toggle("asc", th.dataset.key === key && sort.dir === 1);
+    th.classList.toggle("desc", th.dataset.key === key && sort.dir === -1);
+  }
+  render();
+}
+
+// One show/hide chip per marketplace present in the library.
+function renderMpFilter() {
+  const box = document.getElementById("mps");
+  box.replaceChildren();
+  for (const mp of [...new Set(items.map(i => i.marketplace))].sort()) {
+    if (!mp) continue;
+    const label = document.createElement("label");
+    label.className = "mp-chip";
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.checked = !hiddenMps.has(mp);
+    check.addEventListener("input", () => {
+      check.checked ? hiddenMps.delete(mp) : hiddenMps.add(mp);
+      render();
+    });
+    label.append(check, mp);
+    box.appendChild(label);
+  }
+}
 
 async function fetchJson(path) {
   const reply = await fetch(path + "?token=" + TOKEN);
@@ -289,15 +419,123 @@ function runtime(min) {
   return Math.floor(min / 60) + "h " + String(min % 60).padStart(2, "0") + "m";
 }
 
+function audibleDomain(mp) {
+  const map = { us: "audible.com", uk: "audible.co.uk", de: "audible.de",
+                fr: "audible.fr", it: "audible.it", es: "audible.es",
+                ca: "audible.ca", au: "audible.com.au", in: "audible.in",
+                jp: "audible.co.jp", br: "audible.com.br" };
+  return map[mp] || "audible.com";
+}
+
+// publisher_summary is publisher-supplied HTML — reduce it to plain text.
+function plainText(html) {
+  return new DOMParser().parseFromString(html || "", "text/html").body.textContent || "";
+}
+
+function field(dl, label, value) {
+  if (!value) return;
+  const dt = document.createElement("dt");
+  dt.textContent = label;
+  const dd = document.createElement("dd");
+  if (value instanceof Node) dd.appendChild(value); else dd.textContent = value;
+  dl.append(dt, dd);
+}
+
+// The expandable per-item panel: one <tr class="detail"> spanning the
+// table, inserted right below the clicked row.
+function detailRow(item) {
+  const tr = document.createElement("tr");
+  tr.className = "detail";
+  const td = document.createElement("td");
+  td.colSpan = 7;
+  const panel = document.createElement("div");
+  panel.className = "detail-panel";
+
+  if (item.cover) {
+    const img = document.createElement("img");
+    img.src = item.cover;
+    img.alt = "";
+    panel.appendChild(img);
+  }
+
+  const body = document.createElement("div");
+  body.className = "body";
+  const dl = document.createElement("dl");
+  dl.className = "fields";
+  field(dl, "authors", item.authors.join(", "));
+  field(dl, "narrators", (item.narrators || []).join(", "));
+  field(dl, "series", item.series
+    ? item.series + (item.series_sequence ? ` #${item.series_sequence}` : "") : "");
+  field(dl, "publisher", item.publisher);
+  field(dl, "language", item.language);
+  field(dl, "released", (item.release_date || "").slice(0, 10));
+  field(dl, "purchased", (item.purchase_date || "").slice(0, 10));
+  field(dl, "runtime", runtime(item.runtime_min));
+  field(dl, "rating", item.rating
+    ? `${item.rating} ★${item.num_ratings ? ` (${item.num_ratings} ratings)` : ""}` : "");
+  field(dl, "categories", (item.categories || []).join("  ·  "));
+  if (item.is_archived) field(dl, "archived", "yes");
+  const link = document.createElement("a");
+  link.href = `https://www.${audibleDomain(item.marketplace)}/pd/${item.asin}`;
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.textContent = "open on audible ↗";
+  field(dl, "page", link);
+  body.appendChild(dl);
+
+  const summary = plainText(item.summary).trim();
+  if (summary) {
+    const p = document.createElement("p");
+    p.className = "summary";
+    p.textContent = summary;
+    body.appendChild(p);
+  }
+
+  const rows = downloadRows.get(item.asin) || [];
+  if (rows.length) {
+    const files = document.createElement("div");
+    files.className = "detail-files";
+    for (const r of rows) {
+      const line = document.createElement("div");
+      line.textContent =
+        `${r.kind}  ${r.format || "-"}  ${r.variant}${r.size ? `  ${r.size}` : ""}  ${r.path}`;
+      files.appendChild(line);
+    }
+    body.appendChild(files);
+  }
+
+  panel.appendChild(body);
+  td.appendChild(panel);
+  tr.appendChild(td);
+  return tr;
+}
+
+function toggleDetail(row, item) {
+  const wasOpen = openAsin === item.asin;
+  document.querySelectorAll("tr.detail").forEach(r => r.remove());
+  document.querySelectorAll("tr.item.open").forEach(r => r.classList.remove("open"));
+  openAsin = null;
+  if (!wasOpen) {
+    row.classList.add("open");
+    row.after(detailRow(item));
+    openAsin = item.asin;
+  }
+}
+
 function render() {
   const q = document.getElementById("q").value.trim().toLowerCase();
+  const ownership = document.getElementById("ownership").value;
   const onlyMissing = document.getElementById("only-missing").checked;
   const showArchived = document.getElementById("show-archived").checked;
   const body = document.querySelector("#grid tbody");
   body.replaceChildren();
+  openAsin = null;
   let shown = 0;
-  for (const item of items) {
+  for (const item of sortedItems()) {
     if (item.is_archived && !showArchived) continue;
+    if (hiddenMps.has(item.marketplace)) continue;
+    if (ownership === "owned" && !item.owned) continue;
+    if (ownership === "borrowed" && item.owned) continue;
     const hay = (item.title + " " + (item.subtitle || "") + " "
                  + item.authors.join(" ") + " " + item.asin).toLowerCase();
     if (q && !hay.includes(q)) continue;
@@ -305,7 +543,7 @@ function render() {
     if (onlyMissing && KINDS.every(k => have.has(k))) continue;
     shown++;
     const row = document.createElement("tr");
-    if (item.is_archived) row.className = "archived";
+    row.className = "item" + (item.is_archived ? " archived" : "");
     const badges = KINDS.map(kind => {
       const formats = have.get(kind);
       return formats
@@ -315,14 +553,15 @@ function render() {
     row.innerHTML = `
       <td class="cover">${item.cover ? `<img loading="lazy" src="${item.cover}" alt="">` : ""}</td>
       <td class="title"><b></b><small></small></td>
-      <td></td>
+      <td class="authors"><span></span></td>
       <td class="mono">${item.marketplace || ""}</td>
       <td class="mono">${item.asin}</td>
       <td>${runtime(item.runtime_min)}</td>
       <td>${badges}</td>`;
     row.querySelector("b").textContent = item.title || "";
     row.querySelector("small").textContent = item.subtitle || "";
-    row.children[2].textContent = item.authors.join(", ");
+    row.querySelector("td.authors span").textContent = item.authors.join(", ");
+    row.addEventListener("click", () => toggleDetail(row, item));
     body.appendChild(row);
   }
   document.getElementById("count").textContent = shown + " / " + items.length + " titles";
@@ -338,6 +577,7 @@ async function load() {
     ]);
     items = library.items;
     downloads = new Map();
+    downloadRows = new Map();
     for (const row of dls) {
       // `db downloads list` rows carry no marketplace column — the
       // per-account database keys artifacts by asin, good enough here.
@@ -346,16 +586,21 @@ async function load() {
       if (!perKind.has(row.kind)) perKind.set(row.kind, new Set());
       perKind.get(row.kind).add((row.format || "?")
                                 + (row.variant && row.variant !== "original" ? ` (${row.variant})` : ""));
+      if (!downloadRows.has(row.asin)) downloadRows.set(row.asin, []);
+      downloadRows.get(row.asin).push(row);
     }
     status.hidden = true; grid.hidden = false;
+    renderMpFilter();
     render();
   } catch (error) {
     status.textContent = "error: " + error.message;
   }
 }
 
-for (const id of ["q", "only-missing", "show-archived"])
+for (const id of ["q", "ownership", "only-missing", "show-archived"])
   document.getElementById(id).addEventListener("input", render);
+for (const th of document.querySelectorAll("th.sortable"))
+  th.addEventListener("click", () => setSort(th.dataset.key));
 document.getElementById("reload").addEventListener("click", load);
 load();
 </script>
