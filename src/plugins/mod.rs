@@ -229,12 +229,26 @@ async fn describe_with_timeout(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    // A probe must never reach the user's terminal: stdio is captured
+    // above, but a candidate may open /dev/tty directly (a non-plugin
+    // tool that happens to match the name pattern and prompts, AUD-162).
+    // Give the probe its own session so it has no controlling TTY and
+    // that open fails instantly instead of prompting/hanging.
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     let output = tokio::time::timeout(timeout, command.output())
         .await
         .map_err(|_| format!("describe timed out after {}s", timeout.as_secs()))?
         .map_err(|error| format!("could not run: {error}"))?;
     if !output.status.success() {
-        return Err(format!("describe failed ({})", output.status));
+        return Err(describe_failure(&output));
     }
     let manifest: Manifest = serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("invalid manifest JSON: {error}"))?;
@@ -304,6 +318,29 @@ async fn run(
         .await
         .with_context(|| format!("could not run {}", plugin.source.display()))?;
     Ok(exit_code(status))
+}
+
+/// Formats a failed describe probe: the exit status plus the probe's
+/// last non-empty stderr line, so `plugin list`/`plugin info` say WHY
+/// (e.g. a Python ImportError) — with a targeted hint for the common
+/// missing-SDK case.
+fn describe_failure(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut reason = format!("describe failed ({})", output.status);
+    if let Some(detail) = stderr.lines().rev().map(str::trim).find(|l| !l.is_empty()) {
+        let mut detail: String = detail.chars().take(120).collect();
+        if detail.chars().count() == 120 {
+            detail.push('…');
+        }
+        reason.push_str(": ");
+        reason.push_str(&detail);
+    }
+    if stderr.contains("audible_plugin_sdk") {
+        reason.push_str(
+            " — install the Python SDK (pip install <repo>/sdk/python) or add it to PYTHONPATH",
+        );
+    }
+    reason
 }
 
 /// The bare command to run a plugin (interpreter included for Tier B).
@@ -451,6 +488,60 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("timed out"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn broken_reason_carries_stderr_and_sdk_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(
+            tmp.path(),
+            "audible-crash",
+            "#!/bin/sh\necho 'Traceback (most recent call last):' >&2\n\
+             echo \"ModuleNotFoundError: No module named 'audible_plugin_sdk'\" >&2\nexit 1\n",
+            true,
+        );
+        write_plugin(
+            tmp.path(),
+            "audible-mute",
+            "#!/bin/sh\nexit 7\n", // no stderr at all
+            true,
+        );
+
+        let plugins = discover_in(tmp.path(), &[], &[], None);
+        let by_name = |name: &str| plugins.iter().find(|p| p.name == name).unwrap();
+
+        // The last non-empty stderr line lands in the reason, plus the
+        // targeted hint for the missing-SDK case.
+        let error = describe(by_name("crash")).await.unwrap_err();
+        assert!(
+            error.contains("ModuleNotFoundError: No module named 'audible_plugin_sdk'"),
+            "{error}"
+        );
+        assert!(error.contains("PYTHONPATH"), "{error}");
+
+        // Silent failures keep the bare status form.
+        let error = describe(by_name("mute")).await.unwrap_err();
+        assert_eq!(error, "describe failed (exit status: 7)");
+    }
+
+    #[tokio::test]
+    async fn tty_grabbing_probe_fails_fast_without_prompting() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Mimics an interactive non-plugin tool (AUD-162): prompts and
+        // reads from /dev/tty directly, bypassing the captured stdio.
+        // With the probe in its own session there is no controlling TTY,
+        // so the open fails immediately — classified broken, no timeout.
+        write_plugin(
+            tmp.path(),
+            "audible-ttygrab",
+            "#!/bin/sh\nprintf 'passphrase: ' > /dev/tty || exit 9\nread -r _ < /dev/tty\nexit 0\n",
+            true,
+        );
+
+        let plugins = discover_in(tmp.path(), &[], &[], None);
+        let error = describe(&plugins[0]).await.unwrap_err();
+        assert!(error.contains("describe failed"), "{error}");
+        assert!(!error.contains("timed out"), "{error}");
     }
 
     /// A Ctx over a throwaway config dir (no auth involved).
