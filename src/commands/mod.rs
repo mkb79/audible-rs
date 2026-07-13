@@ -8,6 +8,7 @@ pub mod account;
 pub mod agent;
 pub mod annotations;
 pub mod api;
+pub mod catalog;
 pub mod collections;
 pub mod completions;
 pub mod config;

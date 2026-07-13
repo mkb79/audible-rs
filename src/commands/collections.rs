@@ -26,11 +26,11 @@ use reqwest::Method;
 use serde_json::Value;
 
 use crate::api::client::Client;
+use crate::commands::catalog::{
+    CatalogDetails, catalog_details, format_runtime, resolve_catalog_titles,
+};
 use crate::config::ctx::Ctx;
 use crate::output::Output;
-
-/// ASINs per `/1.0/catalog/products` enrichment request (server limit).
-const CATALOG_BATCH: usize = 50;
 
 /// Where a noun's `add --title` queries resolve.
 #[derive(PartialEq)]
@@ -537,62 +537,6 @@ struct CollectionItem {
     added: Option<String>,
 }
 
-/// Catalog display data for one ASIN.
-struct CatalogDetails {
-    title: String,
-    subtitle: Option<String>,
-    /// `publication_name` — the series-like collection name (the filename
-    /// template's `%publication%`); telling for series volumes.
-    publication: Option<String>,
-    authors: String,
-    runtime_min: Option<u64>,
-}
-
-impl CatalogDetails {
-    /// `Title: Subtitle` (or just the title).
-    fn full_title(&self) -> String {
-        match &self.subtitle {
-            Some(subtitle) => format!("{}: {subtitle}", self.title),
-            None => self.title.clone(),
-        }
-    }
-}
-
-/// Extracts one product's ASIN + display details from a
-/// `/1.0/catalog/products` entry (shared by the ASIN-batch enrichment
-/// and the title search).
-fn parse_product(product: &Value) -> Option<(String, CatalogDetails)> {
-    let asin = product.get("asin").and_then(Value::as_str)?;
-    let text = |key: &str| {
-        product
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .filter(|value| !value.is_empty())
-    };
-    let authors = product
-        .get("authors")
-        .and_then(Value::as_array)
-        .map(|authors| {
-            authors
-                .iter()
-                .filter_map(|author| author.get("name").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default();
-    Some((
-        asin.to_owned(),
-        CatalogDetails {
-            title: text("title").unwrap_or_default(),
-            subtitle: text("subtitle"),
-            publication: text("publication_name"),
-            authors,
-            runtime_min: product.get("runtime_length_min").and_then(Value::as_u64),
-        },
-    ))
-}
-
 /// Fetches every item of a collection, following the **body**
 /// `continuation_token` (this endpoint does not use the library's
 /// `Continuation-Token` header).
@@ -677,228 +621,42 @@ async fn collection_meta(
     Ok(CollectionMeta { state_token })
 }
 
-/// Results per catalog title search (the reference's `num_results`).
-const CATALOG_SEARCH_RESULTS: u32 = 50;
-
-/// One catalog search result, in server ranking order.
-struct CatalogHit {
-    asin: String,
-    details: CatalogDetails,
-}
-
-/// Picker/listing row: ASIN + full title, plus the publication (when it
-/// is not already part of the full title), authors and runtime —
-/// meaningful to people who do not think in ASINs.
-fn hit_label(hit: &CatalogHit) -> String {
-    let details = &hit.details;
-    let full_title = details.full_title();
-    let mut extras = Vec::new();
-    if let Some(publication) = &details.publication
-        && !full_title
-            .to_lowercase()
-            .contains(&publication.to_lowercase())
-    {
-        extras.push(publication.clone());
-    }
-    if !details.authors.is_empty() {
-        extras.push(details.authors.clone());
-    }
-    if let Some(minutes) = details.runtime_min {
-        extras.push(format_runtime(minutes));
-    }
-    let mut label = format!("{}  {full_title}", hit.asin);
-    if !extras.is_empty() {
-        label.push_str(&format!("  [{}]", extras.join(" · ")));
-    }
-    label
-}
-
-/// Resolves `wishlist add --title` queries against the catalog
-/// (`GET /1.0/catalog/products?title=…`, the audible-cli approach) into a
-/// deduped, order-preserving ASIN list after the explicit `asins`.
-/// Per query: 0 hits → warning + skip; 1 → taken (echoed); several →
-/// interactive multi-select on a TTY, else an error listing the
-/// candidates. Hits whose full title contains the query verbatim
-/// shortlist the fuzzier rest — the reference's 100%-shortlist.
-async fn resolve_catalog_titles(
-    client: &Client,
-    marketplace: &str,
-    asins: Vec<String>,
-    queries: Vec<String>,
-) -> Result<Vec<String>> {
-    let mut result = Vec::new();
-    let mut seen = HashSet::new();
-    let mut push = |asin: String| {
-        if seen.insert(asin.clone()) {
-            result.push(asin);
-        }
-    };
-    for asin in asins {
-        let asin = asin.trim().to_owned();
-        if !asin.is_empty() {
-            push(asin);
-        }
-    }
-
-    let mut interacted = false;
-    for query in queries {
-        let query = query.trim();
-        if query.is_empty() {
-            eprintln!("ignoring empty --title");
-            continue;
-        }
-        let hits = catalog_search(client, marketplace, query).await?;
-        let total = hits.len();
-        let hits = verbatim_title_shortlist(hits, query);
-        if hits.len() < total {
-            eprintln!(
-                "({} of {total} catalog results contain {query:?} verbatim; the rest are hidden)",
-                hits.len()
-            );
-        }
-        match hits.as_slice() {
-            [] => eprintln!("no catalog title matches {query:?}"),
-            [hit] => {
-                eprintln!("{query:?} → {}", hit_label(hit));
-                push(hit.asin.clone());
-            }
-            many => {
-                if console::Term::stderr().is_term() {
-                    let labels: Vec<String> = many.iter().map(hit_label).collect();
-                    // `report(false)`: as in the library resolver, the
-                    // echoed one-line summary replaces dialoguer's default.
-                    let selection = dialoguer::MultiSelect::with_theme(
-                        &dialoguer::theme::ColorfulTheme::default(),
-                    )
-                    .with_prompt(format!(
-                        "Catalog matches for {query:?} — space toggles · a all · enter confirms"
-                    ))
-                    .items(&labels)
-                    .report(false)
-                    .interact_on(&console::Term::stderr())?;
-                    interacted = true;
-                    if selection.is_empty() {
-                        eprintln!("no titles selected for {query:?}");
-                    } else {
-                        eprintln!(
-                            "selected {} of {} for {query:?}",
-                            selection.len(),
-                            many.len()
-                        );
-                        for index in selection {
-                            push(many[index].asin.clone());
-                        }
-                    }
-                } else {
-                    let listing: Vec<String> = many
-                        .iter()
-                        .map(|hit| format!("  {}", hit_label(hit)))
-                        .collect();
-                    bail!(
-                        "{} catalog titles match {query:?}; pass --asin or run interactively:\n{}",
-                        many.len(),
-                        listing.join("\n"),
-                    );
-                }
-            }
-        }
-    }
-    if interacted {
-        eprintln!();
-    }
-    Ok(result)
-}
-
-/// One catalog title search, results in server ranking order.
-async fn catalog_search(
-    client: &Client,
-    marketplace: &str,
-    query: &str,
-) -> Result<Vec<CatalogHit>> {
-    let body: Value = client
-        .request(Method::GET, "/1.0/catalog/products")
-        .country_code(marketplace)
-        .query("title", query)
-        .query("num_results", CATALOG_SEARCH_RESULTS.to_string())
-        .query("response_groups", "product_desc,product_attrs,contributors")
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    Ok(parse_catalog_hits(&body))
-}
-
-/// Extracts the ranked search results from a `/1.0/catalog/products` body.
-fn parse_catalog_hits(body: &Value) -> Vec<CatalogHit> {
-    let Some(products) = body.get("products").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    products
-        .iter()
-        .filter_map(|product| {
-            parse_product(product).map(|(asin, details)| CatalogHit { asin, details })
-        })
-        .collect()
-}
-
-/// The reference's 100%-shortlist with its actual semantics: audible-cli
-/// scores a fuzzy *partial* match, so 100 means the query appears
-/// verbatim in the title — not that it equals it (title equality would
-/// collapse "Outlander" to the one volume literally titled that and hide
-/// every "…Outlander-Saga…" volume). When any hit contains the query
-/// (case-insensitive) in its full title, only those hits are offered
-/// (trims fuzzy server noise); otherwise every hit stays.
-fn verbatim_title_shortlist(hits: Vec<CatalogHit>, query: &str) -> Vec<CatalogHit> {
-    let needle = query.to_lowercase();
-    let contains = |hit: &CatalogHit| {
-        hit.details.full_title().to_lowercase().contains(&needle)
-            || hit
-                .details
-                .publication
-                .as_ref()
-                .is_some_and(|publication| publication.to_lowercase().contains(&needle))
-    };
-    if !hits.iter().any(&contains) {
-        return hits;
-    }
-    hits.into_iter().filter(|hit| contains(hit)).collect()
-}
-
-/// Title/authors/runtime for catalog ASINs, batched 50 per request.
-/// Sequential — these lists are far below the scale where concurrency pays.
-async fn catalog_details(
+/// Removes `asins` from `__ARCHIVE` if present, returning the ASINs that
+/// were actually in the archive (and thus removed). Used by
+/// `library return` to clear a returned loan's archive membership so it
+/// disappears from `collections archive list`, not just the library
+/// (AUD-171). A no-op — no request — when none of the ASINs are archived.
+pub(crate) async fn remove_from_archive(
     client: &Client,
     marketplace: &str,
     asins: &[String],
-) -> Result<BTreeMap<String, CatalogDetails>> {
-    let mut details = BTreeMap::new();
-    for chunk in asins.chunks(CATALOG_BATCH) {
-        let body: Value = client
-            .request(Method::GET, "/1.0/catalog/products")
-            .country_code(marketplace)
-            .query("asins", chunk.join(","))
-            .query("response_groups", "product_desc,product_attrs,contributors")
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        parse_catalog_details(&body, &mut details);
+) -> Result<Vec<String>> {
+    let archived: HashSet<String> = collection_items(client, marketplace, ARCHIVE.collection_id)
+        .await?
+        .into_iter()
+        .map(|item| item.asin)
+        .collect();
+    let targets: Vec<String> = asins
+        .iter()
+        .filter(|asin| archived.contains(*asin))
+        .cloned()
+        .collect();
+    if targets.is_empty() {
+        return Ok(targets);
     }
-    Ok(details)
-}
-
-/// Extracts per-ASIN display details from a `/1.0/catalog/products` body.
-fn parse_catalog_details(body: &Value, details: &mut BTreeMap<String, CatalogDetails>) {
-    let Some(products) = body.get("products").and_then(Value::as_array) else {
-        return;
-    };
-    for product in products {
-        if let Some((asin, detail)) = parse_product(product) {
-            details.insert(asin, detail);
-        }
+    let meta = collection_meta(client, marketplace, ARCHIVE.collection_id).await?;
+    let mut request = client
+        .request(
+            Method::DELETE,
+            format!("/1.0/collections/{}/items", ARCHIVE.collection_id),
+        )
+        .country_code(marketplace)
+        .query("state_token", &meta.state_token);
+    for asin in &targets {
+        request = request.query("asins", asin);
     }
+    request.send().await?.error_for_status()?;
+    Ok(targets)
 }
 
 /// Resolves `remove` inputs to collection ASINs: explicit ASINs must be
@@ -975,15 +733,6 @@ fn date_only(timestamp: &str) -> &str {
     }
 }
 
-/// Minutes → `12h 34m` / `45m`.
-fn format_runtime(minutes: u64) -> String {
-    if minutes >= 60 {
-        format!("{}h {}m", minutes / 60, minutes % 60)
-    } else {
-        format!("{minutes}m")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1044,21 +793,6 @@ mod tests {
             ["__WISHLIST", "User Wishlist", "WISHLIST", "YOUR_LISTS", "5"]
         );
         assert_eq!(rows[1][4], "-");
-    }
-
-    #[test]
-    fn parses_catalog_details_with_authors() {
-        let body = serde_json::json!({"products": [
-            {"asin": "B0A", "title": "Book One",
-             "authors": [{"name": "Alice"}, {"name": "Bob"}],
-             "runtime_length_min": 754},
-        ]});
-        let mut details = BTreeMap::new();
-        parse_catalog_details(&body, &mut details);
-        let one = details.get("B0A").unwrap();
-        assert_eq!(one.title, "Book One");
-        assert_eq!(one.authors, "Alice, Bob");
-        assert_eq!(one.runtime_min, Some(754));
     }
 
     #[test]
@@ -1167,84 +901,6 @@ mod tests {
     }
 
     #[test]
-    fn catalog_hits_parse_in_order_with_display_fields() {
-        let body = serde_json::json!({"products": [
-            {"asin": "B0B", "title": "Echo der Hoffnung", "subtitle": "Outlander 7",
-             "publication_name": "Outlander [German Edition]",
-             "authors": [{"name": "Diana Gabaldon"}], "runtime_length_min": 3255},
-            {"asin": "B0A", "title": "Der Hobbit"},
-            {"title": "no asin — skipped"},
-        ]});
-        let hits = parse_catalog_hits(&body);
-        // Server ranking order is preserved (no map re-sorting).
-        assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].asin, "B0B");
-        assert_eq!(
-            hits[0].details.full_title(),
-            "Echo der Hoffnung: Outlander 7"
-        );
-        // The publication is shown when the full title does not carry it…
-        assert_eq!(
-            hit_label(&hits[0]),
-            "B0B  Echo der Hoffnung: Outlander 7  [Outlander [German Edition] · Diana Gabaldon · 54h 15m]"
-        );
-        // …and missing extras degrade gracefully.
-        assert_eq!(hit_label(&hits[1]), "B0A  Der Hobbit");
-
-        // A publication already contained in the full title is not repeated.
-        let body = serde_json::json!({"products": [
-            {"asin": "B0C", "title": "Outlander", "subtitle": "Outlander, Book 1",
-             "publication_name": "Outlander"},
-        ]});
-        let hits = parse_catalog_hits(&body);
-        assert_eq!(hit_label(&hits[0]), "B0C  Outlander: Outlander, Book 1");
-    }
-
-    #[test]
-    fn verbatim_matches_shortlist_the_hits() {
-        let hit = |asin: &str, title: &str, subtitle: Option<&str>| CatalogHit {
-            asin: asin.to_owned(),
-            details: CatalogDetails {
-                title: title.to_owned(),
-                subtitle: subtitle.map(str::to_owned),
-                publication: None,
-                authors: String::new(),
-                runtime_min: None,
-            },
-        };
-        // Regression (maintainer, 2026-07-07): searching "Outlander" must
-        // offer EVERY volume whose full title contains the query — the old
-        // title-equality shortlist collapsed the list to the one volume
-        // literally titled "Outlander" and auto-added it without a picker.
-        let hits = vec![
-            hit("B0EN", "Outlander", Some("Outlander, Book 1")),
-            hit("B0DE", "Feuer und Stein", Some("Die Outlander-Saga 1")),
-            hit("B0XX", "Cross Stitch", None), // fuzzy server noise
-        ];
-        let shortlisted = verbatim_title_shortlist(hits, "outlander");
-        assert_eq!(shortlisted.len(), 2);
-        assert_eq!(shortlisted[0].asin, "B0EN");
-        assert_eq!(shortlisted[1].asin, "B0DE");
-
-        // No hit contains the query verbatim: everything stays.
-        let hits = vec![
-            hit("B0A", "Der Hobbit", None),
-            hit("B0B", "Der kleine Hobbit", None),
-        ];
-        assert_eq!(verbatim_title_shortlist(hits, "hobit").len(), 2);
-
-        // The publication counts as matching surface too: a volume whose
-        // series name only lives in publication_name survives the shortlist.
-        let mut with_publication = hit("B0P", "Feuer und Stein", None);
-        with_publication.details.publication = Some("Outlander [German Edition]".to_owned());
-        let hits = vec![
-            hit("B0EN", "Outlander", Some("Outlander, Book 1")),
-            with_publication,
-        ];
-        assert_eq!(verbatim_title_shortlist(hits, "outlander").len(), 2);
-    }
-
-    #[test]
     fn archived_flag_parses_from_doc() {
         assert_eq!(archived_in_doc(r#"{"is_archived": true}"#), Some(true));
         assert_eq!(archived_in_doc(r#"{"is_archived": false}"#), Some(false));
@@ -1253,11 +909,9 @@ mod tests {
     }
 
     #[test]
-    fn date_and_runtime_formatting() {
+    fn date_formatting() {
         assert_eq!(date_only("2026-06-19T09:20:50.749Z"), "2026-06-19");
         assert_eq!(date_only("short"), "short");
-        assert_eq!(format_runtime(754), "12h 34m");
-        assert_eq!(format_runtime(45), "45m");
     }
 
     #[test]

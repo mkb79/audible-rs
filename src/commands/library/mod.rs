@@ -238,9 +238,75 @@ impl super::Command for LibraryCommand {
                             ),
                     ),
             )
+            .subcommand(
+                clap::Command::new("add")
+                    .about("Add subscription (AYCL/Plus) titles, podcasts or episodes to your library")
+                    .arg(
+                        Arg::new("asin")
+                            .long("asin")
+                            .action(ArgAction::Append)
+                            .value_name("ASIN")
+                            .help("ASIN to add (repeatable)"),
+                    )
+                    .arg(
+                        Arg::new("title")
+                            .long("title")
+                            .action(ArgAction::Append)
+                            .value_name("QUERY")
+                            .help(
+                                "Title to add, searched in the Audible catalog (repeatable; \
+                                 several matches open a selection list)",
+                            ),
+                    )
+                    .group(
+                        clap::ArgGroup::new("source")
+                            .args(["asin", "title"])
+                            .multiple(true)
+                            .required(true),
+                    )
+                    .arg(
+                        Arg::new("sync")
+                            .long("sync")
+                            .action(ArgAction::SetTrue)
+                            .help(
+                                "Run a delta library sync right after, so the new item \
+                                 shows up in the local library immediately",
+                            ),
+                    ),
+            )
+            .subcommand(
+                clap::Command::new("remove")
+                    .about("Remove titles, podcasts or episodes from your library (returns loans, unfollows podcasts)")
+                    .arg(
+                        Arg::new("asin")
+                            .long("asin")
+                            .action(ArgAction::Append)
+                            .value_name("ASIN")
+                            .help("ASIN to remove (repeatable)"),
+                    )
+                    .arg(
+                        Arg::new("title")
+                            .long("title")
+                            .action(ArgAction::Append)
+                            .value_name("QUERY")
+                            .help("Library title to remove (substring search; repeatable)"),
+                    )
+                    .group(
+                        clap::ArgGroup::new("source")
+                            .args(["asin", "title"])
+                            .multiple(true)
+                            .required(true),
+                    )
+                    .arg(super::yes_arg()),
+            )
     }
 
     async fn run(&self, ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
+        let strings = |m: &clap::ArgMatches, id: &str| -> Vec<String> {
+            m.get_many::<String>(id)
+                .map(|v| v.cloned().collect())
+                .unwrap_or_default()
+        };
         let limit = |m: &clap::ArgMatches| match *m.get_one::<u32>("limit").expect("default") {
             0 => u32::MAX,
             n => n,
@@ -289,6 +355,24 @@ impl super::Command for LibraryCommand {
                 }
                 _ => changes(ctx, sub).await,
             },
+            Some(("add", sub)) => {
+                membership::add(
+                    ctx,
+                    strings(sub, "asin"),
+                    strings(sub, "title"),
+                    sub.get_flag("sync"),
+                )
+                .await
+            }
+            Some(("remove", sub)) => {
+                membership::remove(
+                    ctx,
+                    strings(sub, "asin"),
+                    strings(sub, "title"),
+                    sub.get_flag("yes"),
+                )
+                .await
+            }
             _ => unreachable!("subcommand required"),
         }
     }
@@ -296,6 +380,7 @@ impl super::Command for LibraryCommand {
 
 mod changes;
 mod list;
+mod membership;
 mod sync;
 
 pub use sync::{SyncOptions, SyncSummary, sync_library};
