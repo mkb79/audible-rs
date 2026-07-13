@@ -501,6 +501,15 @@ mod tests {
     use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
 
+    /// Serializes the subprocess-spawning tests below. Under a full parallel
+    /// `cargo test`, a fork storm of concurrent `--audible-describe`/invoke
+    /// probes can starve the async runtime enough that the 5s describe
+    /// timeout fires for a plugin that actually answers instantly (AUD-172).
+    /// Holding this for the duration of each such test keeps at most one
+    /// probe group in flight, so the probes stay fast. A tokio mutex (not
+    /// `std`) so the guard can be held across the tests' `.await` points.
+    static PROBE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn write_plugin(dir: &Path, file_name: &str, body: &str, executable: bool) -> PathBuf {
         let path = dir.join(file_name);
         let mut file = std::fs::File::create(&path).unwrap();
@@ -593,6 +602,7 @@ mod tests {
 
     #[tokio::test]
     async fn install_verifies_names_collisions_and_manifest() {
+        let _guard = PROBE_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path().join("plugins");
         let src_dir = tmp.path().join("src");
@@ -652,6 +662,7 @@ mod tests {
 
     #[tokio::test]
     async fn describe_parses_validates_and_times_out() {
+        let _guard = PROBE_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         demo_plugin(tmp.path(), "good", "\"api\",\"config\"", 0);
         demo_plugin(tmp.path(), "badscope", "\"root\"", 0);
@@ -682,6 +693,7 @@ mod tests {
 
     #[tokio::test]
     async fn broken_reason_carries_stderr_and_sdk_hint() {
+        let _guard = PROBE_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         write_plugin(
             tmp.path(),
@@ -716,6 +728,7 @@ mod tests {
 
     #[tokio::test]
     async fn tty_grabbing_probe_fails_fast_without_prompting() {
+        let _guard = PROBE_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         // Mimics an interactive non-plugin tool (AUD-162): prompts and
         // reads from /dev/tty directly, bypassing the captured stdio.
@@ -754,6 +767,7 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_passes_argv_and_propagates_exit_code() {
+        let _guard = PROBE_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         let ctx = test_ctx(tmp.path());
         demo_plugin(tmp.path(), "seven", "", 7);
@@ -774,6 +788,7 @@ mod tests {
     /// A scoped plugin gets the broker env pair; an unscoped one does not.
     #[tokio::test]
     async fn invoke_injects_broker_env_for_scoped_plugins() {
+        let _guard = PROBE_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         let ctx = test_ctx(tmp.path());
         write_plugin(
