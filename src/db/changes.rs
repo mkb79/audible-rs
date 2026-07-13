@@ -27,8 +27,10 @@ pub struct ChangeRecord {
     /// `"full"` or `"delta"`.
     pub mode: String,
     /// `"added"`, `"changed"` or `"removed"`.
-    pub kind: String,
-    /// Field diff `[{key, old, new}]` (kind `changed` only).
+    pub change: String,
+    /// Content kind: `"book"`, `"podcast"` or `"episode"` (AUD-173).
+    pub item_kind: String,
+    /// Field diff `[{key, old, new}]` (change `changed` only).
     pub changed: Option<String>,
 }
 
@@ -43,8 +45,11 @@ pub struct ChangeFilter {
     pub since: Option<String>,
     /// Restrict to a mode (`full`/`delta`).
     pub mode: Option<String>,
-    /// Restrict to a kind (`added`/`changed`/`removed`).
-    pub kind: Option<String>,
+    /// Restrict to a change (`added`/`changed`/`removed`).
+    pub change: Option<String>,
+    /// Restrict to these content kinds (`book`/`podcast`/`episode`;
+    /// empty = all — the shared `--kind` filter, AUD-173).
+    pub item_kinds: Vec<String>,
     /// Include volatile-only `changed` entries (default `false` hides them).
     pub show_volatile: bool,
     /// Max rows (most recent first); 0 = no limit.
@@ -198,7 +203,7 @@ impl Db {
     pub async fn list_changes(&self, filter: ChangeFilter) -> Result<Vec<ChangeRecord>, DbError> {
         self.call(move |conn| {
             let mut sql = String::from(
-                "SELECT recorded_utc, marketplace, asin, full_title, mode, kind, changed \
+                "SELECT recorded_utc, marketplace, asin, full_title, mode, kind, item_kind, changed \
                  FROM change_log WHERE 1 = 1",
             );
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -221,10 +226,11 @@ impl Db {
                 sql.push_str(" AND mode = ?");
                 params.push(Box::new(mode.clone()));
             }
-            if let Some(kind) = &filter.kind {
+            if let Some(change) = &filter.change {
                 sql.push_str(" AND kind = ?");
-                params.push(Box::new(kind.clone()));
+                params.push(Box::new(change.clone()));
             }
+            sql.push_str(&super::kind_clause("item_kind", &filter.item_kinds));
             if !filter.show_volatile {
                 // Hide volatile-only changes: a 'changed' row whose diff has no
                 // non-volatile key. 'added'/'removed' (no diff) and the rare
@@ -255,8 +261,9 @@ impl Db {
                         asin: row.get(2)?,
                         full_title: row.get(3)?,
                         mode: row.get(4)?,
-                        kind: row.get(5)?,
-                        changed: row.get(6)?,
+                        change: row.get(5)?,
+                        item_kind: row.get(6)?,
+                        changed: row.get(7)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -406,7 +413,7 @@ mod tests {
             .unwrap();
         assert_eq!(changes.len(), 3, "{changes:?}");
         let a1 = changes.iter().find(|c| c.asin == "A1").unwrap();
-        assert_eq!(a1.kind, "changed");
+        assert_eq!(a1.change, "changed");
         assert_eq!(a1.mode, "delta");
         let diff = a1.changed.as_deref().unwrap();
         assert!(diff.contains("price") && diff.contains("extra"), "{diff}");
@@ -414,13 +421,13 @@ mod tests {
         assert!(diff.contains("percent_complete"), "{diff}");
         let a2_added = changes
             .iter()
-            .find(|c| c.asin == "A2" && c.kind == "added")
+            .find(|c| c.asin == "A2" && c.change == "added")
             .unwrap();
         assert!(a2_added.changed.is_none());
         assert!(
             changes
                 .iter()
-                .any(|c| c.asin == "A2" && c.kind == "removed")
+                .any(|c| c.asin == "A2" && c.change == "removed")
         );
     }
 
@@ -488,7 +495,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(shown.len(), 1, "{shown:?}");
-        assert_eq!(shown[0].kind, "changed");
+        assert_eq!(shown[0].change, "changed");
         assert!(
             shown[0]
                 .changed

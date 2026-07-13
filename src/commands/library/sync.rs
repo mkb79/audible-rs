@@ -214,6 +214,12 @@ pub async fn sync_library(
     // failing podcast is non-fatal: warn and skip, don't abort the sync.
     let response_groups = &response_groups;
     let page_size = &page_size;
+    // Episode changes are recorded like item changes (AUD-173) —
+    // suppressed only on the initial scan of an empty database.
+    let episode_recording = db::ChangeRecording {
+        record: options.record_changes && !initial,
+        mode,
+    };
     let episode_results: Vec<Result<(usize, usize)>> = futures::stream::iter(podcast_parents)
         .map(|(parent_asin, announced)| async move {
             let _permit = sem.acquire().await.expect("sync semaphore is never closed");
@@ -223,8 +229,8 @@ pub async fn sync_library(
                 marketplace,
                 response_groups,
                 page_size,
-                &parent_asin,
-                announced,
+                (&parent_asin, announced),
+                episode_recording,
             )
             .await
         })
@@ -275,8 +281,10 @@ async fn resolve_episodes(
     marketplace: &str,
     response_groups: &str,
     page_size: &str,
-    parent_asin: &str,
-    announced: Option<u64>,
+    // The resolution job: the parent's ASIN plus its announced
+    // `episode_count` (bundled — they always travel together).
+    (parent_asin, announced): (&str, Option<u64>),
+    recording: db::ChangeRecording,
 ) -> Result<(usize, usize)> {
     tracing::debug!(parent_asin, "resolving podcast episodes");
 
@@ -372,6 +380,7 @@ async fn resolve_episodes(
             marketplace.to_owned(),
             parent_asin.to_owned(),
             episodes.into_values().collect(),
+            recording,
         )
         .await?)
 }

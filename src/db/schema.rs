@@ -71,6 +71,7 @@ CREATE TABLE change_log (
   full_title   TEXT NOT NULL,
   mode         TEXT NOT NULL,   -- 'full' | 'delta'
   kind         TEXT NOT NULL,   -- 'added' | 'changed' | 'removed'
+  item_kind    TEXT NOT NULL DEFAULT 'book', -- 'book' | 'podcast' | 'episode' (AUD-173)
   changed      TEXT             -- JSON [{key, old, new}] (kind='changed' only)
 );
 
@@ -96,7 +97,18 @@ SELECT
     json_extract(doc, '$.runtime_length_min'),
     json_extract(doc, '$.duration_min')
   ) AS runtime_min,
-  json_extract(doc, '$.is_ayce') AS is_ayce
+  json_extract(doc, '$.is_ayce') AS is_ayce,
+  -- Content kind for the shared --kind filter (AUD-173). SQL twin of
+  -- models::library::item_kind — kept in lockstep by a functional test.
+  CASE
+    WHEN json_extract(doc, '$.content_delivery_type') = 'PodcastEpisode'
+      THEN 'episode'
+    WHEN json_extract(doc, '$.content_delivery_type')
+           IN ('PodcastParent', 'Periodical', 'PodcastSeason')
+         OR json_extract(doc, '$.content_type') = 'Podcast'
+      THEN 'podcast'
+    ELSE 'book'
+  END AS kind
 FROM items
 WHERE is_deleted = 0;
 

@@ -14,9 +14,10 @@ use super::*;
 
 const BOOK_COLUMNS: [&str; 5] = ["asin", "title", "purchase_date", "runtime_min", "language"];
 
-const MP_BOOK_COLUMNS: [&str; 6] = [
+const MP_BOOK_COLUMNS: [&str; 7] = [
     "mp",
     "asin",
+    "kind",
     "title",
     "purchase_date",
     "runtime_min",
@@ -32,6 +33,7 @@ fn mp_book_rows(books: &[crate::db::BookRow]) -> Vec<Vec<String>> {
             vec![
                 book.marketplace.clone(),
                 book.asin.clone(),
+                book.kind.clone(),
                 book.full_title.clone(),
                 book.purchase_date.clone().unwrap_or_default(),
                 book.runtime_min.clone().unwrap_or_default(),
@@ -41,7 +43,7 @@ fn mp_book_rows(books: &[crate::db::BookRow]) -> Vec<Vec<String>> {
         .collect()
 }
 
-pub(super) async fn list(ctx: &Ctx, limit: u32, page: u32) -> Result<()> {
+pub(super) async fn list(ctx: &Ctx, kinds: Vec<String>, limit: u32, page: u32) -> Result<()> {
     let db = ctx.open_library_db().await?;
     maybe_auto_sync(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;
@@ -50,17 +52,21 @@ pub(super) async fn list(ctx: &Ctx, limit: u32, page: u32) -> Result<()> {
     let books = if limit == 0 && page > 1 {
         Vec::new() // page 1 holds everything; no need to query
     } else {
-        db.list_books(marketplaces.clone(), query_limit, offset)
+        db.list_books(marketplaces.clone(), kinds.clone(), query_limit, offset)
             .await?
     };
     if books.is_empty() {
         // Count only on the empty path: page-end error or empty-DB hint.
-        let total = db.count_active(marketplaces).await?;
+        let total = db.count_books(marketplaces, kinds.clone()).await?;
         if page > 1 {
             return Err(crate::commands::empty_page_error(page, limit, total));
         }
         if total == 0 {
-            eprintln!("library database is empty — run `audible library sync`");
+            if kinds.is_empty() {
+                eprintln!("library database is empty — run `audible library sync`");
+            } else {
+                eprintln!("no items of kind {}", kinds.join("/"));
+            }
         }
     }
     ctx.print(&crate::output::Output::table(
@@ -76,6 +82,7 @@ pub(super) async fn list(ctx: &Ctx, limit: u32, page: u32) -> Result<()> {
 pub(super) async fn list_missing(
     ctx: &Ctx,
     kinds: Vec<String>,
+    item_kinds: Vec<String>,
     limit: u32,
     page: u32,
     include_archived: bool,
@@ -99,6 +106,7 @@ pub(super) async fn list_missing(
         db.books_missing_downloads(
             marketplaces.clone(),
             kinds.clone(),
+            item_kinds.clone(),
             query_limit,
             offset,
             include_archived,
@@ -108,7 +116,7 @@ pub(super) async fn list_missing(
     if rows.is_empty() {
         if page > 1 {
             let total = db
-                .count_books_missing_downloads(marketplaces, kinds, include_archived)
+                .count_books_missing_downloads(marketplaces, kinds, item_kinds, include_archived)
                 .await?;
             return Err(crate::commands::empty_page_error(page, limit, total));
         }
@@ -143,7 +151,12 @@ pub(super) async fn list_missing(
 /// In the human table an empty `eligible` shows as `none` (nothing plays it
 /// right now) and an empty `not_eligible` as `—`; `-o json`/`plain` keep the
 /// empty string so consumers can test emptiness.
-pub(super) async fn list_borrowed(ctx: &Ctx, limit: u32, page: u32) -> Result<()> {
+pub(super) async fn list_borrowed(
+    ctx: &Ctx,
+    item_kinds: Vec<String>,
+    limit: u32,
+    page: u32,
+) -> Result<()> {
     let db = ctx.open_library_db().await?;
     maybe_auto_sync(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;
@@ -152,12 +165,17 @@ pub(super) async fn list_borrowed(ctx: &Ctx, limit: u32, page: u32) -> Result<()
     let rows = if limit == 0 && page > 1 {
         Vec::new() // page 1 holds everything; no need to query
     } else {
-        db.books_borrowed(marketplaces.clone(), query_limit, offset)
-            .await?
+        db.books_borrowed(
+            marketplaces.clone(),
+            item_kinds.clone(),
+            query_limit,
+            offset,
+        )
+        .await?
     };
     if rows.is_empty() {
         if page > 1 {
-            let total = db.count_books_borrowed(marketplaces).await?;
+            let total = db.count_books_borrowed(marketplaces, item_kinds).await?;
             return Err(crate::commands::empty_page_error(page, limit, total));
         }
         eprintln!("no borrowed titles — every title in your library is owned");
@@ -238,7 +256,13 @@ pub(super) async fn list_remote(ctx: &Ctx, limit: u32) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn search(ctx: &Ctx, query: String, limit: u32, fts: bool) -> Result<()> {
+pub(super) async fn search(
+    ctx: &Ctx,
+    kinds: Vec<String>,
+    query: String,
+    limit: u32,
+    fts: bool,
+) -> Result<()> {
     let db = ctx.open_library_db().await?;
     maybe_auto_sync(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;
@@ -246,7 +270,7 @@ pub(super) async fn search(ctx: &Ctx, query: String, limit: u32, fts: bool) -> R
     let fts = fts && ctx.db_config()?.fts;
     // One query across the whole set: FTS gives a single global BM25
     // ranking; LIKE orders by title. Rows carry their marketplace.
-    let books = db.search(marketplaces, query, limit, fts).await?;
+    let books = db.search(marketplaces, kinds, query, limit, fts).await?;
     if books.is_empty() {
         eprintln!("no matches");
     }
@@ -257,18 +281,20 @@ pub(super) async fn search(ctx: &Ctx, query: String, limit: u32, fts: bool) -> R
     Ok(())
 }
 
-pub(super) async fn export(ctx: &Ctx, csv: bool) -> Result<()> {
+pub(super) async fn export(ctx: &Ctx, kinds: Vec<String>, csv: bool) -> Result<()> {
     let db = ctx.open_library_db().await?;
     maybe_auto_sync(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;
 
     if csv {
-        let mut out =
-            String::from("mp,asin,title,subtitle,full_title,purchase_date,runtime_min,language\n");
-        for book in db.export_books(marketplaces).await? {
+        let mut out = String::from(
+            "mp,asin,kind,title,subtitle,full_title,purchase_date,runtime_min,language\n",
+        );
+        for book in db.export_books(marketplaces, kinds).await? {
             let fields = [
                 book.marketplace,
                 book.asin,
+                book.kind,
                 book.title,
                 book.subtitle.unwrap_or_default(),
                 book.full_title,
@@ -283,13 +309,19 @@ pub(super) async fn export(ctx: &Ctx, csv: bool) -> Result<()> {
         return Ok(());
     }
 
-    // JSON export: the full item docs across the set. response_groups are
-    // pinned identically per marketplace, so the first one labels the dump.
+    // JSON export: the full item docs across the set — filtered by the
+    // shared --kind classification when set. response_groups are pinned
+    // identically per marketplace, so the first one labels the dump.
     let response_groups = db
         .ensure_sync_state(marketplaces[0].clone(), DEFAULT_RESPONSE_GROUPS.to_owned())
         .await?
         .response_groups;
-    let items = db.export_docs(marketplaces.clone()).await?;
+    let items: Vec<serde_json::Value> = db
+        .export_docs(marketplaces.clone())
+        .await?
+        .into_iter()
+        .filter(|doc| kinds.is_empty() || kinds.iter().any(|k| k == model::item_kind(doc)))
+        .collect();
     ctx.print(&crate::output::Output::Json(serde_json::json!({
         "format": "audible-rs-library-export",
         "version": 1,

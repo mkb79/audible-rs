@@ -79,14 +79,38 @@ pub fn extract_series(item: &Value) -> Vec<SeriesEntry> {
 }
 
 /// Whether an item is a podcast parent whose episodes are child
-/// products (`content_delivery_type` PodcastParent/Periodical or
-/// `content_type` Podcast). MultiPartBooks also have children (audio
-/// parts) but are NOT podcasts.
+/// products: `content_delivery_type` PodcastParent/Periodical, with
+/// `content_type == "Podcast"` as a defensive fallback for parents
+/// without a delivery type. Episodes and seasons also carry
+/// `content_type == "Podcast"` and are explicitly excluded (AUD-173) —
+/// only shows get their episodes resolved. MultiPartBooks also have
+/// children (audio parts, `component` relationships) but are NOT
+/// podcasts (`content_type == "Product"`).
 pub fn is_parent_podcast(item: &Value) -> bool {
-    matches!(
-        item.get("content_delivery_type").and_then(Value::as_str),
-        Some("PodcastParent" | "Periodical")
-    ) || item.get("content_type").and_then(Value::as_str) == Some("Podcast")
+    let delivery_type = item.get("content_delivery_type").and_then(Value::as_str);
+    matches!(delivery_type, Some("PodcastParent" | "Periodical"))
+        || (item.get("content_type").and_then(Value::as_str) == Some("Podcast")
+            && !matches!(delivery_type, Some("PodcastEpisode" | "PodcastSeason")))
+}
+
+/// The content kinds of the shared `--kind` filter (AUD-173), in display
+/// order. `book` is the catch-all for everything not recognized as a
+/// podcast show or episode.
+pub const ITEM_KINDS: &[&str] = &["book", "podcast", "episode"];
+
+/// Classifies an item document for the shared `--kind` filter: `episode`
+/// (a `PodcastEpisode`, e.g. an individually-subscribed one), `podcast`
+/// (a show parent; `PodcastSeason` defensively counts as podcast, though
+/// seasons have not been observed as library items), else `book`. The
+/// SQL twin lives in [`crate::db`] (`v_books.kind`) — the two are kept in
+/// lockstep by a functional test.
+pub fn item_kind(item: &Value) -> &'static str {
+    match item.get("content_delivery_type").and_then(Value::as_str) {
+        Some("PodcastEpisode") => "episode",
+        Some("PodcastSeason") => "podcast",
+        _ if is_parent_podcast(item) => "podcast",
+        _ => "book",
+    }
 }
 
 /// Expands a series sequence into the volume numbers it covers:
@@ -230,6 +254,55 @@ mod tests {
             &json!({"content_delivery_type": "MultiPartBook"})
         ));
         assert!(!is_parent_podcast(&json!({})));
+    }
+
+    #[test]
+    fn podcast_detection_excludes_episodes_and_seasons() {
+        // Episodes and seasons also carry content_type Podcast, but only
+        // shows get their episodes resolved (AUD-173).
+        assert!(!is_parent_podcast(&json!({
+            "content_delivery_type": "PodcastEpisode", "content_type": "Podcast"
+        })));
+        assert!(!is_parent_podcast(&json!({
+            "content_delivery_type": "PodcastSeason", "content_type": "Podcast"
+        })));
+    }
+
+    #[test]
+    fn item_kind_classifies_the_taxonomy() {
+        // Live-verified taxonomy (AUD-173): episodes and seasons carry
+        // content_type Podcast too; MultiPartBook children are components,
+        // not episodes, and the book itself stays a book.
+        let kind = |doc: serde_json::Value| item_kind(&doc);
+        assert_eq!(
+            kind(json!({"content_delivery_type": "PodcastEpisode", "content_type": "Podcast"})),
+            "episode"
+        );
+        assert_eq!(
+            kind(json!({"content_delivery_type": "PodcastParent", "content_type": "Podcast"})),
+            "podcast"
+        );
+        assert_eq!(
+            kind(json!({"content_delivery_type": "Periodical", "content_type": "Show"})),
+            "podcast"
+        );
+        assert_eq!(
+            kind(json!({"content_delivery_type": "PodcastSeason", "content_type": "Podcast"})),
+            "podcast"
+        );
+        // The defensive content_type fallback for parents without a
+        // delivery type.
+        assert_eq!(kind(json!({"content_type": "Podcast"})), "podcast");
+        assert_eq!(
+            kind(json!({"content_delivery_type": "SinglePartBook", "content_type": "Product"})),
+            "book"
+        );
+        assert_eq!(
+            kind(json!({"content_delivery_type": "MultiPartBook", "content_type": "Product"})),
+            "book"
+        );
+        // book is the catch-all.
+        assert_eq!(kind(json!({})), "book");
     }
 
     #[test]

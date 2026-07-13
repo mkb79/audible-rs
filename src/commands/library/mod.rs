@@ -130,6 +130,11 @@ impl super::Command for LibraryCommand {
                                  default (archive state is as of the last library sync)",
                             ),
                     )
+                    .arg(
+                        super::kind_arg("book")
+                            .conflicts_with("remote")
+                            .help_heading("Selection"),
+                    )
                     .arg(limit())
                     .arg(
                         Arg::new("page")
@@ -156,7 +161,8 @@ impl super::Command for LibraryCommand {
                             .long("like")
                             .action(ArgAction::SetTrue)
                             .help("Substring matching instead of FTS5 syntax"),
-                    ),
+                    )
+                    .arg(super::kind_arg("book")),
             )
             .subcommand(
                 clap::Command::new("export")
@@ -171,7 +177,8 @@ impl super::Command for LibraryCommand {
                                 "json: full item documents in a versioned envelope; \
                                  csv: flat book columns for spreadsheets",
                             ),
-                    ),
+                    )
+                    .arg(super::kind_arg("book")),
             )
             .subcommand(
                 clap::Command::new("changes")
@@ -196,12 +203,13 @@ impl super::Command for LibraryCommand {
                             .help("Only this sync mode"),
                     )
                     .arg(
-                        Arg::new("kind")
-                            .long("kind")
-                            .value_name("KIND")
+                        Arg::new("change")
+                            .long("change")
+                            .value_name("CHANGE")
                             .value_parser(["added", "changed", "removed"])
-                            .help("Only this kind"),
+                            .help("Only this change"),
                     )
+                    .arg(super::kind_arg("book"))
                     .arg(
                         Arg::new("limit")
                             .long("limit")
@@ -264,6 +272,10 @@ impl super::Command for LibraryCommand {
                             .multiple(true)
                             .required(true),
                     )
+                    .arg(super::kind_arg("all").help(
+                        "Only add these content kinds — a guard against \
+                         accidentally adding the wrong match (CSV; default all)",
+                    ))
                     .arg(
                         Arg::new("sync")
                             .long("sync")
@@ -297,6 +309,10 @@ impl super::Command for LibraryCommand {
                             .multiple(true)
                             .required(true),
                     )
+                    .arg(super::kind_arg("all").help(
+                        "Only remove these content kinds — a guard against \
+                         accidentally removing the wrong match (CSV; default all)",
+                    ))
                     .arg(super::yes_arg()),
             )
     }
@@ -325,7 +341,7 @@ impl super::Command for LibraryCommand {
             }
             Some(("list", sub)) if sub.get_flag("remote") => list_remote(ctx, limit(sub)).await,
             Some(("list", sub)) if sub.get_flag("borrowed") => {
-                list_borrowed(ctx, raw_limit(sub), page(sub)).await
+                list_borrowed(ctx, super::kind_filter(sub), raw_limit(sub), page(sub)).await
             }
             Some(("list", sub)) if sub.contains_id("missing") => {
                 list_missing(
@@ -334,20 +350,30 @@ impl super::Command for LibraryCommand {
                         .expect("contains_id")
                         .cloned()
                         .collect(),
+                    super::kind_filter(sub),
                     raw_limit(sub),
                     page(sub),
                     sub.get_flag("include_archived"),
                 )
                 .await
             }
-            Some(("list", sub)) => list(ctx, raw_limit(sub), page(sub)).await,
+            Some(("list", sub)) => {
+                list(ctx, super::kind_filter(sub), raw_limit(sub), page(sub)).await
+            }
             Some(("search", sub)) => {
                 let query = sub.get_one::<String>("query").expect("required").clone();
-                search(ctx, query, limit(sub), !sub.get_flag("like")).await
+                search(
+                    ctx,
+                    super::kind_filter(sub),
+                    query,
+                    limit(sub),
+                    !sub.get_flag("like"),
+                )
+                .await
             }
             Some(("export", sub)) => {
                 let csv = sub.get_one::<String>("format").expect("default") == "csv";
-                export(ctx, csv).await
+                export(ctx, super::kind_filter(sub), csv).await
             }
             Some(("changes", sub)) => match sub.subcommand() {
                 Some(("prune", prune)) => {
@@ -360,6 +386,7 @@ impl super::Command for LibraryCommand {
                     ctx,
                     strings(sub, "asin"),
                     strings(sub, "title"),
+                    super::kind_filter(sub),
                     sub.get_flag("sync"),
                 )
                 .await
@@ -369,6 +396,7 @@ impl super::Command for LibraryCommand {
                     ctx,
                     strings(sub, "asin"),
                     strings(sub, "title"),
+                    super::kind_filter(sub),
                     sub.get_flag("yes"),
                 )
                 .await

@@ -227,6 +227,41 @@ pub(crate) fn yes_arg() -> clap::Arg {
         .help("Skip the confirmation prompt")
 }
 
+/// The shared `--kind` content filter (AUD-173): restrict a command to
+/// books, podcast shows and/or single episodes. One definition so the
+/// filter reads the same on every command that takes it. The display
+/// commands default to `book` (podcasts/episodes are shown on request);
+/// `add`/`remove` default to `all` — there the filter is an opt-in
+/// guard, and a `book` default would refuse podcast follows outright.
+pub(crate) fn kind_arg(default: &'static str) -> clap::Arg {
+    debug_assert!(matches!(default, "book" | "all"));
+    clap::Arg::new("kind")
+        .long("kind")
+        .value_name("KIND,...")
+        .action(clap::ArgAction::Append)
+        .value_delimiter(',')
+        .default_value(default)
+        .value_parser(["book", "podcast", "episode", "all"])
+        .help(format!(
+            "Only these content kinds: book, podcast, episode (CSV; default {default})"
+        ))
+}
+
+/// The selected `--kind` values as a filter list — empty means no filter
+/// (`all`, the default).
+pub(crate) fn kind_filter(matches: &clap::ArgMatches) -> Vec<String> {
+    let mut kinds: Vec<String> = matches
+        .get_many::<String>("kind")
+        .map(|values| values.cloned().collect())
+        .unwrap_or_default();
+    if kinds.iter().any(|kind| kind == "all") {
+        return Vec::new();
+    }
+    kinds.sort();
+    kinds.dedup();
+    kinds
+}
+
 /// Turns raw `--limit`/`--page` values into the SQL LIMIT and OFFSET
 /// (`limit` 0 = everything on page 1, so the offset stays 0; callers
 /// reject `page > 1` there via [`empty_page_error`]).
