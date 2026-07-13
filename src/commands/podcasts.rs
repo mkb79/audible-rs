@@ -1,8 +1,10 @@
-//! `audible podcasts` — podcast subscriptions and their episodes,
-//! answered from the local database (episodes are stored by
-//! `library sync`).
+//! `audible podcasts` — DEPRECATED (AUD-175), removed in v0.1.0. The
+//! library is the one container: `podcasts list` is `library list --kind
+//! podcast`, `podcasts episodes` moved to `library episodes <SHOW>`.
+//! Both subcommands keep working until removal but print a deprecation
+//! notice on every invocation.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::Arg;
 
 use crate::config::ctx::Ctx;
@@ -10,7 +12,7 @@ use crate::output::Output;
 
 use super::library::maybe_auto_sync;
 
-/// `audible podcasts`.
+/// `audible podcasts` (deprecated).
 pub struct PodcastsCommand;
 
 #[async_trait::async_trait]
@@ -21,13 +23,20 @@ impl super::Command for PodcastsCommand {
 
     fn clap(&self) -> clap::Command {
         clap::Command::new(self.name())
-            .about("Your podcast subscriptions (from the local database)")
+            .about(
+                "[deprecated] Your podcast subscriptions — use `library list --kind podcast` \
+                 and `library episodes` (removed in v0.1.0)",
+            )
             .subcommand_required(true)
             .arg_required_else_help(true)
-            .subcommand(clap::Command::new("list").about("List subscribed podcasts"))
+            .subcommand(
+                clap::Command::new("list").about(
+                    "[deprecated] List subscribed podcasts — use `library list --kind podcast`",
+                ),
+            )
             .subcommand(
                 clap::Command::new("episodes")
-                    .about("List episodes of a podcast")
+                    .about("[deprecated] List episodes of a podcast — use `library episodes`")
                     .arg(
                         Arg::new("podcast")
                             .required(true)
@@ -54,19 +63,26 @@ impl super::Command for PodcastsCommand {
     }
 
     async fn run(&self, ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
+        eprintln!(
+            "warning: `podcasts` is deprecated and will be removed in v0.1.0 — \
+             use `library list --kind podcast` and `library episodes <SHOW>`"
+        );
         match matches.subcommand() {
             Some(("list", _)) => list(ctx).await,
             Some(("episodes", sub)) => {
                 let podcast = sub.get_one::<String>("podcast").expect("required").clone();
                 let limit = *sub.get_one::<u32>("limit").expect("default");
                 let page = *sub.get_one::<u32>("page").expect("default");
-                episodes(ctx, podcast, limit, page).await
+                super::library::episodes::episodes(ctx, podcast, limit, page).await
             }
             _ => unreachable!("subcommand required"),
         }
     }
 }
 
+/// The legacy podcast listing with stored/announced episode counts. Its
+/// replacement is `library list --kind podcast`; the counts live on in
+/// the `library episodes <SHOW>` header.
 async fn list(ctx: &Ctx) -> Result<()> {
     let db = ctx.open_library_db().await?;
     maybe_auto_sync(ctx, &db).await?;
@@ -91,67 +107,6 @@ async fn list(ctx: &Ctx) -> Result<()> {
     }
     ctx.print(&Output::table(
         vec!["mp", "asin", "title", "episodes", "announced"],
-        rows,
-    ));
-    Ok(())
-}
-
-async fn episodes(ctx: &Ctx, podcast: String, limit: u32, page: u32) -> Result<()> {
-    let db = ctx.open_library_db().await?;
-    maybe_auto_sync(ctx, &db).await?;
-    let marketplaces = ctx.marketplaces()?;
-
-    // Resolve the parent podcast (ASIN or unique title substring) across
-    // the selected marketplaces; the episodes live in the marketplace
-    // that owns the parent.
-    let candidates = db.podcasts(marketplaces).await?;
-    let needle = podcast.to_lowercase();
-    let matched: Vec<&crate::db::PodcastRow> = candidates
-        .iter()
-        .filter(|p| p.asin == podcast || p.full_title.to_lowercase().contains(&needle))
-        .collect();
-    let (marketplace, parent) = match matched.as_slice() {
-        [] => bail!("no subscribed podcast matches {podcast:?}"),
-        [unique] => (unique.marketplace.clone(), unique.asin.clone()),
-        several => bail!(
-            "{podcast:?} is ambiguous: {}",
-            several
-                .iter()
-                .map(|p| format!("{} ({}, {})", p.full_title, p.asin, p.marketplace))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    };
-
-    let (query_limit, offset) = super::page_window(limit, page);
-    let episodes = if limit == 0 && page > 1 {
-        Vec::new() // page 1 holds everything; no need to query
-    } else {
-        db.episodes(
-            marketplace.clone(),
-            Some(parent.clone()),
-            query_limit,
-            offset,
-        )
-        .await?
-    };
-    if episodes.is_empty() && page > 1 {
-        let total = db.count_episodes(marketplace, Some(parent)).await?;
-        return Err(super::empty_page_error(page, limit, total));
-    }
-    let rows = episodes
-        .into_iter()
-        .map(|episode| {
-            vec![
-                episode.asin,
-                episode.full_title,
-                episode.release_date.unwrap_or_default(),
-                episode.runtime_min.unwrap_or_default(),
-            ]
-        })
-        .collect();
-    ctx.print(&Output::table(
-        vec!["asin", "title", "release_date", "runtime_min"],
         rows,
     ));
     Ok(())
