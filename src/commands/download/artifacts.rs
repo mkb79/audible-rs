@@ -37,9 +37,11 @@ pub(super) async fn download_audio(
         None => dir.join(format!("{base}.aaxc")),
     };
 
-    // The on-disk extension follows the response Content-Type: `audio/mpeg`
-    // is an .mp3, every other (aax) variant stays .aaxc. The actual path is
-    // returned (the `.part` is renamed to it).
+    // The on-disk extension follows the response Content-Type: the plain,
+    // DRM-free variants (`audio/mpeg` → .mp3, AAC-in-MP4 → .m4a) get their
+    // real extension; every aax variant stays .aaxc. Some podcast episodes
+    // are served as `audio/mp4` (AUD-159). The actual path is returned (the
+    // `.part` is renamed to it).
     let (outcome, dest) = download_to_file(
         client,
         url,
@@ -51,10 +53,17 @@ pub(super) async fn download_audio(
             "audio/aax",
             "audio/vnd.audible.aax",
             "audio/mpeg",
+            "audio/mp3",
+            "audio/mp4",
             "audio/x-m4a",
             "audio/audible",
         ],
-        &[("audio/mpeg", "mp3")],
+        &[
+            ("audio/mpeg", "mp3"),
+            ("audio/mp3", "mp3"),
+            ("audio/mp4", "m4a"),
+            ("audio/x-m4a", "m4a"),
+        ],
     )
     .await?;
     match outcome {
@@ -62,9 +71,14 @@ pub(super) async fn download_audio(
         DownloadOutcome::Downloaded => {}
     }
 
-    // Key/iv sidecar next to the file (`<name>.voucher`), so the same
-    // quality keeps its own key. Regenerable from the stored license.
-    write_keyfile(client, license, &dest.with_extension("voucher"));
+    // Key/iv sidecar next to the file (`<name>.voucher`), so the same quality
+    // keeps its own key. Regenerable from the stored license. Only the
+    // encrypted `.aaxc` downloads need one — plain media (mp3/m4a podcast
+    // episodes) is DRM-free and its license carries only an empty voucher, so
+    // write the sidecar only when the file actually stayed encrypted.
+    if dest.extension().and_then(|ext| ext.to_str()) == Some("aaxc") {
+        write_keyfile(client, license, &dest.with_extension("voucher"));
+    }
 
     let size = std::fs::metadata(&dest).ok().map(|m| m.len());
     record_download(
