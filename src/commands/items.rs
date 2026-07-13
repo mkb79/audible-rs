@@ -62,11 +62,19 @@ fn parse_title_arg(raw: &str) -> Result<TitleQuery> {
 /// exact ids) and `--title` searches into a deduped, order-preserving
 /// ASIN list. Per title: 0 hits → warning + skip; 1 → taken; many →
 /// interactive multi-select on a TTY, otherwise an "ambiguous" error.
+///
+/// `include_episodes` (AUD-174) additionally matches the child episodes
+/// of followed podcasts (`episodes` table, LIKE), labeled `episode of
+/// <show>` in the picker — for consumers where an episode is a valid
+/// target (download, annotations, download records). Membership commands
+/// pass `false`: a child episode is not an own membership. Individually-
+/// subscribed episodes are `items` rows and are found either way.
 pub(crate) async fn resolve_asins(
     db: &crate::db::Db,
     marketplace: &str,
     asins: Vec<String>,
     titles: Vec<String>,
+    include_episodes: bool,
 ) -> Result<Vec<String>> {
     let mut result: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -93,7 +101,10 @@ pub(crate) async fn resolve_asins(
             eprintln!("ignoring empty --title");
             continue;
         }
-        let rows = db
+        // Candidates as (asin, display label): items first, then — when
+        // wanted — episode hits, deduped against the item hits (an
+        // individually-subscribed episode can be stored as both).
+        let mut candidates: Vec<(String, String)> = db
             .search(
                 vec![marketplace.to_owned()],
                 Vec::new(), // all kinds — callers guard on kind themselves
@@ -101,20 +112,40 @@ pub(crate) async fn resolve_asins(
                 tq.cap as u32,
                 true,
             )
-            .await?;
-        match rows.len() {
+            .await?
+            .into_iter()
+            .map(|row| {
+                let label = format!("{}  {}", row.asin, row.full_title);
+                (row.asin, label)
+            })
+            .collect();
+        if include_episodes {
+            let item_hits: std::collections::HashSet<String> =
+                candidates.iter().map(|(asin, _)| asin.clone()).collect();
+            for hit in db
+                .search_episodes(marketplace.to_owned(), tq.query.clone(), tq.cap as u32)
+                .await?
+            {
+                if !item_hits.contains(&hit.asin) {
+                    let label = format!(
+                        "{}  {}  (episode of {})",
+                        hit.asin, hit.full_title, hit.parent_title
+                    );
+                    candidates.push((hit.asin, label));
+                }
+            }
+        }
+        match candidates.len() {
             0 => {
                 eprintln!("no title matches {:?}", tq.query);
             }
             1 => {
-                push(rows[0].asin.clone());
+                push(candidates[0].0.clone());
             }
             _ => {
                 if console::Term::stderr().is_term() {
-                    let labels: Vec<String> = rows
-                        .iter()
-                        .map(|r| format!("{}  {}", r.asin, r.full_title))
-                        .collect();
+                    let labels: Vec<&str> =
+                        candidates.iter().map(|(_, label)| label.as_str()).collect();
                     // `report(false)`: the default echoes the whole chosen
                     // list back as one long line — we clear the picker and
                     // print a concise confirmation instead.
@@ -135,21 +166,21 @@ pub(crate) async fn resolve_asins(
                         eprintln!(
                             "selected {} of {} for {:?}",
                             selection.len(),
-                            rows.len(),
+                            candidates.len(),
                             tq.query
                         );
                         for i in selection {
-                            push(rows[i].asin.clone());
+                            push(candidates[i].0.clone());
                         }
                     }
                 } else {
-                    let listing: Vec<String> = rows
+                    let listing: Vec<String> = candidates
                         .iter()
-                        .map(|r| format!("  {}  {}", r.asin, r.full_title))
+                        .map(|(_, label)| format!("  {label}"))
                         .collect();
                     bail!(
                         "{} titles match {:?}; pass --asin or run interactively:\n{}",
-                        rows.len(),
+                        candidates.len(),
                         tq.query,
                         listing.join("\n"),
                     );
@@ -168,7 +199,17 @@ pub(crate) async fn resolve_asins(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{Db, SyncLogEntry, UpsertItem, now_iso_utc};
+    use crate::db::{Db, SyncLogEntry, UpsertEpisode, UpsertItem, now_iso_utc};
+
+    fn episode(asin: &str, title: &str) -> UpsertEpisode {
+        UpsertEpisode {
+            asin: asin.into(),
+            doc: serde_json::json!({"asin": asin, "title": title}).to_string(),
+            title: title.into(),
+            subtitle: None,
+            full_title: title.into(),
+        }
+    }
 
     fn item(asin: &str, title: &str) -> UpsertItem {
         UpsertItem {
@@ -246,19 +287,25 @@ mod tests {
         .unwrap();
 
         // (a) verbatim ASINs: dedupe + passthrough of unknown "ZZ"
-        let result = resolve_asins(&db, MP, vec!["A1".into(), "A1".into(), "ZZ".into()], vec![])
-            .await
-            .unwrap();
+        let result = resolve_asins(
+            &db,
+            MP,
+            vec!["A1".into(), "A1".into(), "ZZ".into()],
+            vec![],
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(result, vec!["A1", "ZZ"]);
 
         // (b) title single match → taken
-        let result = resolve_asins(&db, MP, vec![], vec!["jedi".into()])
+        let result = resolve_asins(&db, MP, vec![], vec!["jedi".into()], false)
             .await
             .unwrap();
         assert_eq!(result, vec!["A1"]);
 
         // (c) title no match → skip, empty result
-        let result = resolve_asins(&db, MP, vec![], vec!["nomatch".into()])
+        let result = resolve_asins(&db, MP, vec![], vec!["nomatch".into()], false)
             .await
             .unwrap();
         assert!(result.is_empty());
@@ -266,7 +313,7 @@ mod tests {
         // (d) title matching both items in non-TTY context → Err (ambiguous)
         // Tests run without a terminal, so the "many" branch bails.
         // "Jedi OR Star" uses FTS5 OR passthrough and matches both A1 and A2.
-        let err = resolve_asins(&db, MP, vec![], vec!["Jedi OR Star".into()]).await;
+        let err = resolve_asins(&db, MP, vec![], vec!["Jedi OR Star".into()], false).await;
         assert!(
             err.is_err(),
             "expected ambiguous error for multi-match title"
@@ -278,9 +325,73 @@ mod tests {
             MP,
             vec!["A1".into()],
             vec!["jedi".into()], // also resolves to A1
+            false,
         )
         .await
         .unwrap();
         assert_eq!(result, vec!["A1"], "A1 from both sources deduped to one");
+    }
+
+    /// Episode resolution (AUD-174): child episodes of a followed show are
+    /// found only with `include_episodes`; an individually-subscribed
+    /// episode (an `items` row) is found either way; an ASIN stored in
+    /// both tables is offered once.
+    #[tokio::test]
+    async fn resolve_asins_episode_scope() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        // A followed show (item) with a child episode, plus a standalone
+        // (individually-subscribed) episode that is stored as an item AND
+        // as a child of the show.
+        db.apply_page(
+            MP.into(),
+            vec![item("P1", "Mein Podcast"), item("E9", "Sonderfolge Neun")],
+            vec![],
+            default_log(),
+            None,
+        )
+        .await
+        .unwrap();
+        db.apply_episodes(
+            MP.into(),
+            "P1".into(),
+            vec![
+                episode("E1", "Folge Eins: Anfang"),
+                episode("E9", "Sonderfolge Neun"),
+            ],
+            crate::db::ChangeRecording {
+                record: false,
+                mode: "delta",
+            },
+        )
+        .await
+        .unwrap();
+
+        // Child episode: invisible without the episode scope …
+        let result = resolve_asins(&db, MP, vec![], vec!["Anfang".into()], false)
+            .await
+            .unwrap();
+        assert!(
+            result.is_empty(),
+            "child episode must not match: {result:?}"
+        );
+        // … found with it.
+        let result = resolve_asins(&db, MP, vec![], vec!["Anfang".into()], true)
+            .await
+            .unwrap();
+        assert_eq!(result, vec!["E1"]);
+
+        // Individually-subscribed episode: an items row, found even
+        // without the episode scope (the library-remove case).
+        let result = resolve_asins(&db, MP, vec![], vec!["Sonderfolge".into()], false)
+            .await
+            .unwrap();
+        assert_eq!(result, vec!["E9"]);
+        // With the scope it is offered once (deduped across the tables),
+        // so the single-hit fast path still applies.
+        let result = resolve_asins(&db, MP, vec![], vec!["Sonderfolge".into()], true)
+            .await
+            .unwrap();
+        assert_eq!(result, vec!["E9"]);
     }
 }

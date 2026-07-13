@@ -51,6 +51,19 @@ pub struct EpisodeRow {
     pub runtime_min: Option<String>,
 }
 
+/// A title-search hit in the `episodes` table (AUD-174) — carries the
+/// show's title so pickers can label it distinguishably.
+#[derive(Debug, Clone)]
+pub struct EpisodeHit {
+    /// Episode ASIN.
+    pub asin: String,
+    /// Episode title (incl. subtitle).
+    pub full_title: String,
+    /// Title of the followed show (falls back to the parent ASIN when the
+    /// parent item is gone).
+    pub parent_title: String,
+}
+
 impl Db {
     /// Replaces the episode set of one podcast parent: upserts the given
     /// episodes and soft-deletes episodes that vanished from the feed.
@@ -263,6 +276,41 @@ impl Db {
         .await
     }
 
+    /// Title search over active episodes (AUD-174): case-insensitive
+    /// substring match on `full_title`, joined to the parent item for the
+    /// show's title. LIKE instead of FTS — episode titles are long and
+    /// distinctive, and `episodes` has no FTS table by design.
+    pub async fn search_episodes(
+        &self,
+        marketplace: String,
+        query: String,
+        limit: u32,
+    ) -> Result<Vec<EpisodeHit>, DbError> {
+        self.call(move |conn| {
+            let sql = "SELECT e.asin, e.full_title,
+                              COALESCE(i.full_title, e.parent_asin)
+                       FROM episodes e
+                       LEFT JOIN items i
+                         ON i.asin = e.parent_asin AND i.marketplace = e.marketplace
+                       WHERE e.marketplace = ?1 AND e.is_deleted = 0
+                         AND lower(e.full_title) LIKE '%' || lower(?2) || '%'
+                       ORDER BY e.full_title, e.asin
+                       LIMIT ?3";
+            let mut statement = conn.prepare_cached(sql)?;
+            let rows = statement
+                .query_map(rusqlite::params![marketplace, query, limit], |row| {
+                    Ok(EpisodeHit {
+                        asin: row.get(0)?,
+                        full_title: row.get(1)?,
+                        parent_title: row.get(2)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
     /// Counts active episodes for a marketplace, optionally only one
     /// parent's (for the `--page` end-of-pages message).
     pub async fn count_episodes(
@@ -423,6 +471,58 @@ mod tests {
         let podcasts = db.podcasts(vec![MP.to_owned()]).await.unwrap();
         let asins: Vec<&str> = podcasts.iter().map(|p| p.asin.as_str()).collect();
         assert_eq!(asins, ["P1"], "the standalone episode is not a show");
+    }
+
+    /// `search_episodes` (AUD-174): LIKE over full_title, parent title in
+    /// the hit, soft-deleted episodes invisible.
+    #[tokio::test]
+    async fn search_episodes_matches_and_labels() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        db.apply_page(
+            MP.into(),
+            vec![item("P1", "Mein Podcast")],
+            vec![],
+            default_log(),
+            None,
+        )
+        .await
+        .unwrap();
+        db.apply_episodes(
+            MP.into(),
+            "P1".into(),
+            vec![
+                episode("E1", "Folge Eins: Anfang"),
+                episode("E2", "Folge Zwei: Ende"),
+            ],
+            no_recording(),
+        )
+        .await
+        .unwrap();
+
+        let hits = db
+            .search_episodes(MP.into(), "anfang".into(), 10)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].asin, "E1");
+        assert_eq!(hits[0].parent_title, "Mein Podcast");
+
+        // A vanished (soft-deleted) episode no longer matches.
+        db.apply_episodes(
+            MP.into(),
+            "P1".into(),
+            vec![episode("E2", "Folge Zwei: Ende")],
+            no_recording(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            db.search_episodes(MP.into(), "anfang".into(), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Episode resolution records added/changed/removed to the change_log

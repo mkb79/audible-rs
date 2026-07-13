@@ -187,7 +187,10 @@ pub(super) async fn remove(
     let client = ctx.client().await?;
     let marketplace = ctx.marketplace_single()?;
     let db = ctx.open_library_db().await?;
-    let asins = items::resolve_asins(&db, &marketplace, asins, titles).await?;
+    // No episode hits here: a child episode of a followed show is not an
+    // own membership (individually-subscribed episodes are items rows and
+    // are found either way, AUD-174).
+    let asins = items::resolve_asins(&db, &marketplace, asins, titles, false).await?;
     if asins.is_empty() {
         bail!("nothing to remove — pass --asin or --title");
     }

@@ -131,8 +131,14 @@ async fn sync(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
             db.annotation_target_asins(marketplace.clone(), true)
                 .await?
         } else {
-            crate::commands::items::resolve_asins(&db, marketplace, asins.clone(), titles.clone())
-                .await?
+            crate::commands::items::resolve_asins(
+                &db,
+                marketplace,
+                asins.clone(),
+                titles.clone(),
+                true,
+            )
+            .await?
         };
 
         let db_ref = &db;

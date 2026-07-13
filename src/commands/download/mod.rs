@@ -590,7 +590,7 @@ async fn resolve_source(
         .get_many::<String>("title")
         .map(|values| values.cloned().collect())
         .unwrap_or_default();
-    crate::commands::items::resolve_asins(&db, marketplace, asins, titles).await
+    crate::commands::items::resolve_asins(&db, marketplace, asins, titles, true).await
 }
 
 /// A `--kind` artifact.
