@@ -1,7 +1,10 @@
 //! Podcast parents and their episodes: episode application and the
 //! podcast/episode listings.
 
-use super::{Db, DbError, in_placeholders, now_iso_utc};
+use rusqlite::OptionalExtension as _;
+
+use super::{ChangeRecording, Db, DbError, in_placeholders, now_iso_utc};
+use crate::db::changes::{ChangeClass, classify_change};
 
 /// One podcast episode to upsert.
 #[derive(Debug, Clone)]
@@ -51,18 +54,28 @@ pub struct EpisodeRow {
 impl Db {
     /// Replaces the episode set of one podcast parent: upserts the given
     /// episodes and soft-deletes episodes that vanished from the feed.
+    /// Per `recording`, added/changed/removed episodes are written to the
+    /// `change_log` (item_kind `episode`, AUD-173) with the same
+    /// classification as items — unchanged/reordered docs are not
+    /// recorded, volatile-only diffs are recorded but hidden by default.
     /// Returns (upserted, soft-deleted).
     pub async fn apply_episodes(
         &self,
         marketplace: String,
         parent_asin: String,
         episodes: Vec<UpsertEpisode>,
+        recording: ChangeRecording,
     ) -> Result<(usize, usize), DbError> {
         self.call(move |conn| {
             let now = now_iso_utc();
             let tx = conn.transaction()?;
 
+            // change_log rows: (change, asin, full_title, diff).
+            let mut change_rows: Vec<(&'static str, String, String, Option<String>)> = Vec::new();
             {
+                let mut prior = tx.prepare_cached(
+                    "SELECT doc, is_deleted FROM episodes WHERE asin = ? AND marketplace = ?",
+                )?;
                 let mut statement = tx.prepare_cached(
                     "INSERT INTO episodes(asin, marketplace, parent_asin, doc, title, subtitle, full_title, updated_utc, is_deleted, deleted_utc)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
@@ -77,6 +90,11 @@ impl Db {
                        deleted_utc = NULL",
                 )?;
                 for episode in &episodes {
+                    let prior_state: Option<(String, i64)> = prior
+                        .query_row(rusqlite::params![episode.asin, marketplace], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                        })
+                        .optional()?;
                     statement.execute(rusqlite::params![
                         episode.asin,
                         marketplace,
@@ -87,16 +105,35 @@ impl Db {
                         episode.full_title,
                         now,
                     ])?;
+                    if recording.record {
+                        let classified = match &prior_state {
+                            Some((old_doc, 0)) => match classify_change(old_doc, &episode.doc) {
+                                (ChangeClass::Unchanged, _) => None,
+                                (_, diff) => Some(("changed", diff)),
+                            },
+                            _ => Some(("added", None)),
+                        };
+                        if let Some((change, diff)) = classified {
+                            change_rows.push((
+                                change,
+                                episode.asin.clone(),
+                                episode.full_title.clone(),
+                                diff,
+                            ));
+                        }
+                    }
                 }
             }
 
             // Episodes of this parent that are no longer in the feed.
-            let existing: Vec<String> = tx
+            let existing: Vec<(String, String)> = tx
                 .prepare_cached(
-                    "SELECT asin FROM episodes
+                    "SELECT asin, full_title FROM episodes
                      WHERE parent_asin = ? AND marketplace = ? AND is_deleted = 0",
                 )?
-                .query_map(rusqlite::params![parent_asin, marketplace], |row| row.get(0))?
+                .query_map(rusqlite::params![parent_asin, marketplace], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
                 .collect::<Result<_, _>>()?;
             let fresh: std::collections::BTreeSet<&str> =
                 episodes.iter().map(|e| e.asin.as_str()).collect();
@@ -106,11 +143,34 @@ impl Db {
                     "UPDATE episodes SET is_deleted = 1, deleted_utc = ?, updated_utc = ?
                      WHERE asin = ? AND marketplace = ?",
                 )?;
-                for asin in existing {
+                for (asin, full_title) in existing {
                     if !fresh.contains(asin.as_str()) {
                         soft_delete.execute(rusqlite::params![now, now, asin, marketplace])?;
                         removed += 1;
+                        if recording.record {
+                            change_rows.push(("removed", asin, full_title, None));
+                        }
                     }
+                }
+            }
+
+            // Episode change history (AUD-173). No sync_id: episode
+            // resolution runs after (and independent of) the page applies.
+            if !change_rows.is_empty() {
+                let mut insert = tx.prepare_cached(
+                    "INSERT INTO change_log(sync_id, recorded_utc, marketplace, asin, full_title, mode, kind, item_kind, changed)
+                     VALUES (NULL, ?, ?, ?, ?, ?, ?, 'episode', ?)",
+                )?;
+                for (change, asin, full_title, diff) in &change_rows {
+                    insert.execute(rusqlite::params![
+                        now,
+                        marketplace,
+                        asin,
+                        full_title,
+                        recording.mode,
+                        change,
+                        diff,
+                    ])?;
                 }
             }
 
@@ -121,7 +181,10 @@ impl Db {
     }
 
     /// Active podcast parents across the marketplace set, with their
-    /// stored episode counts.
+    /// stored episode counts. Filters on the shared kind expression, so
+    /// this is by construction the same set as `library list --kind
+    /// podcast` — an individually-subscribed `PodcastEpisode` item never
+    /// shows up as a show (AUD-173).
     pub async fn podcasts(&self, marketplaces: Vec<String>) -> Result<Vec<PodcastRow>, DbError> {
         self.call(move |conn| {
             if marketplaces.is_empty() {
@@ -136,11 +199,10 @@ impl Db {
                  FROM items i
                  WHERE i.marketplace IN ({})
                    AND i.is_deleted = 0
-                   AND (json_extract(i.doc, '$.content_delivery_type')
-                          IN ('PodcastParent', 'Periodical')
-                        OR json_extract(i.doc, '$.content_type') = 'Podcast')
+                   AND {} = 'podcast'
                  ORDER BY i.full_title, i.marketplace",
-                in_placeholders(marketplaces.len())
+                in_placeholders(marketplaces.len()),
+                super::item_kind_sql("i.doc")
             );
             let mut statement = conn.prepare_cached(&sql)?;
             let params: Vec<&dyn rusqlite::ToSql> = marketplaces
@@ -225,6 +287,14 @@ impl Db {
 mod tests {
 
     use crate::db::test_util::{MP, default_log, episode, item, open_temp};
+
+    /// Episode application without change recording (the common test case).
+    fn no_recording() -> ChangeRecording {
+        ChangeRecording {
+            record: false,
+            mode: "delta",
+        }
+    }
     #[allow(unused_imports)]
     use crate::db::*;
 
@@ -249,6 +319,7 @@ mod tests {
             MP.into(),
             "P1".into(),
             vec![episode("E1", "Folge 1"), episode("E2", "Folge 2")],
+            no_recording(),
         )
         .await
         .unwrap();
@@ -293,6 +364,7 @@ mod tests {
                 MP.into(),
                 "P1".into(),
                 vec![episode("E1", "Folge 1"), episode("E3", "Folge 3")],
+                no_recording(),
             )
             .await
             .unwrap();
@@ -315,6 +387,130 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    /// An individually-subscribed `PodcastEpisode` living in `items` must
+    /// never show up as a show in `podcasts list` (AUD-173) — the listing
+    /// filters on the shared kind expression, not on `content_type` alone.
+    #[tokio::test]
+    async fn podcasts_listing_excludes_episode_items() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+
+        let mut parent = item("P1", "Show");
+        parent.doc = serde_json::json!({
+            "asin": "P1", "title": "Show",
+            "content_delivery_type": "PodcastParent", "content_type": "Podcast",
+        })
+        .to_string();
+        let mut standalone = item("E9", "Einzelfolge");
+        standalone.doc = serde_json::json!({
+            "asin": "E9", "title": "Einzelfolge",
+            "content_delivery_type": "PodcastEpisode", "content_type": "Podcast",
+        })
+        .to_string();
+        db.apply_page(
+            MP.into(),
+            vec![parent, standalone],
+            vec![],
+            default_log(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let podcasts = db.podcasts(vec![MP.to_owned()]).await.unwrap();
+        let asins: Vec<&str> = podcasts.iter().map(|p| p.asin.as_str()).collect();
+        assert_eq!(asins, ["P1"], "the standalone episode is not a show");
+    }
+
+    /// Episode resolution records added/changed/removed to the change_log
+    /// (item_kind `episode`) when recording is on — and nothing when off
+    /// (the initial scan).
+    #[tokio::test]
+    async fn apply_episodes_records_changes_when_enabled() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        db.apply_page(
+            MP.into(),
+            vec![item("P1", "Show")],
+            vec![],
+            default_log(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Initial fill without recording (the init scan): no log rows.
+        db.apply_episodes(
+            MP.into(),
+            "P1".into(),
+            vec![episode("E1", "Folge 1"), episode("E2", "Folge 2")],
+            no_recording(),
+        )
+        .await
+        .unwrap();
+        let changes = db
+            .list_changes(ChangeFilter {
+                limit: 0,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(changes.is_empty(), "init scan records nothing: {changes:?}");
+
+        // Recorded refresh: E2 vanishes, E3 appears, E1 changes its doc.
+        let mut e1 = episode("E1", "Folge 1");
+        e1.doc = serde_json::json!({
+            "asin": "E1", "title": "Folge 1",
+            "release_date": "2026-06-01", "runtime_length_min": 31,
+        })
+        .to_string();
+        db.apply_episodes(
+            MP.into(),
+            "P1".into(),
+            vec![e1, episode("E3", "Folge 3")],
+            ChangeRecording {
+                record: true,
+                mode: "delta",
+            },
+        )
+        .await
+        .unwrap();
+
+        let changes = db
+            .list_changes(ChangeFilter {
+                item_kinds: vec!["episode".into()],
+                limit: 0,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut summary: Vec<(String, String)> = changes
+            .iter()
+            .map(|c| (c.change.clone(), c.asin.clone()))
+            .collect();
+        summary.sort();
+        assert_eq!(
+            summary,
+            [
+                ("added".to_owned(), "E3".to_owned()),
+                ("changed".to_owned(), "E1".to_owned()),
+                ("removed".to_owned(), "E2".to_owned()),
+            ]
+        );
+        assert!(changes.iter().all(|c| c.item_kind == "episode"));
+        // The --kind filter separates episodes from item changes.
+        assert!(
+            db.list_changes(ChangeFilter {
+                item_kinds: vec!["book".into()],
+                limit: 0,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .is_empty()
         );
     }
 }

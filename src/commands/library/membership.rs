@@ -51,6 +51,21 @@ impl Kind {
         }
     }
 
+    /// The `--kind` filter value this kind matches (the shared
+    /// book/podcast/episode vocabulary, AUD-173).
+    fn as_filter(self) -> &'static str {
+        match self {
+            Kind::Audiobook => "book",
+            Kind::Podcast => "podcast",
+            Kind::Episode => "episode",
+        }
+    }
+
+    /// Whether this kind passes a `--kind` filter (empty = all).
+    fn passes(self, kinds: &[String]) -> bool {
+        kinds.is_empty() || kinds.iter().any(|kind| kind == self.as_filter())
+    }
+
     /// Confirmation after a successful add.
     fn added(self, named: &str) -> String {
         match self {
@@ -86,6 +101,7 @@ pub(super) async fn add(
     ctx: &Ctx,
     asins: Vec<String>,
     titles: Vec<String>,
+    kinds: Vec<String>,
     sync: bool,
 ) -> Result<()> {
     let client = ctx.client().await?;
@@ -119,6 +135,17 @@ pub(super) async fn add(
             format!("{asin} ({title})")
         };
         let kind = Kind::classify(entry.and_then(|e| e.content_delivery_type.as_deref()));
+        // The --kind guard: never add something outside the requested
+        // kinds — applies to explicit --asin values too, no silent
+        // substitution (AUD-173).
+        if !kind.passes(&kinds) {
+            eprintln!(
+                "{named} is a {} — skipped by --kind {}",
+                kind.as_filter(),
+                kinds.join(",")
+            );
+            continue;
+        }
         match entry {
             Some(e) if e.is_borrowable() => {
                 client
@@ -154,6 +181,7 @@ pub(super) async fn remove(
     ctx: &Ctx,
     asins: Vec<String>,
     titles: Vec<String>,
+    kinds: Vec<String>,
     yes: bool,
 ) -> Result<()> {
     let client = ctx.client().await?;
@@ -189,6 +217,17 @@ pub(super) async fn remove(
             continue;
         }
         let kind = Kind::classify(doc.get("content_delivery_type").and_then(Value::as_str));
+        // The --kind guard: never remove something outside the requested
+        // kinds — applies to explicit --asin values too, no silent
+        // substitution (AUD-173).
+        if !kind.passes(&kinds) {
+            eprintln!(
+                "{named} is a {} — skipped by --kind {}",
+                kind.as_filter(),
+                kinds.join(",")
+            );
+            continue;
+        }
         targets.push((asin.clone(), named, kind));
     }
     if targets.is_empty() {

@@ -181,6 +181,42 @@ fn not_archived_clause(include_archived: bool) -> &'static str {
     }
 }
 
+/// The content-kind expression over an item document column — the SQL
+/// twin of [`crate::models::library::item_kind`] (AUD-173), for queries
+/// selecting from `items` directly. `v_books` embeds the same CASE as its
+/// `kind` column; a functional test keeps all copies in lockstep.
+fn item_kind_sql(doc_column: &str) -> String {
+    format!(
+        "CASE \
+           WHEN json_extract({doc_column}, '$.content_delivery_type') = 'PodcastEpisode' \
+             THEN 'episode' \
+           WHEN json_extract({doc_column}, '$.content_delivery_type') \
+                  IN ('PodcastParent', 'Periodical', 'PodcastSeason') \
+                OR json_extract({doc_column}, '$.content_type') = 'Podcast' \
+             THEN 'podcast' \
+           ELSE 'book' \
+         END"
+    )
+}
+
+/// SQL fragment for a `--kind` content filter over a kind column or
+/// expression; empty `kinds` = empty fragment (all kinds). The values come
+/// from clap's fixed `book|podcast|episode` set, so they are embedded as
+/// literals (asserted, defensively).
+fn kind_clause(kind_expr: &str, kinds: &[String]) -> String {
+    if kinds.is_empty() {
+        return String::new();
+    }
+    debug_assert!(
+        kinds
+            .iter()
+            .all(|kind| crate::models::library::ITEM_KINDS.contains(&kind.as_str())),
+        "kind filter values must come from the fixed clap set"
+    );
+    let quoted: Vec<String> = kinds.iter().map(|kind| format!("'{kind}'")).collect();
+    format!(" AND {kind_expr} IN ({})", quoted.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

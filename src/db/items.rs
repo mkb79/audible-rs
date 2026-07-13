@@ -132,6 +132,8 @@ pub struct ExportBookRow {
     pub runtime_min: Option<String>,
     /// Language, if present.
     pub language: Option<String>,
+    /// Content kind: `book`, `podcast` or `episode` (AUD-173).
+    pub kind: String,
 }
 
 /// An active item lacking download records
@@ -184,6 +186,8 @@ pub struct BookRow {
     pub runtime_min: Option<String>,
     /// Language, if present.
     pub language: Option<String>,
+    /// Content kind: `book`, `podcast` or `episode` (AUD-173).
+    pub kind: String,
 }
 
 fn book_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {
@@ -194,6 +198,7 @@ fn book_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {
         purchase_date: row.get(3)?,
         runtime_min: row.get(4)?,
         language: row.get(5)?,
+        kind: row.get(6)?,
     })
 }
 
@@ -355,8 +360,17 @@ impl Db {
             let mut added: Vec<ChangedItem> = Vec::new();
             let mut changed: Vec<ChangedItem> = Vec::new();
             let mut changed_volatile: Vec<ChangedItem> = Vec::new();
-            // change_log rows for this page (added/changed/removed), if recording.
-            let mut change_rows: Vec<(&'static str, String, String, Option<String>)> = Vec::new();
+            // change_log rows for this page, if recording:
+            // (change, asin, full_title, item_kind, diff).
+            let mut change_rows: Vec<(&'static str, String, String, &'static str, Option<String>)> =
+                Vec::new();
+            // Content kind of a raw item document, for the change log's
+            // item_kind column (AUD-173).
+            let kind_of_doc = |doc: &str| {
+                crate::models::library::item_kind(
+                    &serde_json::from_str(doc).unwrap_or(serde_json::Value::Null),
+                )
+            };
             {
                 // Read the prior state to classify each upsert before it is
                 // overwritten: absent / soft-deleted → added; a non-volatile key
@@ -440,6 +454,7 @@ impl Db {
                                 kind,
                                 item.asin.clone(),
                                 item.full_title.clone(),
+                                kind_of_doc(&item.doc),
                                 diff,
                             ));
                         }
@@ -449,29 +464,41 @@ impl Db {
 
             let mut removed: Vec<ChangedItem> = Vec::new();
             {
-                // The title is read before the soft-delete (the row stays, only
-                // its flag flips) so the change summary can show it.
+                // Title and doc are read before the soft-delete (the row stays,
+                // only its flag flips) so the change summary can show the title
+                // and the change log can classify the item's kind.
                 let mut title_of = tx.prepare_cached(
-                    "SELECT full_title FROM items WHERE asin = ? AND marketplace = ?",
+                    "SELECT full_title, doc FROM items WHERE asin = ? AND marketplace = ?",
                 )?;
                 let mut statement = tx.prepare_cached(
                     "UPDATE items SET is_deleted = 1, deleted_utc = ?, updated_utc = ?
                      WHERE asin = ? AND marketplace = ?",
                 )?;
-                // A soft-deleted parent takes its episodes with it.
+                // A soft-deleted parent takes its episodes with it. An
+                // independently-owned episode keeps its own `items` row — only
+                // that row makes it visible (`--kind episode`), so nothing is
+                // lost when the parent's child rows go (AUD-173).
                 let mut delete_episodes = tx.prepare_cached(
                     "UPDATE episodes SET is_deleted = 1, deleted_utc = ?, updated_utc = ?
                      WHERE parent_asin = ? AND marketplace = ? AND is_deleted = 0",
                 )?;
                 for asin in &soft_deletes {
-                    let full_title: Option<String> = title_of
-                        .query_row(rusqlite::params![asin, marketplace], |row| row.get(0))
+                    let prior: Option<(String, String)> = title_of
+                        .query_row(rusqlite::params![asin, marketplace], |row| {
+                            Ok((row.get(0)?, row.get(1)?))
+                        })
                         .optional()?;
                     if statement.execute(rusqlite::params![now, now, asin, marketplace])? > 0 {
                         delete_episodes.execute(rusqlite::params![now, now, asin, marketplace])?;
-                        let title = full_title.unwrap_or_default();
+                        let (title, doc) = prior.unwrap_or_default();
                         if recording.record {
-                            change_rows.push(("removed", asin.clone(), title.clone(), None));
+                            change_rows.push((
+                                "removed",
+                                asin.clone(),
+                                title.clone(),
+                                kind_of_doc(&doc),
+                                None,
+                            ));
                         }
                         removed.push(ChangedItem {
                             asin: asin.clone(),
@@ -512,10 +539,10 @@ impl Db {
             if recording.record && !change_rows.is_empty() {
                 let sync_id = tx.last_insert_rowid();
                 let mut insert = tx.prepare_cached(
-                    "INSERT INTO change_log(sync_id, recorded_utc, marketplace, asin, full_title, mode, kind, changed)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO change_log(sync_id, recorded_utc, marketplace, asin, full_title, mode, kind, item_kind, changed)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )?;
-                for (kind, asin, full_title, diff) in &change_rows {
+                for (kind, asin, full_title, item_kind, diff) in &change_rows {
                     insert.execute(rusqlite::params![
                         sync_id,
                         now,
@@ -524,6 +551,7 @@ impl Db {
                         full_title,
                         recording.mode,
                         kind,
+                        item_kind,
                         diff,
                     ])?;
                 }
@@ -621,6 +649,7 @@ impl Db {
     pub async fn list_books(
         &self,
         marketplaces: Vec<String>,
+        kinds: Vec<String>,
         limit: u32,
         offset: u64,
     ) -> Result<Vec<BookRow>, DbError> {
@@ -631,12 +660,13 @@ impl Db {
             }
             let sql = format!(
                 "SELECT marketplace, asin, full_title, CAST(purchase_date AS TEXT),
-                        CAST(runtime_min AS TEXT), CAST(language AS TEXT)
+                        CAST(runtime_min AS TEXT), CAST(language AS TEXT), kind
                  FROM v_books
-                 WHERE marketplace IN ({})
+                 WHERE marketplace IN ({}) {}
                  ORDER BY purchase_date DESC, asin, marketplace
                  LIMIT ? OFFSET ?",
-                in_placeholders(marketplaces.len())
+                in_placeholders(marketplaces.len()),
+                super::kind_clause("kind", &kinds)
             );
             let mut statement = conn.prepare_cached(&sql)?;
             let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(marketplaces.len() + 2);
@@ -653,6 +683,33 @@ impl Db {
         .await
     }
 
+    /// Counts active items across the marketplace set, honoring a
+    /// `--kind` content filter (for `library list`'s empty/page-end
+    /// paths; [`Self::count_active`] stays unfiltered for the sync).
+    pub async fn count_books(
+        &self,
+        marketplaces: Vec<String>,
+        kinds: Vec<String>,
+    ) -> Result<u64, DbError> {
+        self.call(move |conn| {
+            if marketplaces.is_empty() {
+                return Ok(0);
+            }
+            let sql = format!(
+                "SELECT COUNT(*) FROM v_books WHERE marketplace IN ({}) {}",
+                in_placeholders(marketplaces.len()),
+                super::kind_clause("kind", &kinds)
+            );
+            let params: Vec<&dyn rusqlite::ToSql> = marketplaces
+                .iter()
+                .map(|m| m as &dyn rusqlite::ToSql)
+                .collect();
+            let count: i64 = conn.query_row(&sql, params.as_slice(), |row| row.get(0))?;
+            Ok(count as u64)
+        })
+        .await
+    }
+
     /// Active items that have no download record of at least one of the
     /// given kinds (`library list --missing`), newest purchases first.
     /// Each row names the kinds that are actually missing and its
@@ -663,6 +720,7 @@ impl Db {
         &self,
         marketplaces: Vec<String>,
         kinds: Vec<String>,
+        item_kinds: Vec<String>,
         limit: u32,
         offset: u64,
         include_archived: bool,
@@ -684,13 +742,14 @@ impl Db {
                                    AND d.kind = k.value
                              )) AS missing
                      FROM v_books b
-                     WHERE b.marketplace IN ({}) {}
+                     WHERE b.marketplace IN ({}) {} {}
                  )
                  WHERE missing IS NOT NULL
                  ORDER BY purchase_date DESC, asin, marketplace
                  LIMIT ? OFFSET ?",
                 in_placeholders(marketplaces.len()),
-                not_archived_clause(include_archived)
+                not_archived_clause(include_archived),
+                super::kind_clause("b.kind", &item_kinds)
             );
             let mut statement = conn.prepare_cached(&sql)?;
             let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(marketplaces.len() + 3);
@@ -721,6 +780,7 @@ impl Db {
         &self,
         marketplaces: Vec<String>,
         kinds: Vec<String>,
+        item_kinds: Vec<String>,
         include_archived: bool,
     ) -> Result<u64, DbError> {
         let kinds_json = serde_json::to_string(&kinds).expect("strings serialize");
@@ -738,9 +798,10 @@ impl Db {
                          WHERE d.asin = b.asin AND d.marketplace = b.marketplace
                            AND d.kind = k.value
                      )
-                 ) {}",
+                 ) {} {}",
                 in_placeholders(marketplaces.len()),
-                not_archived_clause(include_archived)
+                not_archived_clause(include_archived),
+                super::kind_clause("b.kind", &item_kinds)
             );
             let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(marketplaces.len() + 1);
             for marketplace in &marketplaces {
@@ -775,6 +836,7 @@ impl Db {
     pub async fn books_borrowed(
         &self,
         marketplaces: Vec<String>,
+        item_kinds: Vec<String>,
         limit: u32,
         offset: u64,
     ) -> Result<Vec<BorrowedRow>, DbError> {
@@ -798,11 +860,12 @@ impl Db {
                                     ORDER BY name)), '') AS not_eligible
                  FROM items
                  WHERE is_deleted = 0
-                   AND marketplace IN ({})
+                   AND marketplace IN ({}) {}
                    AND json_extract(doc, '$.origin_type') IS NOT 'Purchase'
                  ORDER BY full_title, asin, marketplace
                  LIMIT ? OFFSET ?",
-                in_placeholders(marketplaces.len())
+                in_placeholders(marketplaces.len()),
+                super::kind_clause(&super::item_kind_sql("doc"), &item_kinds)
             );
             let mut statement = conn.prepare_cached(&sql)?;
             let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(marketplaces.len() + 2);
@@ -828,7 +891,11 @@ impl Db {
     }
 
     /// Count for [`Self::books_borrowed`] (page-end detection).
-    pub async fn count_books_borrowed(&self, marketplaces: Vec<String>) -> Result<u64, DbError> {
+    pub async fn count_books_borrowed(
+        &self,
+        marketplaces: Vec<String>,
+        item_kinds: Vec<String>,
+    ) -> Result<u64, DbError> {
         self.call(move |conn| {
             if marketplaces.is_empty() {
                 return Ok(0);
@@ -836,9 +903,10 @@ impl Db {
             let sql = format!(
                 "SELECT COUNT(*) FROM items
                  WHERE is_deleted = 0
-                   AND marketplace IN ({})
+                   AND marketplace IN ({}) {}
                    AND json_extract(doc, '$.origin_type') IS NOT 'Purchase'",
-                in_placeholders(marketplaces.len())
+                in_placeholders(marketplaces.len()),
+                super::kind_clause(&super::item_kind_sql("doc"), &item_kinds)
             );
             let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(marketplaces.len());
             for marketplace in &marketplaces {
@@ -948,6 +1016,7 @@ impl Db {
     pub async fn search(
         &self,
         marketplaces: Vec<String>,
+        item_kinds: Vec<String>,
         query: String,
         limit: u32,
         fts: bool,
@@ -960,13 +1029,15 @@ impl Db {
             if fts {
                 let fts_query = prepare_fts_query(&query);
                 let sql = format!(
-                    "SELECT {ITEMS_BOOK_COLUMNS}
+                    "SELECT {ITEMS_BOOK_COLUMNS}, {}
                      FROM items_fts f JOIN items i ON i.rowid = f.rowid
                      WHERE items_fts MATCH ?
                        AND i.is_deleted = 0
-                       AND i.marketplace IN ({placeholders})
+                       AND i.marketplace IN ({placeholders}) {}
                      ORDER BY rank
-                     LIMIT ?"
+                     LIMIT ?",
+                    super::item_kind_sql("i.doc"),
+                    super::kind_clause(&super::item_kind_sql("i.doc"), &item_kinds)
                 );
                 let mut statement = conn.prepare_cached(&sql)?;
                 let mut params: Vec<&dyn rusqlite::ToSql> =
@@ -983,12 +1054,13 @@ impl Db {
             } else {
                 let sql = format!(
                     "SELECT marketplace, asin, full_title, CAST(purchase_date AS TEXT),
-                            CAST(runtime_min AS TEXT), CAST(language AS TEXT)
+                            CAST(runtime_min AS TEXT), CAST(language AS TEXT), kind
                      FROM v_books
-                     WHERE marketplace IN ({placeholders})
+                     WHERE marketplace IN ({placeholders}) {}
                        AND lower(full_title) LIKE '%' || lower(?) || '%'
                      ORDER BY full_title, marketplace
-                     LIMIT ?"
+                     LIMIT ?",
+                    super::kind_clause("kind", &item_kinds)
                 );
                 let mut statement = conn.prepare_cached(&sql)?;
                 let mut params: Vec<&dyn rusqlite::ToSql> =
@@ -1013,6 +1085,7 @@ impl Db {
     pub async fn export_books(
         &self,
         marketplaces: Vec<String>,
+        item_kinds: Vec<String>,
     ) -> Result<Vec<ExportBookRow>, DbError> {
         self.call(move |conn| {
             if marketplaces.is_empty() {
@@ -1021,11 +1094,12 @@ impl Db {
             let sql = format!(
                 "SELECT marketplace, asin, title, CAST(subtitle AS TEXT), full_title,
                         CAST(purchase_date AS TEXT), CAST(runtime_min AS TEXT),
-                        CAST(language AS TEXT)
+                        CAST(language AS TEXT), kind
                  FROM v_books
-                 WHERE marketplace IN ({})
+                 WHERE marketplace IN ({}) {}
                  ORDER BY purchase_date DESC, asin, marketplace",
-                in_placeholders(marketplaces.len())
+                in_placeholders(marketplaces.len()),
+                super::kind_clause("kind", &item_kinds)
             );
             let mut statement = conn.prepare(&sql)?;
             let params: Vec<&dyn rusqlite::ToSql> = marketplaces
@@ -1043,6 +1117,7 @@ impl Db {
                         purchase_date: row.get(5)?,
                         runtime_min: row.get(6)?,
                         language: row.get(7)?,
+                        kind: row.get(8)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1213,6 +1288,156 @@ mod tests {
     #[allow(unused_imports)]
     use crate::db::*;
 
+    /// The SQL kind expression (`v_books.kind`, the FTS twin) must
+    /// classify exactly like `models::library::item_kind` — one truth,
+    /// three copies, verified functionally over the whole taxonomy.
+    #[tokio::test]
+    async fn kind_sql_matches_rust_classifier() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+
+        let docs = [
+            serde_json::json!({"asin":"K1","title":"episode",
+                "content_delivery_type":"PodcastEpisode","content_type":"Podcast"}),
+            serde_json::json!({"asin":"K2","title":"parent",
+                "content_delivery_type":"PodcastParent","content_type":"Podcast"}),
+            serde_json::json!({"asin":"K3","title":"periodical",
+                "content_delivery_type":"Periodical","content_type":"Show"}),
+            serde_json::json!({"asin":"K4","title":"season",
+                "content_delivery_type":"PodcastSeason","content_type":"Podcast"}),
+            serde_json::json!({"asin":"K5","title":"ct fallback","content_type":"Podcast"}),
+            serde_json::json!({"asin":"K6","title":"book",
+                "content_delivery_type":"SinglePartBook","content_type":"Product"}),
+            serde_json::json!({"asin":"K7","title":"multipart",
+                "content_delivery_type":"MultiPartBook","content_type":"Product"}),
+            serde_json::json!({"asin":"K8","title":"bare"}),
+        ];
+        let upserts: Vec<UpsertItem> = docs
+            .iter()
+            .map(|doc| crate::db::test_util::upsert(doc["asin"].as_str().unwrap(), doc.clone()))
+            .collect();
+        db.apply_page(MP.into(), upserts, vec![], default_log(), None)
+            .await
+            .unwrap();
+
+        // v_books.kind (list_books) against the Rust classifier.
+        let books = db
+            .list_books(vec![MP.to_owned()], vec![], u32::MAX, 0)
+            .await
+            .unwrap();
+        assert_eq!(books.len(), docs.len());
+        for doc in &docs {
+            let asin = doc["asin"].as_str().unwrap();
+            let row = books.iter().find(|b| b.asin == asin).unwrap();
+            assert_eq!(
+                row.kind,
+                crate::models::library::item_kind(doc),
+                "v_books.kind diverges from item_kind for {asin}: {doc}"
+            );
+        }
+        // The FTS branch (item_kind_sql over i.doc) agrees too — the
+        // asin is FTS-indexed, so it addresses one exact row.
+        let hits = db
+            .search(vec![MP.to_owned()], vec![], "K1".into(), 10, true)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, "episode");
+    }
+
+    #[tokio::test]
+    async fn kind_filter_narrows_list_search_export_and_counts() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        let upserts = vec![
+            crate::db::test_util::upsert(
+                "B1",
+                serde_json::json!({"asin":"B1","title":"Buch",
+                    "content_delivery_type":"SinglePartBook"}),
+            ),
+            crate::db::test_util::upsert(
+                "P1",
+                serde_json::json!({"asin":"P1","title":"Show",
+                    "content_delivery_type":"PodcastParent"}),
+            ),
+            crate::db::test_util::upsert(
+                "E1",
+                serde_json::json!({"asin":"E1","title":"Folge",
+                    "content_delivery_type":"PodcastEpisode","content_type":"Podcast"}),
+            ),
+        ];
+        db.apply_page(MP.into(), upserts, vec![], default_log(), None)
+            .await
+            .unwrap();
+
+        let asins = |rows: Vec<BookRow>| {
+            let mut asins: Vec<String> = rows.into_iter().map(|r| r.asin).collect();
+            asins.sort();
+            asins
+        };
+        // Empty filter = everything.
+        assert_eq!(
+            asins(
+                db.list_books(vec![MP.to_owned()], vec![], u32::MAX, 0)
+                    .await
+                    .unwrap()
+            ),
+            ["B1", "E1", "P1"]
+        );
+        // Single and multi-kind filters.
+        assert_eq!(
+            asins(
+                db.list_books(vec![MP.to_owned()], vec!["episode".into()], u32::MAX, 0)
+                    .await
+                    .unwrap()
+            ),
+            ["E1"]
+        );
+        assert_eq!(
+            asins(
+                db.list_books(
+                    vec![MP.to_owned()],
+                    vec!["book".into(), "podcast".into()],
+                    u32::MAX,
+                    0,
+                )
+                .await
+                .unwrap()
+            ),
+            ["B1", "P1"]
+        );
+        // Counts follow the same filter.
+        assert_eq!(
+            db.count_books(vec![MP.to_owned()], vec!["podcast".into()])
+                .await
+                .unwrap(),
+            1
+        );
+        // Export carries the kind column and honors the filter.
+        let export = db
+            .export_books(vec![MP.to_owned()], vec!["episode".into()])
+            .await
+            .unwrap();
+        assert_eq!(export.len(), 1);
+        assert_eq!(
+            (export[0].asin.as_str(), export[0].kind.as_str()),
+            ("E1", "episode")
+        );
+        // Search (LIKE branch) honors it too: "title" matches every
+        // full_title, the filter narrows to the book.
+        let hits = db
+            .search(
+                vec![MP.to_owned()],
+                vec!["book".into()],
+                "title".into(),
+                10,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(asins(hits), ["B1"]);
+    }
+
     /// An item for the `books_borrowed` tests. `purchased` sets
     /// `origin_type = "Purchase"` (owned); otherwise the field is absent, as
     /// on subscription titles. `plans` is a list of `(plan_name, eligible)`,
@@ -1295,7 +1520,7 @@ mod tests {
         .unwrap();
 
         let rows = db
-            .books_borrowed(vec![MP.to_owned()], u32::MAX, 0)
+            .books_borrowed(vec![MP.to_owned()], vec![], u32::MAX, 0)
             .await
             .unwrap();
         let seen: Vec<(&str, &str, &str)> = rows
@@ -1321,7 +1546,9 @@ mod tests {
             ]
         );
         assert_eq!(
-            db.count_books_borrowed(vec![MP.to_owned()]).await.unwrap(),
+            db.count_books_borrowed(vec![MP.to_owned()], vec![])
+                .await
+                .unwrap(),
             4
         );
     }
@@ -1456,15 +1683,21 @@ mod tests {
         assert_eq!(db.count_active(vec!["de".to_owned()]).await.unwrap(), 1);
         assert_eq!(db.count_active(vec!["us".to_owned()]).await.unwrap(), 1);
 
-        let de_books = db.list_books(vec!["de".to_owned()], 10, 0).await.unwrap();
-        let us_books = db.list_books(vec!["us".to_owned()], 10, 0).await.unwrap();
+        let de_books = db
+            .list_books(vec!["de".to_owned()], vec![], 10, 0)
+            .await
+            .unwrap();
+        let us_books = db
+            .list_books(vec!["us".to_owned()], vec![], 10, 0)
+            .await
+            .unwrap();
         assert_eq!(de_books[0].full_title, "Buch DE");
         assert_eq!(us_books[0].full_title, "Book US");
 
         // The combined set (WHERE marketplace IN (…)) returns both rows,
         // each tagged with its marketplace.
         let both = db
-            .list_books(vec!["de".to_owned(), "us".to_owned()], 10, 0)
+            .list_books(vec!["de".to_owned(), "us".to_owned()], vec![], 10, 0)
             .await
             .unwrap();
         assert_eq!(both.len(), 2);
@@ -1483,6 +1716,7 @@ mod tests {
         let hits = db
             .search(
                 vec!["de".to_owned(), "us".to_owned()],
+                vec![],
                 "buch OR book".into(),
                 10,
                 true,
@@ -1505,6 +1739,7 @@ mod tests {
         let hits = db
             .search(
                 vec!["de".to_owned(), "us".to_owned()],
+                vec![],
                 "buch OR book".into(),
                 10,
                 true,
@@ -1533,6 +1768,10 @@ mod tests {
             MP.into(),
             "P1".into(),
             vec![episode("E1", "Folge 1"), episode("E2", "Folge 2")],
+            ChangeRecording {
+                record: false,
+                mode: "delta",
+            },
         )
         .await
         .unwrap();
@@ -1575,9 +1814,17 @@ mod tests {
         )
         .await
         .unwrap();
-        db.apply_episodes(MP.into(), "P1".into(), vec![episode("E1", "Folge 1")])
-            .await
-            .unwrap();
+        db.apply_episodes(
+            MP.into(),
+            "P1".into(),
+            vec![episode("E1", "Folge 1")],
+            ChangeRecording {
+                record: false,
+                mode: "delta",
+            },
+        )
+        .await
+        .unwrap();
 
         let (doc, parent) = db
             .episode_doc("E1".into(), MP.into())
@@ -1626,20 +1873,23 @@ mod tests {
         .await
         .unwrap();
 
-        let books = db.list_books(vec![MP.to_owned()], 10, 0).await.unwrap();
+        let books = db
+            .list_books(vec![MP.to_owned()], vec![], 10, 0)
+            .await
+            .unwrap();
         assert_eq!(books.len(), 2);
         assert_eq!(books[0].purchase_date.as_deref(), Some("2024-01-01"));
         assert_eq!(books[0].runtime_min.as_deref(), Some("123"));
 
         let like = db
-            .search(vec![MP.to_owned()], "hobbit".into(), 10, false)
+            .search(vec![MP.to_owned()], vec![], "hobbit".into(), 10, false)
             .await
             .unwrap();
         assert_eq!(like.len(), 1);
         assert_eq!(like[0].asin, "A1");
 
         let fts = db
-            .search(vec![MP.to_owned()], "känguru".into(), 10, true)
+            .search(vec![MP.to_owned()], vec![], "känguru".into(), 10, true)
             .await
             .unwrap();
         assert_eq!(fts.len(), 1);
@@ -1686,6 +1936,7 @@ mod tests {
             .books_missing_downloads(
                 vec![MP.to_owned()],
                 vec!["audio".into(), "cover".into()],
+                vec![],
                 u32::MAX,
                 0,
                 true,
@@ -1704,7 +1955,14 @@ mod tests {
 
         // audio only: A1 is complete and drops out.
         let rows = db
-            .books_missing_downloads(vec![MP.to_owned()], vec!["audio".into()], u32::MAX, 0, true)
+            .books_missing_downloads(
+                vec![MP.to_owned()],
+                vec!["audio".into()],
+                vec![],
+                u32::MAX,
+                0,
+                true,
+            )
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
@@ -1712,7 +1970,14 @@ mod tests {
 
         // limit/offset page through the result.
         let rows = db
-            .books_missing_downloads(vec![MP.to_owned()], vec!["cover".into()], 1, 1, true)
+            .books_missing_downloads(
+                vec![MP.to_owned()],
+                vec!["cover".into()],
+                vec![],
+                1,
+                1,
+                true,
+            )
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
@@ -1723,6 +1988,7 @@ mod tests {
             db.count_books_missing_downloads(
                 vec![MP.to_owned()],
                 vec!["audio".into(), "cover".into()],
+                vec![],
                 true
             )
             .await
@@ -1730,9 +1996,14 @@ mod tests {
             2
         );
         assert_eq!(
-            db.count_books_missing_downloads(vec![MP.to_owned()], vec!["audio".into()], true)
-                .await
-                .unwrap(),
+            db.count_books_missing_downloads(
+                vec![MP.to_owned()],
+                vec!["audio".into()],
+                vec![],
+                true
+            )
+            .await
+            .unwrap(),
             1
         );
     }
@@ -1763,6 +2034,10 @@ mod tests {
             MP.into(),
             "A1".into(),
             vec![episode("E1", "Eins"), episode("E2", "Zwei")],
+            ChangeRecording {
+                record: false,
+                mode: "delta",
+            },
         )
         .await
         .unwrap();
@@ -1972,6 +2247,7 @@ mod tests {
             .books_missing_downloads(
                 vec![MP.to_owned()],
                 vec!["audio".into()],
+                vec![],
                 u32::MAX,
                 0,
                 false,
@@ -1981,15 +2257,25 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].asin, "A2");
         assert_eq!(
-            db.count_books_missing_downloads(vec![MP.to_owned()], vec!["audio".into()], false)
-                .await
-                .unwrap(),
+            db.count_books_missing_downloads(
+                vec![MP.to_owned()],
+                vec!["audio".into()],
+                vec![],
+                false
+            )
+            .await
+            .unwrap(),
             1
         );
         assert_eq!(
-            db.count_books_missing_downloads(vec![MP.to_owned()], vec!["audio".into()], true)
-                .await
-                .unwrap(),
+            db.count_books_missing_downloads(
+                vec![MP.to_owned()],
+                vec!["audio".into()],
+                vec![],
+                true
+            )
+            .await
+            .unwrap(),
             2
         );
     }
@@ -2059,7 +2345,7 @@ mod tests {
         // expansion the FTS MATCH would return nothing. With prepare_fts_query
         // it becomes `"jed"*` and matches "Jedi Quest".
         let results = db
-            .search(vec![MP.to_owned()], "jed".into(), 10, true)
+            .search(vec![MP.to_owned()], vec![], "jed".into(), 10, true)
             .await
             .unwrap();
         assert_eq!(results.len(), 1, "prefix search must find 'Jedi Quest'");
@@ -2067,13 +2353,15 @@ mod tests {
 
         // Punctuation that previously caused a syntax error is now safe.
         // "c++" has no match in the DB, but the query must not return an error.
-        let punct = db.search(vec![MP.to_owned()], "c++".into(), 10, true).await;
+        let punct = db
+            .search(vec![MP.to_owned()], vec![], "c++".into(), 10, true)
+            .await;
         assert!(punct.is_ok(), "punctuation query must not raise FTS5 error");
         assert!(punct.unwrap().is_empty());
 
         // Sanity: exact-token FTS still works (känguru → "känguru"*).
         let exact = db
-            .search(vec![MP.to_owned()], "star".into(), 10, true)
+            .search(vec![MP.to_owned()], vec![], "star".into(), 10, true)
             .await
             .unwrap();
         assert_eq!(exact.len(), 1);

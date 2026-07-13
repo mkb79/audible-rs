@@ -14,7 +14,8 @@ pub(super) async fn changes(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()> {
         asin: args.get_one::<String>("asin").cloned(),
         since: args.get_one::<String>("since").cloned(),
         mode: args.get_one::<String>("mode").cloned(),
-        kind: args.get_one::<String>("kind").cloned(),
+        change: args.get_one::<String>("change").cloned(),
+        item_kinds: crate::commands::kind_filter(args),
         show_volatile: args.get_flag("show_volatile"),
         limit: *args.get_one::<u32>("limit").expect("default"),
     };
@@ -37,7 +38,8 @@ pub(super) async fn changes(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()> {
                 serde_json::json!({
                     "recorded": record.recorded_utc,
                     "mp": record.marketplace,
-                    "kind": record.kind,
+                    "change": record.change,
+                    "kind": record.item_kind,
                     "asin": record.asin,
                     "title": record.full_title,
                     "fields": fields,
@@ -68,7 +70,8 @@ pub(super) async fn changes(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()> {
             vec![
                 record.recorded_utc.clone(),
                 record.marketplace.clone(),
-                record.kind.clone(),
+                record.change.clone(),
+                record.item_kind.clone(),
                 record.asin.clone(),
                 record.full_title.clone(),
                 format_change_fields(record.changed.as_deref(), values),
@@ -76,7 +79,9 @@ pub(super) async fn changes(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()> {
         })
         .collect();
     ctx.print(&crate::output::Output::table(
-        vec!["recorded", "mp", "kind", "asin", "title", "fields"],
+        vec![
+            "recorded", "mp", "change", "kind", "asin", "title", "fields",
+        ],
         rows,
     ));
     Ok(())

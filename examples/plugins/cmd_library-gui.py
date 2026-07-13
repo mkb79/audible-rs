@@ -125,9 +125,15 @@ class Api:
         # `library list` is the (mp, asin) source of truth; the export's
         # raw docs contribute display fields (cover, authors, …), joined
         # by asin. A same-asin title in two marketplaces shares one doc —
-        # fine for display.
-        listing = self._invoke_json(["library", "list", "--limit", "0"], empty=[])
-        export = self._invoke_json(["library", "export"], empty={})
+        # fine for display. `--kind book,podcast`: the dashboard shows
+        # books and podcast shows; standalone episodes are deliberately
+        # left out to keep the view uncluttered (AUD-173).
+        listing = self._invoke_json(
+            ["library", "list", "--limit", "0", "--kind", "book,podcast"], empty=[]
+        )
+        export = self._invoke_json(
+            ["library", "export", "--kind", "book,podcast"], empty={}
+        )
         docs = {}
         for doc in export.get("items", []):
             docs.setdefault(doc.get("asin"), doc)

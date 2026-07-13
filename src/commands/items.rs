@@ -96,6 +96,7 @@ pub(crate) async fn resolve_asins(
         let rows = db
             .search(
                 vec![marketplace.to_owned()],
+                Vec::new(), // all kinds — callers guard on kind themselves
                 tq.query.clone(),
                 tq.cap as u32,
                 true,

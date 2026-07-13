@@ -146,7 +146,10 @@ async fn full_then_delta_sync() {
     assert_eq!(summary.state_token.as_deref(), Some("1750000099000"));
     assert_eq!(db.count_active(vec!["de".to_owned()]).await.unwrap(), 1);
 
-    let books = db.list_books(vec!["de".to_owned()], 10, 0).await.unwrap();
+    let books = db
+        .list_books(vec!["de".to_owned()], vec![], 10, 0)
+        .await
+        .unwrap();
     assert_eq!(books.len(), 1);
     assert_eq!(books[0].full_title, "Erstes Buch (neu)");
 
@@ -258,7 +261,7 @@ async fn sync_resolves_podcast_episodes() {
     // Books are unaffected by episode storage.
     assert_eq!(db.count_active(vec!["de".to_owned()]).await.unwrap(), 2);
     assert_eq!(
-        db.list_books(vec!["de".to_owned()], 10, 0)
+        db.list_books(vec!["de".to_owned()], vec![], 10, 0)
             .await
             .unwrap()
             .len(),
