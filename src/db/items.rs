@@ -1161,6 +1161,38 @@ impl Db {
         .await
     }
 
+    /// Soft-deletes a single library item (and its episodes) by flipping
+    /// `is_deleted`, exactly as a sync does when the item turns `Revoked`.
+    /// Used by `library return`: the loan is gone the moment the server
+    /// accepts the DELETE, so the title leaves the library view now instead
+    /// of lingering until the delta change-feed catches up (which lags
+    /// minutes for a return, unlike a borrow). Downloaded files, `downloads`
+    /// and `licenses` rows are kept. Returns true if a row flipped.
+    pub async fn soft_delete_item(
+        &self,
+        marketplace: String,
+        asin: String,
+    ) -> Result<bool, DbError> {
+        self.call(move |conn| {
+            let now = crate::db::now_iso_utc();
+            let flipped = conn.execute(
+                "UPDATE items SET is_deleted = 1, deleted_utc = ?, updated_utc = ?
+                 WHERE asin = ? AND marketplace = ? AND is_deleted = 0",
+                rusqlite::params![now, now, asin, marketplace],
+            )?;
+            if flipped > 0 {
+                // A soft-deleted parent takes its episodes with it.
+                conn.execute(
+                    "UPDATE episodes SET is_deleted = 1, deleted_utc = ?, updated_utc = ?
+                     WHERE parent_asin = ? AND marketplace = ? AND is_deleted = 0",
+                    rusqlite::params![now, now, asin, marketplace],
+                )?;
+            }
+            Ok(flipped > 0)
+        })
+        .await
+    }
+
     /// Timestamp of the last successful sync request, if any.
     pub async fn last_sync_utc(&self) -> Result<Option<String>, DbError> {
         self.call(|conn| {
