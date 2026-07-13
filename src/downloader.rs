@@ -631,10 +631,15 @@ mod tests {
             "audio/aax",
             "audio/vnd.audible.aax",
             "audio/mpeg",
+            "audio/mp3",
+            "audio/mp4",
             "audio/x-m4a",
             "audio/audible",
         ];
         assert!(content_type_matches("audio/mpeg", &audio)); // mp3, not aaxc
+        assert!(content_type_matches("audio/mp3", &audio)); // non-standard mp3 alias (AUD-159)
+        assert!(content_type_matches("audio/mp4", &audio)); // AAC-in-MP4 episode (AUD-159)
+        assert!(content_type_matches("audio/x-m4a", &audio));
         assert!(content_type_matches("AUDIO/AAX", &audio)); // case-insensitive
         assert!(content_type_matches("audio/aax; charset=binary", &audio)); // param stripped
         assert!(!content_type_matches("text/html", &audio));
@@ -685,13 +690,21 @@ mod tests {
 
     #[test]
     fn extension_from_content_type() {
-        // Audio is binary: audio/mpeg → mp3, everything else keeps .aaxc.
-        let audio = [("audio/mpeg", "mp3")];
+        // Plain media gets its real extension; aax variants keep .aaxc.
+        let audio = [
+            ("audio/mpeg", "mp3"),
+            ("audio/mp3", "mp3"),
+            ("audio/mp4", "m4a"),
+            ("audio/x-m4a", "m4a"),
+        ];
         assert_eq!(extension_override("audio/mpeg", &audio), Some("mp3"));
+        assert_eq!(extension_override("audio/mp3", &audio), Some("mp3")); // AUD-159
+        assert_eq!(extension_override("audio/mp4", &audio), Some("m4a")); // AUD-159
         assert_eq!(
-            extension_override("audio/mpeg; charset=binary", &audio),
-            Some("mp3")
+            extension_override("audio/mp4; charset=binary", &audio),
+            Some("m4a")
         );
+        assert_eq!(extension_override("AUDIO/X-M4A", &audio), Some("m4a"));
         assert_eq!(extension_override("AUDIO/MPEG", &audio), Some("mp3"));
         assert_eq!(extension_override("audio/vnd.audible.aax", &audio), None);
         // No overrides → never changes the extension.

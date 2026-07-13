@@ -325,11 +325,12 @@ pub(super) async fn decrypt_item(
             )
             .await
         }
-        // A plain mp3 is already the playable, DRM-free file and was recorded
-        // as (audio, original) by the download — nothing to decrypt. It is
-        // already covered by `db downloads list --kind audio`.
-        Some("mp3") => {
-            eprintln!("{asin}: audio is already a playable mp3 — no decryption needed");
+        // Plain mp3/m4a is already the playable, DRM-free file and was recorded
+        // as (audio, original) by the download — nothing to decrypt. Both are
+        // already covered by `db downloads list --kind audio`. (Some podcast
+        // episodes arrive as AAC-in-MP4 → .m4a, AUD-159.)
+        Some(kind @ ("mp3" | "m4a")) => {
+            eprintln!("{asin}: audio is already a playable {kind} — no decryption needed");
             Ok(None)
         }
         _ => Ok(None),
