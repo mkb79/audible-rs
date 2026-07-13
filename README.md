@@ -118,7 +118,7 @@ audible library list          #    …then work with it
    `audible account import <file>`.
 3. **`audible library sync` first** — every library command reads from a
    **local database**, so you must sync at least once before `list`,
-   `search`, `download --missing`, `series`, `podcasts` etc. return
+   `search`, `download --missing`, `series`, `library episodes` etc. return
    anything. Run it again whenever your library changes (new purchases,
    returns); it does an incremental delta sync when it can.
 
@@ -162,8 +162,8 @@ Commands are grouped by noun; each has subcommands (`audible <noun>
 | `account` | Sign in / import / logout, marketplaces, password, cookies, token, activation bytes, Widevine CDM, export. |
 | `settings` | Reusable settings bundles (download options, filename scheme, …). |
 | `config` | Get/set/unset raw configuration values. |
-| `library` | `sync`, `list`, `search`, `export`, `changes`. |
-| `series` / `podcasts` | Series volumes (incl. missing ones) and podcast subscriptions/episodes. |
+| `library` | `sync`, `list` (with `--kind book,podcast,episode`), `search`, `episodes`, `export`, `changes`, `add`, `remove`. |
+| `series` | Series volumes, including the ones you are missing. |
 | `download` | Download owned titles (audio/chapter/cover/pdf), decrypt, reorganize, orphans, info. |
 | `collections` | Wishlist and archive (`list`, `add`, `remove`). |
 | `annotations` | Bookmarks, notes, clips and last-position. |

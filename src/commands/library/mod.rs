@@ -165,6 +165,25 @@ impl super::Command for LibraryCommand {
                     .arg(super::kind_arg("book")),
             )
             .subcommand(
+                clap::Command::new("episodes")
+                    .about("List the stored episodes of a followed podcast")
+                    .arg(
+                        Arg::new("show")
+                            .required(true)
+                            .value_name("SHOW")
+                            .help("The followed podcast, by ASIN or title substring"),
+                    )
+                    .arg(limit())
+                    .arg(
+                        Arg::new("page")
+                            .long("page")
+                            .value_name("N")
+                            .default_value("1")
+                            .value_parser(clap::value_parser!(u32).range(1..))
+                            .help("Show the N-th page of --limit rows"),
+                    ),
+            )
+            .subcommand(
                 clap::Command::new("export")
                     .about("Export the library")
                     .arg(
@@ -371,6 +390,10 @@ impl super::Command for LibraryCommand {
                 )
                 .await
             }
+            Some(("episodes", sub)) => {
+                let show = sub.get_one::<String>("show").expect("required").clone();
+                episodes::episodes(ctx, show, raw_limit(sub), page(sub)).await
+            }
             Some(("export", sub)) => {
                 let csv = sub.get_one::<String>("format").expect("default") == "csv";
                 export(ctx, super::kind_filter(sub), csv).await
@@ -407,6 +430,7 @@ impl super::Command for LibraryCommand {
 }
 
 mod changes;
+pub(crate) mod episodes;
 mod list;
 mod membership;
 mod sync;
