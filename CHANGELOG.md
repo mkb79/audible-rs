@@ -9,6 +9,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 This file is generated from the commit history by [git-cliff](https://git-cliff.org)
 — do not edit it by hand (see `cliff.toml`).
 
+## [0.1.0-alpha.5](https://github.com/mkb79/audible-rs/compare/v0.1.0-alpha.4..v0.1.0-alpha.5) - 2026-07-14
+
+### Added
+
+- *self*: Mark builds from source, so a version is never claimed falsely ([#29](https://github.com/mkb79/audible-rs/pull/29)) ([7dc4999](https://github.com/mkb79/audible-rs/commit/7dc49992dd919f913f4b1e44a7f5efca844627d8))
+- *self*: Self check and self changelog — release awareness ([#28](https://github.com/mkb79/audible-rs/pull/28)) ([ab110bc](https://github.com/mkb79/audible-rs/commit/ab110bc87e266ba436fe0a10403b3559fbdf1747))
+
 ## [0.1.0-alpha.4](https://github.com/mkb79/audible-rs/compare/v0.1.0-alpha.3..v0.1.0-alpha.4) - 2026-07-14
 
 ### Added
