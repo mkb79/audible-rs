@@ -1,0 +1,43 @@
+# Version updates. GitHub's Dependabot *security* updates only react to a
+# published advisory — they never tell you an action is three majors behind, or
+# that the lockfile has gone stale. These do.
+#
+# Both ecosystems are pinned in the workflows by commit SHA, which is what makes
+# them tamper-proof and what makes this file mandatory: without it, a pinned
+# action would simply never be updated again.
+#
+# Commit prefixes are chosen so these updates stay OUT of the changelog
+# (cliff.toml keeps feat/fix/perf/security/revert and skips the rest) — a
+# release note is for users, and nobody reads "bump serde from 1.0.1 to 1.0.2".
+# A dependency update that fixes a real vulnerability is the exception: give it
+# a `fix(security):` commit of its own, or say so in the release body.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      # One PR for the routine bumps; a major gets its own, because a major is
+      # where an action changes its runtime or its inputs.
+      actions:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: build
+      prefix-development: build
+      include: scope
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    # The release builds with --locked, so a stale lockfile is not cosmetic.
+    open-pull-requests-limit: 5
