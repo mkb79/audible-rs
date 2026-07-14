@@ -52,3 +52,40 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo test
+
+  # This repository handles auth material, so the realistic accident is a
+  # private key or an auth file, not a provider token — and GitHub's secret
+  # scanning only recognizes provider tokens (generic patterns are an
+  # organization feature, unavailable here). gitleaks covers exactly that gap,
+  # and .gitleaks.toml already allowlists the synthetic test fixtures, so a
+  # finding means something.
+  #
+  # Running it by hand "when in doubt" fails precisely when one feels certain.
+  secrets:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    env:
+      # Pinned and checksum-verified: a scanner fetched over the network is
+      # itself a supply-chain step. Bump both together.
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # The whole history: a secret removed in a later commit is still
+          # published — it stays in the objects anyone can fetch.
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "$archive" gitleaks
+
+      # --redact: CI logs are public, so a finding must never print the secret
+      # it found. The exit code says enough.
+      - name: Scan the history
+        run: ./gitleaks git . --config .gitleaks.toml --redact --verbose
