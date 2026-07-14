@@ -9,6 +9,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 This file is generated from the commit history by [git-cliff](https://git-cliff.org)
 — do not edit it by hand (see `cliff.toml`).
 
+## [0.1.0-alpha.6](https://github.com/mkb79/audible-rs/compare/v0.1.0-alpha.5..v0.1.0-alpha.6) - 2026-07-14
+
+### Added
+
+- *release*: Install via Homebrew — brew install mkb79/tap/audible-rs ([#30](https://github.com/mkb79/audible-rs/pull/30)) ([f230d0a](https://github.com/mkb79/audible-rs/commit/f230d0ac3f4564a3ccbba11f4cb18718c2a036e3))
+
 ## [0.1.0-alpha.5](https://github.com/mkb79/audible-rs/compare/v0.1.0-alpha.4..v0.1.0-alpha.5) - 2026-07-14
 
 ### Added
