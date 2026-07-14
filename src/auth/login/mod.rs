@@ -60,6 +60,18 @@ pub enum LoginError {
     /// The scripted login could not be completed (the page's message, if any).
     #[error("login failed: {0}")]
     LoginFailed(String),
+    /// Amazon served its JavaScript-based anti-automation verification page
+    /// (AUD-178). The scripted login cannot pass it — there is nothing to
+    /// prompt for (no code is ever sent); the user must sign in through a
+    /// real browser.
+    #[error(
+        "Amazon served an anti-automation verification page that requires JavaScript — \
+         the scripted login cannot pass it (no verification code is sent). \
+         Sign in through a browser instead:\n  \
+         audible account login --external   (paste the redirect URL back here)\n  \
+         audible account login server       (opens a local sign-in page; headless-friendly)"
+    )]
+    AntiAutomation,
     /// The challenge loop did not terminate.
     #[error("login did not complete after several challenge steps")]
     TooManyChallenges,

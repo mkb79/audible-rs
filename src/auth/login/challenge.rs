@@ -28,6 +28,13 @@ pub(crate) enum Challenge {
     Otp,
     /// Challenge verification (CVF) — a code sent to email/SMS.
     Cvf,
+    /// Amazon's JavaScript-driven anti-automation ("aamation") verification
+    /// page (AUD-178). It reuses the `cvf-page-content` anchor but leaves it
+    /// empty and renders the actual challenge from JavaScript, so a scripted
+    /// client sees only "This site requires JavaScript". **No verification
+    /// code is ever sent** — prompting for one strands the user (the reported
+    /// "never receive a code"). Unanswerable without a browser.
+    AntiAutomation,
     /// Approval alert — approve the push/email notification on another device.
     Approval,
 }
@@ -53,6 +60,14 @@ impl Challenge {
         }
         if page.has_input("otpCode") {
             return Some(Challenge::Otp);
+        }
+        // Anti-automation before CVF: the page carries the same
+        // `cvf-page-content` anchor, so its own marker fields must win —
+        // otherwise it is misread as a code challenge (AUD-178).
+        if page.has_input("cvf_aamation_response_token")
+            || page.has_input("cvf_aamation_error_code")
+        {
+            return Some(Challenge::AntiAutomation);
         }
         if page.has_id("cvf-page-content") {
             return Some(Challenge::Cvf);
@@ -112,6 +127,56 @@ mod tests {
             Some(Challenge::Approval)
         ));
         assert!(detect(r#"<form name="signIn"><input name="email"/></form>"#).is_none());
+    }
+
+    /// The anti-automation page (AUD-178) reuses the `cvf-page-content`
+    /// anchor but leaves it empty and ships `cvf_aamation_*` fields with no
+    /// `code` input — it must never be read as a CVF code challenge. Shape
+    /// taken from a real `.ca` sign-in (2026-07-14).
+    #[test]
+    fn anti_automation_page_is_not_a_cvf_code_challenge() {
+        let html = r#"
+            <div id="cvf-page-content">
+              <noscript><h4>JavaScript Is Disabled</h4></noscript>
+            </div>
+            <form method="post" action="verify">
+              <input type="hidden" name="cvf_aamation_response_token" value="x"/>
+              <input type="hidden" name="cvf_captcha_captcha_action" value="y"/>
+              <input type="hidden" name="cvf_aamation_error_code" value=""/>
+              <input type="hidden" name="verifyToken" value="z"/>
+            </form>"#;
+        assert!(matches!(detect(html), Some(Challenge::AntiAutomation)));
+
+        // A genuine CVF page (the anchor, no aamation markers) still resolves
+        // to the code challenge.
+        assert!(matches!(
+            detect(r#"<div id="cvf-page-content"><input name="code"/></div>"#),
+            Some(Challenge::Cvf)
+        ));
+    }
+
+    /// The 2FA paths must never be shadowed by the anti-automation check:
+    /// OTP entry and MFA device choice are detected first, so an account with
+    /// 2FA enabled keeps working even if Amazon were to ship aamation markers
+    /// on the same page (AUD-178).
+    #[test]
+    fn otp_and_mfa_win_over_anti_automation() {
+        let otp = r#"
+            <form id="auth-mfa-form">
+              <input name="otpCode"/>
+              <input type="hidden" name="cvf_aamation_response_token" value="x"/>
+            </form>"#;
+        assert!(matches!(detect(otp), Some(Challenge::Otp)));
+
+        let choice = r#"
+            <form id="auth-select-device-form">
+              <div data-a-input-name="otpDeviceContext" class="a-radio auth-TOTP">
+                <input type="radio" name="otpDeviceContext" value="ctx1, TOTP"/>
+                <span class="a-label">Authenticator app</span>
+              </div>
+              <input type="hidden" name="cvf_aamation_error_code" value=""/>
+            </form>"#;
+        assert!(matches!(detect(choice), Some(Challenge::MfaChoice(_))));
     }
 
     #[test]
