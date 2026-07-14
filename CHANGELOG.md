@@ -9,6 +9,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 This file is generated from the commit history by [git-cliff](https://git-cliff.org)
 — do not edit it by hand (see `cliff.toml`).
 
+## [0.1.0-alpha.4](https://github.com/mkb79/audible-rs/compare/v0.1.0-alpha.3..v0.1.0-alpha.4) - 2026-07-14
+
+### Added
+
+- *download*: --title finds podcast episodes ([#26](https://github.com/mkb79/audible-rs/pull/26)) ([a30a151](https://github.com/mkb79/audible-rs/commit/a30a151c2fbebf0878a2926d4194255126604cae))
+- *library*: Library episodes — podcasts noun deprecated (removal in v0.1.0) ([#24](https://github.com/mkb79/audible-rs/pull/24)) ([071996c](https://github.com/mkb79/audible-rs/commit/071996cd522df7402aa48301d9ae77e1544deae8))
+- **BREAKING:** *library*: Content kinds — shared --kind filter, episode change tracking ([#23](https://github.com/mkb79/audible-rs/pull/23)) ([da7c7cb](https://github.com/mkb79/audible-rs/commit/da7c7cb4919181622c041f419020e6f529f93f0f))
+- *library*: Add and remove subscription titles, podcasts and episodes ([#21](https://github.com/mkb79/audible-rs/pull/21)) ([f963d6d](https://github.com/mkb79/audible-rs/commit/f963d6d3ae74647ea2724bc4eb15784183e00224))
+
+### Fixed
+
+- *login*: Detect Amazon's anti-automation page instead of asking for a code ([#27](https://github.com/mkb79/audible-rs/pull/27)) ([1eec27a](https://github.com/mkb79/audible-rs/commit/1eec27a2108b6f0677da679d524354afe79901f4))
+- *download*: Accept audio/mp4 and audio/mp3 for plain-audio episodes ([#20](https://github.com/mkb79/audible-rs/pull/20)) ([832b4f1](https://github.com/mkb79/audible-rs/commit/832b4f181ea2e3f7df5d3b9ff1bcce54f30bc812))
+
 ## [0.1.0-alpha.3](https://github.com/mkb79/audible-rs/compare/v0.1.0-alpha.2..v0.1.0-alpha.3) - 2026-07-11
 
 ### Added
