@@ -106,7 +106,7 @@ semver = "1.0"
 # Not linked into the release binary.
 [build-dependencies]
 prost-build = "0.13"
-protox = "0.7"
+protox = "0.9"
 
 [dev-dependencies]
 insta = "1.47"
