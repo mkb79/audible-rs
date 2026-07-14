@@ -98,6 +98,10 @@ libc = "0.2"
 # glibc/macOS builds too. Set as the global allocator in `main.rs`.
 mimalloc = "0.1"
 
+# Release comparison for `self check` (AUD-179): pre-release identifiers must
+# order correctly (alpha.2 < alpha.10), which string comparison gets wrong.
+semver = "1.0"
+
 # Build-time only (Widevine proto codegen, pure Rust — no protoc needed).
 # Not linked into the release binary.
 [build-dependencies]
