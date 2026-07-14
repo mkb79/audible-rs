@@ -39,7 +39,7 @@ jobs:
     steps:
       # Releases always cut from main; full history + tags for the version
       # check and the changelog.
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
           fetch-depth: 0
@@ -136,7 +136,7 @@ jobs:
           - target: aarch64-apple-darwin
             runner: macos-14
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.prepare.outputs.tag || github.ref }}
 
@@ -200,7 +200,7 @@ jobs:
     steps:
       # Full history: git-cliff derives the release notes from the commits
       # and tags (AUD-145).
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.prepare.outputs.tag || github.ref }}
           fetch-depth: 0
@@ -263,7 +263,7 @@ jobs:
     if: always() && needs.release.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Decide whether this release belongs in the tap
         id: gate
