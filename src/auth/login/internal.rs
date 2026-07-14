@@ -95,6 +95,13 @@ pub async fn login_internal(
             prompt.notice(message);
         }
 
+        // Anti-automation is terminal: there is nothing to answer (no code is
+        // sent) and no form we could complete without a JavaScript engine.
+        // Fail with the browser-flow hint instead of prompting for a code
+        // that never arrives (AUD-178).
+        if matches!(challenge, Some(Challenge::AntiAutomation)) {
+            return Err(LoginError::AntiAutomation);
+        }
         // Approval needs no form (poll a GET until approved).
         if matches!(challenge, Some(Challenge::Approval)) {
             prompt.approval()?;
@@ -135,7 +142,7 @@ pub async fn login_internal(
             Challenge::Cvf => {
                 inputs.insert("code".to_owned(), prompt.cvf()?);
             }
-            Challenge::Approval => unreachable!("handled above"),
+            Challenge::AntiAutomation | Challenge::Approval => unreachable!("handled above"),
         }
         (url, text) = submit(&http, &url, &form.action, &inputs).await?;
     }
