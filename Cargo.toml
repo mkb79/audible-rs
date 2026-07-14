@@ -45,7 +45,7 @@ pbkdf2 = "0.12"
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 sha1 = "0.10"
-cmac = "0.7"
+cmac = "0.8"
 hmac = "0.12"
 
 # Widevine license protocol (AUD-56): prost is the small runtime lib linked
