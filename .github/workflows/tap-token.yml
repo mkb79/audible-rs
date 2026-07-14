@@ -1,0 +1,67 @@
+name: Homebrew tap token
+
+# The release workflow pushes the Homebrew formula with a fine-grained PAT
+# (HOMEBREW_TAP_TOKEN). When that token expires or is revoked, nothing breaks
+# until the *next* release — and then the bump fails after the release is
+# already out, which is the worst moment to find out.
+#
+# So ask GitHub every week how long the token still has: it answers with the
+# `github-authentication-token-expiration` header on any authenticated request.
+# This job fails while there is still time to act, and a failing job is
+# something GitHub actually emails about.
+on:
+  schedule:
+    # Mondays, 07:00 UTC.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Renew when fewer than this many days are left.
+  WARN_DAYS: 21
+
+jobs:
+  check:
+    name: check expiry
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask GitHub when the token expires
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN is not set — the release workflow cannot bump the Homebrew formula"
+            exit 1
+          fi
+
+          # A revoked or malformed token fails right here, which is the point:
+          # we want to hear about it now, not during a release.
+          if ! headers=$(gh api rate_limit --include 2>&1 >/dev/null); then
+            echo "::error::HOMEBREW_TAP_TOKEN is not usable — revoked, or the wrong value? ($headers)"
+            exit 1
+          fi
+
+          expiry=$(printf '%s\n' "$headers" \
+            | grep -i '^github-authentication-token-expiration:' \
+            | cut -d: -f2- | xargs || true)
+
+          if [ -z "$expiry" ]; then
+            # A token without an expiry date never fires this alarm — which is
+            # exactly why we do not want one.
+            echo "::warning::the token reports no expiry date; a non-expiring token is not what this repository intends"
+            exit 0
+          fi
+
+          # e.g. "2026-10-12 07:31:52 UTC"
+          left=$(( ( $(date -u -d "$expiry" +%s) - $(date -u +%s) ) / 86400 ))
+          echo "HOMEBREW_TAP_TOKEN expires on $expiry — $left day(s) left"
+
+          if [ "$left" -lt "${WARN_DAYS}" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN expires in $left day(s) ($expiry). Renew it (fine-grained, mkb79/homebrew-tap only, contents + pull requests: write) and update the secret, or the next release will not reach Homebrew."
+            exit 1
+          fi
