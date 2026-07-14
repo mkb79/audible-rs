@@ -60,6 +60,23 @@ before replacing its command (pass `--force` to skip, or `--bin-dir` to
 install elsewhere); the config directories are separate, so `audible-cli`'s
 data is left untouched. Replacing an older audible-rs is a silent upgrade.
 
+### Homebrew
+
+On macOS, or on Linux with Homebrew:
+
+```sh
+brew install mkb79/tap/audible-rs
+```
+
+The formula installs the same prebuilt binary and verifies it against the
+release checksums; `brew upgrade` follows new releases. While the project is
+in alpha the tap tracks pre-releases; once a stable release exists it serves
+stable releases only.
+
+Pick **one** installation method. If you install with both Homebrew and
+`install.sh`, you end up with two `audible` binaries and your `PATH` order —
+not you — decides which one runs.
+
 ### Manual download
 
 Grab the archive for your target from the
