@@ -50,7 +50,7 @@ hmac = "0.12"
 
 # Widevine license protocol (AUD-56): prost is the small runtime lib linked
 # into the binary; the codegen (protox/prost-build) is build-time only.
-prost = "0.13"
+prost = "0.14"
 
 # Secret handling
 secrecy = { version = "0.10", features = ["serde"] }
