@@ -53,7 +53,8 @@ async fn show(ctx: &Ctx, asins: Vec<String>, titles: Vec<String>) -> Result<()> 
     let marketplace = ctx.marketplace_single()?;
     let db = ctx.open_library_db().await?;
     crate::commands::library::maybe_auto_sync(ctx, &db).await?;
-    let asins = crate::commands::items::resolve_asins(&db, &marketplace, asins, titles).await?;
+    let asins =
+        crate::commands::items::resolve_asins(&db, &marketplace, asins, titles, true).await?;
     if asins.is_empty() {
         bail!("nothing selected");
     }

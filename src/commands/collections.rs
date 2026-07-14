@@ -355,7 +355,8 @@ async fn noun_add(
         match noun.add_title_source {
             AddTitleSource::Library => {
                 let db = ctx.open_library_db().await?;
-                crate::commands::items::resolve_asins(&db, &marketplace, asins, titles).await?
+                crate::commands::items::resolve_asins(&db, &marketplace, asins, titles, false)
+                    .await?
             }
             AddTitleSource::Catalog => {
                 resolve_catalog_titles(client, &marketplace, asins, titles).await?
