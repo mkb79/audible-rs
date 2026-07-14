@@ -14,6 +14,8 @@
 //! running a pre-release always sees pre-releases, or they would be blind
 //! to their own track.
 
+use std::cmp::Ordering;
+
 use anyhow::Result;
 use clap::{Arg, ArgAction};
 use semver::Version;
@@ -57,6 +59,27 @@ impl Release {
     }
 }
 
+/// The version this binary reports. Not the bare crate version: a build from
+/// source between two releases carries its commit as build metadata
+/// (`0.1.0-alpha.4+g1a2b3c4`, see `build.rs`, AUD-180).
+fn running_version() -> Version {
+    Version::parse(env!("AUDIBLE_BUILD_VERSION"))
+        .expect("the build version is valid SemVer (build.rs derives it from the crate version)")
+}
+
+/// The commit of a build that is not a published release, `None` for a
+/// release build.
+///
+/// SemVer's *precedence* order ignores build metadata, so such a build ranks
+/// equal to the release it was cut from — "no newer release" would then read
+/// as "you run that release". Every "are you up to date?" answer therefore has
+/// to consult this, not the version alone. (The derived `==` and `<` on
+/// `Version`, by contrast, *do* compare build metadata — see
+/// [`select_releases`].)
+fn dev_commit(running: &Version) -> Option<&str> {
+    running.build.as_str().strip_prefix('g')
+}
+
 /// Which slice of the release history to render. Each variant is named for
 /// what it *contains*, so no flag ever excludes the thing it is named after.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,14 +117,22 @@ pub(crate) fn select_releases(
         .iter()
         .filter(|release| include_pre || !release.prerelease)
         .filter_map(|release| release.version().map(|v| (v, release.clone())))
+        // `cmp_precedence`, never `==`/`>`: those derive over *all* fields,
+        // build metadata included. A build from source carries its commit
+        // there (`0.1.0-alpha.4+g1a2b3c4`), so `==` would match no release at
+        // all — `--current` would answer nothing instead of naming the release
+        // the build was cut from. `cmp_precedence` is the SemVer-spec order,
+        // which ignores build metadata; the release it was cut from therefore
+        // compares equal, and only genuinely later releases count as newer
+        // (AUD-180).
         .filter(|(version, _)| match selection {
             Selection::All => true,
-            Selection::Installed => version == running,
-            Selection::Newer => version > running,
-            Selection::From(from) => version >= from,
+            Selection::Installed => version.cmp_precedence(running) == Ordering::Equal,
+            Selection::Newer => version.cmp_precedence(running) == Ordering::Greater,
+            Selection::From(from) => version.cmp_precedence(from) != Ordering::Less,
         })
         .collect();
-    selected.sort_by(|a, b| a.0.cmp(&b.0));
+    selected.sort_by(|a, b| a.0.cmp_precedence(&b.0));
     selected.into_iter().map(|(_, release)| release).collect()
 }
 
@@ -187,9 +218,9 @@ fn newest_skipped_prerelease(
         .iter()
         .filter(|release| release.prerelease)
         .filter_map(|release| release.version().map(|version| (version, release)))
-        .filter(|(version, _)| version > base)
+        .filter(|(version, _)| version.cmp_precedence(base) == Ordering::Greater)
         .collect();
-    newer.sort_by(|a, b| a.0.cmp(&b.0));
+    newer.sort_by(|a, b| a.0.cmp_precedence(&b.0));
     newer.pop().map(|(_, release)| release.tag_name.clone())
 }
 
@@ -295,6 +326,7 @@ impl super::Command for SelfCommand {
                     Selection::Newer,
                     sub.get_flag("pre"),
                     RELEASES_URL,
+                    REPO_API,
                 )
                 .await
             }
@@ -317,6 +349,7 @@ impl super::Command for SelfCommand {
                     selection,
                     sub.get_flag("pre"),
                     RELEASES_URL,
+                    REPO_API,
                 )
                 .await
             }
@@ -332,8 +365,7 @@ impl super::Command for SelfCommand {
 /// Commits are filtered and grouped exactly like a released changelog
 /// (see [`changelog_group`], the twin of `cliff.toml`).
 async fn run_unreleased(ctx: &Ctx, pre: bool, releases_url: &str, repo_api: &str) -> Result<()> {
-    let running = Version::parse(env!("CARGO_PKG_VERSION"))
-        .expect("the crate version is valid SemVer (enforced by the release workflow)");
+    let running = running_version();
 
     // Fail-soft, like every other network path here.
     let releases = match fetch_releases(releases_url).await {
@@ -360,10 +392,29 @@ async fn run_unreleased(ctx: &Ctx, pre: bool, releases_url: &str, repo_api: &str
     let include_pre = tracking_prereleases(&releases, &Selection::All, &running, pre);
     let skipped_prerelease = newest_skipped_prerelease(&releases, &base_version, include_pre);
 
-    let comparison = match fetch_comparison(repo_api, &base, DEFAULT_BRANCH).await {
+    // A dev build compares against its own commit: "unreleased" then means
+    // what *this* binary carries beyond the release, not what happens to sit
+    // on main. Its commit may be unknown to GitHub (an unpushed branch) —
+    // then fall back to main and say which question is being answered.
+    let mut head = dev_commit(&running).unwrap_or(DEFAULT_BRANCH).to_owned();
+    let comparison = match fetch_comparison(repo_api, &base, &head).await {
         Ok(comparison) => comparison,
+        Err(error) if head != DEFAULT_BRANCH => {
+            eprintln!(
+                "the commit of your build ({head}) is not on GitHub — an unpushed branch? \
+                 Showing what is on {DEFAULT_BRANCH} instead ({error})"
+            );
+            head = DEFAULT_BRANCH.to_owned();
+            match fetch_comparison(repo_api, &base, &head).await {
+                Ok(comparison) => comparison,
+                Err(error) => {
+                    eprintln!("could not compare {base}…{head}: {error}");
+                    return Ok(());
+                }
+            }
+        }
         Err(error) => {
-            eprintln!("could not compare {base}…{DEFAULT_BRANCH}: {error}");
+            eprintln!("could not compare {base}…{head}: {error}");
             return Ok(());
         }
     };
@@ -373,6 +424,9 @@ async fn run_unreleased(ctx: &Ctx, pre: bool, releases_url: &str, repo_api: &str
         ctx.print(&crate::output::Output::Json(serde_json::json!({
             "running": running.to_string(),
             "since_release": base,
+            // What the release was compared against: main, or the commit of
+            // this binary when it is a build from source.
+            "head": head,
             // The pre-release these commits partly ship in already, if the
             // stable track hid it; null when pre-releases are tracked.
             "skipped_prerelease": skipped_prerelease,
@@ -388,7 +442,7 @@ async fn run_unreleased(ctx: &Ctx, pre: bool, releases_url: &str, repo_api: &str
     }
 
     if entries.is_empty() {
-        eprintln!("nothing unreleased — {base} is the current state of {DEFAULT_BRANCH}");
+        eprintln!("nothing unreleased — {base} is the current state of {head}");
         return Ok(());
     }
 
@@ -401,12 +455,17 @@ async fn run_unreleased(ctx: &Ctx, pre: bool, releases_url: &str, repo_api: &str
         }
     }
     println!();
-    match &skipped_prerelease {
-        Some(tag) => println!(
+    match (&skipped_prerelease, head == DEFAULT_BRANCH) {
+        (Some(tag), _) => println!(
             "Pre-releases don't count as shipped without `--pre` — part of this \
              already ships in {tag}, which you can install."
         ),
-        None => {
+        // The comparison ran against this binary's own commit, so these
+        // changes are not "coming" — they are what it is built from.
+        (None, false) => {
+            println!("These changes are in your build already, but in no release yet.")
+        }
+        (None, true) => {
             println!("These changes are not installable yet — they ship with the next release.")
         }
     }
@@ -431,10 +490,18 @@ fn parse_version_arg(raw: &str) -> Result<Version> {
     })
 }
 
-/// Shared implementation of both subcommands; `url` is injectable for tests.
-async fn run(ctx: &Ctx, mode: Mode, selection: Selection, pre: bool, url: &str) -> Result<()> {
-    let running = Version::parse(env!("CARGO_PKG_VERSION"))
-        .expect("the crate version is valid SemVer (enforced by the release workflow)");
+/// Shared implementation of both subcommands; the URLs are injectable for
+/// tests.
+async fn run(
+    ctx: &Ctx,
+    mode: Mode,
+    selection: Selection,
+    pre: bool,
+    url: &str,
+    repo_api: &str,
+) -> Result<()> {
+    let running = running_version();
+    let dev = dev_commit(&running);
 
     // Fail-soft: a missing network or an exhausted rate limit is a notice,
     // never an error — the command must not break a script.
@@ -452,8 +519,32 @@ async fn run(ctx: &Ctx, mode: Mode, selection: Selection, pre: bool, url: &str) 
         eprintln!("no stable release yet — showing pre-releases");
     }
 
+    // `--current` on a build from source is only half an answer: the release
+    // it was cut from, plus the commits this binary carries on top. Those
+    // come from the compare API, as in `--unreleased`.
+    let mut adds: Vec<(&'static str, Vec<String>)> = Vec::new();
+    let mut adds_error: Option<String> = None;
+    if let (Some(commit), Selection::Installed, Some(base)) = (dev, &selection, selected.last()) {
+        match fetch_comparison(repo_api, &base.tag_name, commit).await {
+            Ok(comparison) => adds = unreleased_entries(&comparison),
+            Err(error) => adds_error = Some(error.to_string()),
+        }
+    }
+
     if selected.is_empty() {
         match (&mode, &selection) {
+            // A dev build compares equal to the release it was cut from, so
+            // "no newer release" must not be read as "you run that release".
+            (Mode::Check { .. }, _) if dev.is_some() => {
+                let newest = select_releases(&releases, &Selection::All, &running, pre)
+                    .pop()
+                    .map(|release| release.tag_name)
+                    .unwrap_or_else(|| "none".to_owned());
+                eprintln!(
+                    "audible {running} is a build from source, not a published release — \
+                     the newest release is {newest}"
+                );
+            }
             (Mode::Check { .. }, _) => {
                 eprintln!("audible {running} is the newest release — you're up to date");
             }
@@ -486,7 +577,22 @@ async fn run(ctx: &Ctx, mode: Mode, selection: Selection, pre: bool, url: &str) 
             .collect();
         ctx.print(&crate::output::Output::Json(serde_json::json!({
             "running": running.to_string(),
+            // The commit a build from source was made at; null for a release.
+            "build_commit": dev,
             "releases": array,
+            // What that build carries on top of the release it was cut from
+            // (`--current` only); null when it could not be determined.
+            "adds": match (dev, &selection) {
+                (Some(_), Selection::Installed) if adds_error.is_none() => Some(
+                    adds.iter()
+                        .map(|(group, subjects)| serde_json::json!({
+                            "group": group,
+                            "commits": subjects,
+                        }))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            },
         })));
         return Ok(());
     }
@@ -494,10 +600,21 @@ async fn run(ctx: &Ctx, mode: Mode, selection: Selection, pre: bool, url: &str) 
     let plural = if selected.len() == 1 { "" } else { "s" };
     let count = selected.len();
     match (&mode, &selection) {
+        (Mode::Check { .. }, _) if dev.is_some() => {
+            println!(
+                "You run audible {running} — a build from source; \
+                 {count} newer release{plural} available."
+            );
+        }
         (Mode::Check { .. }, _) => {
             println!("You run audible {running} — {count} newer release{plural} available.");
         }
         (_, Selection::All) => println!("{count} release{plural} (you run {running})."),
+        // Not "the release you run": a build from source is none.
+        (_, Selection::Installed) if dev.is_some() => {
+            println!("audible {running} — a build from source, not a published release.");
+            println!("It was cut from this release:");
+        }
         (_, Selection::Installed) => println!("audible {running} — the release you run."),
         (_, Selection::Newer) => {
             println!("{count} release{plural} newer than audible {running}.");
@@ -541,6 +658,29 @@ async fn run(ctx: &Ctx, mode: Mode, selection: Selection, pre: bool, url: &str) 
         match release.body.as_deref().map(str::trim) {
             Some(body) if !body.is_empty() => println!("{body}"),
             _ => println!("(no release notes)"),
+        }
+    }
+
+    // `--current` on a build from source: the release above is where it was
+    // cut from, this is what it carries beyond it.
+    if let (Some(commit), Selection::Installed) = (dev, &selection) {
+        println!();
+        if let Some(error) = &adds_error {
+            eprintln!(
+                "could not list what your build adds: the commit {commit} is unknown to \
+                 GitHub — an unpushed branch? ({error})"
+            );
+        } else if adds.is_empty() {
+            println!("Your build adds nothing user-visible on top of it.");
+        } else {
+            println!("Your build adds, on top of it:");
+            for (group, subjects) in &adds {
+                println!();
+                println!("### {group}");
+                for subject in subjects {
+                    println!("- {subject}");
+                }
+            }
         }
     }
 
@@ -599,6 +739,13 @@ mod tests {
         (dir, ctx)
     }
 
+    fn tags(releases: &[Release]) -> Vec<&str> {
+        releases
+            .iter()
+            .map(|release| release.tag_name.as_str())
+            .collect()
+    }
+
     fn release(tag: &str, prerelease: bool) -> Release {
         Release {
             tag_name: tag.to_owned(),
@@ -606,6 +753,37 @@ mod tests {
             body: Some(format!("notes for {tag}")),
             published_at: Some("2026-07-14T10:00:00Z".to_owned()),
         }
+    }
+
+    /// A build from source (AUD-180) must never pass for the release it was
+    /// cut from. The trap: `Version` derives `Ord`/`Eq` over **all** fields,
+    /// build metadata included — so `0.1.0-alpha.4+g1a2b3c4 == 0.1.0-alpha.4`
+    /// is `false` and `<` even orders them. Only `cmp_precedence` implements
+    /// the SemVer order that ignores build metadata. Selection must use it,
+    /// or `--current` finds no release and `--newer` gets it backwards.
+    #[test]
+    fn a_dev_build_selects_the_release_it_was_cut_from() {
+        let dev = Version::parse("0.1.0-alpha.4+g1a2b3c4").unwrap();
+        let cut_from = Version::parse("0.1.0-alpha.4").unwrap();
+
+        // The trap itself — guarding against a future `==`/`>` creeping back.
+        assert_ne!(dev, cut_from, "derived equality compares build metadata");
+        assert_eq!(dev.cmp_precedence(&cut_from), Ordering::Equal);
+
+        let releases = [
+            release("v0.1.0-alpha.5", true),
+            release("v0.1.0-alpha.4", true),
+        ];
+        assert_eq!(dev_commit(&dev), Some("1a2b3c4"));
+        assert_eq!(dev_commit(&cut_from), None, "a release build has no commit");
+
+        // --current names the release the build was cut from, not nothing.
+        let current = select_releases(&releases, &Selection::Installed, &dev, false);
+        assert_eq!(tags(&current), ["v0.1.0-alpha.4"]);
+
+        // --newer: the release it was cut from is not an upgrade; alpha.5 is.
+        let newer = select_releases(&releases, &Selection::Newer, &dev, false);
+        assert_eq!(tags(&newer), ["v0.1.0-alpha.5"]);
     }
 
     /// The API returns newest-first; we must render oldest-first and include
@@ -779,7 +957,8 @@ mod tests {
                 Mode::Check { changelog: false },
                 Selection::Newer,
                 false,
-                &url
+                &url,
+                REPO_API,
             )
             .await
             .is_ok()
@@ -799,7 +978,8 @@ mod tests {
                 Mode::Check { changelog: false },
                 Selection::Newer,
                 false,
-                url
+                url,
+                REPO_API,
             )
             .await
             .is_ok()
