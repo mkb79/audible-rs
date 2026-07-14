@@ -161,6 +161,13 @@ jobs:
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
+          # Marks this as a release build, so the binary reports a bare
+          # version instead of appending its commit (AUD-180, see build.rs).
+          # It must come from here: the checkout above is shallow and without
+          # tags, so build.rs could not tell a release from a source build on
+          # its own — every release binary would carry a commit suffix.
+          # build.rs fails the build if this disagrees with Cargo.toml.
+          AUDIBLE_RELEASE_TAG: ${{ needs.prepare.outputs.tag || github.ref_name }}
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package

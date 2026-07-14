@@ -52,7 +52,10 @@ fn parse_output_format(s: &str) -> Result<OutputFormat, String> {
 /// `completions` (AUD-143) and, later, man-page generation.
 pub fn build_root(registry: &[Box<dyn Command>]) -> clap::Command {
     let mut root = clap::Command::new("audible")
-        .version(env!("CARGO_PKG_VERSION"))
+        // Not CARGO_PKG_VERSION: a build from source between two releases
+        // carries its commit (`+g<sha>`), so `--version` in a bug report
+        // names what the reporter actually runs (AUD-180, see `build.rs`).
+        .version(env!("AUDIBLE_BUILD_VERSION"))
         .about("Access your Audible library from the command line")
         .subcommand_required(true)
         .arg_required_else_help(true)
