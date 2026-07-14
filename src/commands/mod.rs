@@ -20,6 +20,7 @@ pub mod library;
 pub mod plugin;
 pub mod podcasts;
 pub(crate) mod prompt;
+pub mod selfcmd;
 pub mod series;
 pub mod settings;
 pub mod setup;
@@ -154,6 +155,7 @@ pub fn registry() -> Vec<Box<dyn Command>> {
         Box::new(library::LibraryCommand),
         Box::new(plugin::PluginCommand),
         Box::new(podcasts::PodcastsCommand),
+        Box::new(selfcmd::SelfCommand),
         Box::new(series::SeriesCommand),
         Box::new(settings::SettingsCommand),
         Box::new(setup::SetupCommand),
