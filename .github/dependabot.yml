@@ -36,8 +36,44 @@ updates:
       prefix-development: build
       include: scope
     groups:
+      # RustCrypto versions its trait crates (cipher, digest, aead) as a family,
+      # and every library above them is bound to one generation. Bumping a single
+      # crate does not compile — `aes` on cipher 0.4 cannot serve `cmac` on
+      # cipher 0.5. Offered one by one, they were eight pull requests that were
+      # all closed again; as a group they are one, they carry the truth ("these
+      # move together"), and when `rsa` finally ships a stable 0.10 — today it is
+      # only at 0.10.0-rc — that single PR *is* the upgrade (AUD-184).
+      #
+      # Deliberately a group and NOT `ignore`: the documentation does not state
+      # clearly whether ignore conditions also suppress advisory-driven security
+      # updates, and on crypto crates that ambiguity is not worth the tidiness.
+      # A group only bundles; it silences nothing.
+      rustcrypto:
+        patterns:
+          - aes
+          - argon2
+          - cbc
+          - chacha20poly1305
+          - cmac
+          - hmac
+          - pbkdf2
+          - rsa
+          - sha1
+          - sha2
+        # Only the generation moves are bundled here. A patch inside the current
+        # generation is harmless and must not be held hostage by the breaking
+        # ones — it falls through to the group below and stays mergeable.
+        # (For a 0.x crate, Cargo — and therefore Dependabot — reads a change of
+        # the minor as breaking, so 0.10 → 0.11 counts as major here.)
+        update-types: [major]
+      # Everything else: routine bumps in one PR, majors on their own — a major
+      # is where a crate changes its API, and it should fail alone.
       cargo:
         patterns: ["*"]
         update-types: [minor, patch]
     # The release builds with --locked, so a stale lockfile is not cosmetic.
-    open-pull-requests-limit: 5
+    # Headroom above the default of 5: the limit was hit while the crypto family
+    # was still arriving one crate at a time, which starved the updates that
+    # actually mattered. (Security updates have their own internal limit and are
+    # not affected by this one.)
+    open-pull-requests-limit: 10
