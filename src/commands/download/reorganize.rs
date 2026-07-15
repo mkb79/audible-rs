@@ -24,6 +24,34 @@ fn filename_mode_from_str(value: &str) -> crate::config::schema::FilenameMode {
     }
 }
 
+/// The `(old, new)` paths for one recorded download under the target naming, or
+/// `None` when it already matches. Pure over its inputs (no `Ctx`/IO) so the
+/// migration is unit-testable: `old` is the stored path (keeping whatever slug
+/// it was written with), while `new` is re-resolved from the item's title with
+/// the *current* slug. Any naming-engine change (e.g. AUD-199) therefore surfaces
+/// here as `old != new` and plans a rename, with no reorganize-specific code.
+#[allow(clippy::too_many_arguments)]
+fn planned_paths(
+    asin: &str,
+    kind: &str,
+    content_format: &str,
+    file_path: &str,
+    values: &std::collections::HashMap<&'static str, String>,
+    target_mode: crate::config::schema::FilenameMode,
+    target_template: Option<&str>,
+    max_len: usize,
+    target_dir: &Path,
+) -> Result<Option<(PathBuf, PathBuf)>> {
+    let base = resolve_base(target_mode, target_template, max_len, asin, values)?;
+    let old = PathBuf::from(file_path);
+    let ext = old.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let new = join_relative(
+        target_dir,
+        &format!("{base}{}", artifact_suffix(kind, content_format, ext)),
+    );
+    Ok((old != new).then_some((old, new)))
+}
+
 /// `download reorganize` — clap.
 pub(super) fn reorganize_command() -> clap::Command {
     clap::Command::new("reorganize")
@@ -173,25 +201,20 @@ pub(super) async fn reorganize(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()>
                 skipped += 1;
                 continue;
             };
-            let base = resolve_base(
+            let Some((old, new)) = planned_paths(
+                &entry.asin,
+                &entry.kind,
+                &entry.content_format,
+                &entry.file_path,
+                &values,
                 target_mode,
                 target_template.as_deref(),
                 max_len,
-                &entry.asin,
-                &values,
-            )?;
-            let old = PathBuf::from(&entry.file_path);
-            let ext = old.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let new = join_relative(
                 &target_dir,
-                &format!(
-                    "{base}{}",
-                    artifact_suffix(&entry.kind, &entry.content_format, ext)
-                ),
-            );
-            if old == new {
+            )?
+            else {
                 continue;
-            }
+            };
             // An original audio file carries a key sidecar keyed by its
             // extension: `.aaxc` → `.voucher`, `.cenc` → `.wvkey` (AUD-99). old
             // and new share the extension, so both resolve or neither does.
@@ -551,5 +574,48 @@ mod tests {
         assert!(relocate(&copied, &moved, false).await.is_err());
         assert!(relocate(&copied, &moved, true).await.is_err());
         assert_eq!(std::fs::read(&moved).unwrap(), b"other");
+    }
+
+    // Proves the migration (AUD-199): a file recorded with the OLD slug — the
+    // stray `_ ` a replaced `:` used to leave — is planned for rename to the
+    // current gap-free slug, with no reorganize-specific migration code. `old` is
+    // the stored path; `new` is re-resolved from the title. Before the unicode
+    // fix the slug still produced `_ `, so `new == old` and this returns None
+    // (nothing to do); the fix is exactly what makes them differ.
+    #[test]
+    fn a_slug_change_plans_a_rename_of_existing_downloads() {
+        use crate::config::schema::FilenameMode;
+        let values: std::collections::HashMap<&'static str, String> = [
+            ("publication", "Marvel's Wastelanders: Star-Lord"),
+            ("fulltitle", "Kapitel Zehn: Götterdämmerung"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k, v.to_owned()))
+        .collect();
+        // The path a pre-fix download wrote: `_ ` after each replaced colon.
+        let stored =
+            "/dl/Marvel's Wastelanders_ Star-Lord/Kapitel Zehn_ Götterdämmerung.AAX_44_128.aaxc";
+
+        let (old, new) = planned_paths(
+            "B0",
+            "audio",
+            "AAX_44_128",
+            stored,
+            &values,
+            FilenameMode::Custom,
+            Some("%publication%/%fulltitle%"),
+            230,
+            Path::new("/dl"),
+        )
+        .unwrap()
+        .expect("a rename must be planned once the slug drops the stray space");
+
+        assert_eq!(old, PathBuf::from(stored));
+        assert_eq!(
+            new,
+            PathBuf::from(
+                "/dl/Marvel's Wastelanders_Star-Lord/Kapitel Zehn_Götterdämmerung.AAX_44_128.aaxc"
+            )
+        );
     }
 }

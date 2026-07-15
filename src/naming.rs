@@ -347,7 +347,42 @@ fn unicode_clean(title: &str) -> String {
             c => c,
         })
         .collect();
-    cleaned.trim().trim_matches('.').trim().to_owned()
+    let collapsed = collapse_separator_runs(&cleaned);
+    collapsed.trim().trim_matches('.').trim().to_owned()
+}
+
+/// Collapses each maximal run of `[whitespace | _]` that contains at least one
+/// `_` down to a single `_`, so a replaced separator (`:` → `_`) absorbs the
+/// space beside it: `Title: Sub` → `Title_Sub`, not `Title_ Sub` (AUD-199).
+/// Pure-whitespace runs are emitted verbatim, so word spacing inside a segment
+/// is preserved. In [`unicode_clean`] every `_` comes from a replacement, so
+/// this never eats a meaningful underscore.
+fn collapse_separator_runs(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut run = String::new();
+    let mut run_has_underscore = false;
+    let flush = |out: &mut String, run: &mut String, has: &mut bool| {
+        if !run.is_empty() {
+            if *has {
+                out.push('_');
+            } else {
+                out.push_str(run);
+            }
+            run.clear();
+            *has = false;
+        }
+    };
+    for c in s.chars() {
+        if c == '_' || c.is_whitespace() {
+            run.push(c);
+            run_has_underscore |= c == '_';
+        } else {
+            flush(&mut out, &mut run, &mut run_has_underscore);
+            out.push(c);
+        }
+    }
+    flush(&mut out, &mut run, &mut run_has_underscore);
+    out
 }
 
 /// Hard-truncates a file name to at most `max_len` bytes on a char
@@ -478,6 +513,26 @@ mod tests {
         assert_eq!(
             join_relative(Path::new(r"C:\dl"), "title.aaxc"),
             PathBuf::from(r"C:\dl\title.aaxc")
+        );
+    }
+
+    #[test]
+    fn unicode_clean_collapses_space_around_replaced_separators() {
+        // A replaced separator (`:` `/` …) absorbs the space beside it (AUD-199).
+        assert_eq!(unicode_clean("Title: Subtitle"), "Title_Subtitle");
+        assert_eq!(unicode_clean("Author / Work"), "Author_Work");
+        assert_eq!(unicode_clean("A : B"), "A_B");
+        // Several separators in one title.
+        assert_eq!(
+            unicode_clean("Marvel's Wastelanders: Star-Lord: Folge 1"),
+            "Marvel's Wastelanders_Star-Lord_Folge 1"
+        );
+        // Word spacing (no separator involved) is preserved.
+        assert_eq!(unicode_clean("Star-Lord Folge 10"), "Star-Lord Folge 10");
+        // Unicode letters survive — this is the unicode path, not ASCII.
+        assert_eq!(
+            unicode_clean("Zehn: Götterdämmerung"),
+            "Zehn_Götterdämmerung"
         );
     }
 
