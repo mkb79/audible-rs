@@ -129,3 +129,10 @@ strip = true
 pkg-url = "{ repo }/releases/download/v{ version }/audible-{ version }-{ target }.tar.gz"
 pkg-fmt = "tgz"
 bin-dir = "audible-{ version }-{ target }/{ bin }"
+
+# Windows ships a .zip with an `.exe` (Stage 2, AUD-190); everything else keeps
+# the .tar.gz defaults above.
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/audible-{ version }-{ target }.zip"
+pkg-fmt = "zip"
+bin-dir = "audible-{ version }-{ target }/{ bin }.exe"
