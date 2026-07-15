@@ -135,6 +135,10 @@ jobs:
             runner: macos-14
           - target: aarch64-apple-darwin
             runner: macos-14
+          # Windows: MSVC, x86_64 only (arm64 later — AUD-190). windows-latest
+          # already builds the crate green in CI; no extra toolchain needed.
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -170,7 +174,8 @@ jobs:
           AUDIBLE_RELEASE_TAG: ${{ needs.prepare.outputs.tag || github.ref_name }}
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Package
+      - name: Package (tar.gz)
+        if: ${{ !contains(matrix.target, 'windows') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -182,10 +187,28 @@ jobs:
           cp LICENSE README.md "$stage/"
           tar czf "${stage}.tar.gz" "$stage"
 
+      # Windows ships a .zip (native there), same layout as the tar.gz so
+      # binstall's bin-dir resolves the same way (AUD-190).
+      - name: Package (zip)
+        if: ${{ contains(matrix.target, 'windows') }}
+        shell: pwsh
+        run: |
+          $tag = "${{ needs.prepare.outputs.tag || github.ref_name }}"
+          $version = $tag -replace '^v', ''
+          $stage = "${env:BIN}-$version-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${env:BIN}.exe" $stage
+          Copy-Item LICENSE, README.md $stage
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.target }}
-          path: '*.tar.gz'
+          # A given runner produces exactly one of these; the other glob simply
+          # matches nothing (if-no-files-found still passes on the match).
+          path: |
+            *.tar.gz
+            *.zip
           if-no-files-found: error
 
   release:
@@ -212,7 +235,7 @@ jobs:
 
       - name: Checksums
         working-directory: dist
-        run: sha256sum *.tar.gz | tee SHA256SUMS
+        run: sha256sum *.tar.gz *.zip | tee SHA256SUMS
 
       - name: Determine release type
         id: rel
@@ -247,6 +270,7 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz
+            dist/*.zip
             dist/SHA256SUMS
 
   # Homebrew tap (AUD-181): rewrite the formula in mkb79/homebrew-tap so
