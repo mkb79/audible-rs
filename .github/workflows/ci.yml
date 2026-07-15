@@ -78,10 +78,6 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      # TEMPORARY (AUD-188 reality-check): cargo test builds the test binaries
-      # (cfg(test)); this proves the shipping `audible` binary itself builds on
-      # MSVC. Removed before merge — cargo test is enough for the standing job.
-      - run: cargo build
       - run: cargo test
 
   # This repository handles auth material, so the realistic accident is a
