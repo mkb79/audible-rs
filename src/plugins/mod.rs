@@ -521,7 +521,9 @@ pub async fn run_external(
     invoke(ctx, plugin, args).await.map(Some)
 }
 
-#[cfg(test)]
+// Plugin tests exercise Unix-only mechanics (executable bit, symlinks, the
+// UDS broker), so they run on Unix; the Windows plugin port is AUD-193.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::Write as _;
