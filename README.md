@@ -39,6 +39,9 @@ Rust crate. It installs one binary, `audible`.
 
 Linux and macOS are supported (x86-64 and arm64). Windows support for the
 core commands is in progress; the plugin and agent subsystems are Unix-only.
+**On Windows today**, audible-rs runs unchanged under
+[WSL2](https://learn.microsoft.com/windows/wsl/install) — see the
+[step-by-step guide](https://github.com/mkb79/audible-rs/discussions/49).
 
 ### Prebuilt binary (recommended)
 
