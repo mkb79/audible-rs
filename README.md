@@ -37,11 +37,11 @@ Rust crate. It installs one binary, `audible`.
 
 ## Install
 
-Linux and macOS are supported (x86-64 and arm64). Windows support for the
-core commands is in progress; the plugin and agent subsystems are Unix-only.
-**On Windows today**, audible-rs runs unchanged under
-[WSL2](https://learn.microsoft.com/windows/wsl/install) — see the
-[step-by-step guide](https://github.com/mkb79/audible-rs/discussions/49).
+Linux, macOS (x86-64 and arm64) and Windows (x86-64) are supported. On
+Windows the core commands work natively; only the plugin and agent subsystems
+stay Unix-only — if you need those on Windows, run audible-rs under
+[WSL2](https://learn.microsoft.com/windows/wsl/install) (see the
+[step-by-step guide](https://github.com/mkb79/audible-rs/discussions/49)).
 
 ### Prebuilt binary (recommended)
 
@@ -56,6 +56,9 @@ and verifies the download against the release checksums. By default it
 installs the latest **stable** release; while the project is in alpha (no
 stable release yet) it installs the newest pre-release, and once a stable
 release exists you can pass `--pre` to keep tracking pre-releases.
+
+On **Windows**, the shell installer is Linux/macOS only — grab the `.zip` from
+[Manual download](#manual-download) and run `audible.exe`.
 
 audible-rs is the successor to `audible-cli` and shares the command name
 `audible`. If you already have `audible-cli` installed, the installer asks
@@ -92,13 +95,21 @@ and place the binary on your `PATH`:
 | Linux arm64 | `audible-<version>-aarch64-unknown-linux-musl.tar.gz` |
 | macOS Intel | `audible-<version>-x86_64-apple-darwin.tar.gz` |
 | macOS Apple Silicon | `audible-<version>-aarch64-apple-darwin.tar.gz` |
+| Windows x86-64 | `audible-<version>-x86_64-pc-windows-msvc.zip` |
 
 The Linux binaries are statically linked (musl) and run on any distribution.
-Verify the download against `SHA256SUMS` from the same release:
+On **Windows**, unzip the archive and run `audible.exe` (keep its folder on
+`PATH`, or run it in place). Verify the download against `SHA256SUMS` from the
+same release:
 
 ```sh
 sha256sum -c SHA256SUMS --ignore-missing   # Linux
 shasum -a 256 -c SHA256SUMS --ignore-missing  # macOS
+```
+
+```powershell
+# Windows (PowerShell): the printed hash must match the .zip's line in SHA256SUMS
+(Get-FileHash audible-<version>-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower()
 ```
 
 ### From source
