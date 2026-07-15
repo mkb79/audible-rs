@@ -10,6 +10,7 @@
 //! RPC/scopes enforcement is AUD-69; until then a plugin simply gets no
 //! RPC access.
 
+#[cfg(unix)]
 pub mod broker;
 
 use std::path::{Path, PathBuf};
@@ -312,6 +313,11 @@ fn is_executable(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0)
 }
 
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
 /// First `python3` on `PATH` (Tier B interpreter).
 fn python3() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
@@ -393,20 +399,40 @@ pub async fn invoke(
             plugin.source.display()
         ),
     };
-    let broker = if manifest.scopes.is_empty() {
-        None
-    } else {
-        Some(broker::Broker::start(Arc::clone(ctx), manifest.scopes).await?)
+    // The ephemeral broker uses a UDS transport and is Unix-only for now
+    // (AUD-193). On Unix it lives exactly as long as the child; on Windows a
+    // plugin that requests broker scopes is refused cleanly.
+    #[cfg(unix)]
+    let (broker, envs) = {
+        let broker = if manifest.scopes.is_empty() {
+            None
+        } else {
+            Some(broker::Broker::start(Arc::clone(ctx), manifest.scopes).await?)
+        };
+        let mut envs: Vec<(String, String)> = Vec::new();
+        if let Some(broker) = &broker {
+            envs.push((
+                "AUDIBLE_SOCKET".to_owned(),
+                broker.socket_path.display().to_string(),
+            ));
+            envs.push(("AUDIBLE_BROKER_TOKEN".to_owned(), broker.token.clone()));
+        }
+        (broker, envs)
     };
-    let mut envs: Vec<(String, String)> = Vec::new();
-    if let Some(broker) = &broker {
-        envs.push((
-            "AUDIBLE_SOCKET".to_owned(),
-            broker.socket_path.display().to_string(),
-        ));
-        envs.push(("AUDIBLE_BROKER_TOKEN".to_owned(), broker.token.clone()));
-    }
+    #[cfg(not(unix))]
+    let envs: Vec<(String, String)> = {
+        let _ = ctx;
+        if !manifest.scopes.is_empty() {
+            anyhow::bail!(
+                "plugins that request broker scopes are not supported on Windows yet (see AUD-193)"
+            );
+        }
+        Vec::new()
+    };
+
     let result = run(plugin, args, &envs).await;
+
+    #[cfg(unix)]
     if let Some(broker) = broker {
         broker.shutdown().await;
     }

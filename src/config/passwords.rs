@@ -159,6 +159,8 @@ fn write_0600(path: &Path, content: &str) -> Result<()> {
 
 /// Warns if the file is readable by group or other (Unix only).
 fn warn_if_readable(path: &Path) {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;

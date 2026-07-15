@@ -10,8 +10,10 @@ use anyhow::{Context as _, Result};
 
 use crate::config::ctx::Ctx;
 
+#[cfg(unix)]
 pub mod agent;
 pub mod audit;
+#[cfg(unix)]
 pub mod client;
 pub mod rpc;
 pub mod tokens;
