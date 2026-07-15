@@ -9,6 +9,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 This file is generated from the commit history by [git-cliff](https://git-cliff.org)
 — do not edit it by hand (see `cliff.toml`).
 
+## [0.1.0-alpha.7](https://github.com/mkb79/audible-rs/compare/v0.1.0-alpha.6..v0.1.0-alpha.7) - 2026-07-15
+
+### Added
+
+- *release*: Publish a Windows x86_64 binary (.zip) ([#55](https://github.com/mkb79/audible-rs/pull/55)) ([9ca93ba](https://github.com/mkb79/audible-rs/commit/9ca93ba5e571be7756c568395bbe1fb375d81585))
+- *windows*: Point to winget/aaxclean-cli when no decrypt tool is found ([#53](https://github.com/mkb79/audible-rs/pull/53)) ([eb896ef](https://github.com/mkb79/audible-rs/commit/eb896ef6be4b1b0719c7c4ee27fab9d7a3e5314b))
+
+### Fixed
+
+- *naming*: Drop the stray space after a separator replaced with "_" ([#54](https://github.com/mkb79/audible-rs/pull/54)) ([3c889ac](https://github.com/mkb79/audible-rs/commit/3c889ac0295436132b9a2bfcab6f3064e7c88f1e))
+- *windows*: Find .exe tools via PATHEXT and use native path separators ([#52](https://github.com/mkb79/audible-rs/pull/52)) ([1e3242a](https://github.com/mkb79/audible-rs/commit/1e3242a082c44702b912196dcaec857cf2d21d1a))
+
 ## [0.1.0-alpha.6](https://github.com/mkb79/audible-rs/compare/v0.1.0-alpha.5..v0.1.0-alpha.6) - 2026-07-14
 
 ### Added
