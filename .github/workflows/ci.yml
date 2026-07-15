@@ -3,7 +3,17 @@ name: CI
 on:
   push:
     branches: [main]
+    # Skip CI for changes that cannot affect the build. Only doc-like files —
+    # NOT Cargo.toml/Cargo.lock, src, build.rs or the workflows. paths-ignore
+    # fires only when *every* changed file matches, so a mixed doc+code push
+    # still runs. (If a CI job ever becomes a required status check, revisit:
+    # a skipped required check leaves a PR pending forever.)
+    paths-ignore: &doc-paths
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
+    paths-ignore: *doc-paths
 
 # Least privilege: the CI jobs only need to read the checkout (CodeQL
 # actions/missing-workflow-permissions, AUD-149).
@@ -33,9 +43,18 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
+  # clippy on both platforms: it only lints the code active for the target,
+  # so a Linux-only run never sees the `#[cfg(not(unix))]` branches (the
+  # Windows agent stubs, the plugin loader's Windows is_executable). rustfmt,
+  # by contrast, parses every branch regardless of target, so `fmt` stays
+  # Linux-only.
   clippy:
     name: clippy
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # a Windows failure must not abort the Linux run
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
@@ -44,9 +63,17 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo clippy --all-targets -- -D warnings
 
+  # test on both platforms: `cargo test` builds every target (so it proves the
+  # binary compiles) and runs the suite — the Windows run is the authoritative
+  # MSVC build + runtime proof (AUD-188). No separate `cargo build` step: test
+  # already compiles the binary.
   test:
     name: test
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
