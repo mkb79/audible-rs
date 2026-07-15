@@ -5,6 +5,7 @@
 //! [`old_command_hint`].
 
 pub mod account;
+#[cfg(unix)]
 pub mod agent;
 pub mod annotations;
 pub mod api;
@@ -147,6 +148,7 @@ pub trait Command: Send + Sync {
 pub fn registry() -> Vec<Box<dyn Command>> {
     vec![
         Box::new(account::AccountCommand),
+        #[cfg(unix)]
         Box::new(agent::AgentCommand),
         Box::new(annotations::AnnotationsCommand),
         Box::new(api::ApiCommand),

@@ -3,7 +3,9 @@
 
 use anyhow::{Context as _, Result, bail};
 use clap::Args;
-use secrecy::{ExposeSecret, SecretString};
+#[cfg(unix)]
+use secrecy::ExposeSecret;
+use secrecy::SecretString;
 
 use crate::auth::authfile::{self, KdfParams, Protection};
 use crate::config::ctx::Ctx;
@@ -504,6 +506,15 @@ fn write_export_file(path: &std::path::Path, content: &[u8], force: bool) -> std
 /// `account unlock` — resolve the selected account's passphrase (from
 /// `password_source`, else prompt) and hand it to the running agent so
 /// the session is served without the passphrase (AUD-116).
+///
+/// The session agent is Unix-only for now (see AUD-193); on Windows both
+/// `unlock` and `lock` report that cleanly instead of failing to build.
+#[cfg(not(unix))]
+pub(super) async fn unlock(_ctx: &Ctx) -> Result<()> {
+    anyhow::bail!("the session agent is not available on Windows yet (see AUD-193)")
+}
+
+#[cfg(unix)]
 pub(super) async fn unlock(ctx: &Ctx) -> Result<()> {
     let account_name = ctx.account_name()?;
     let account = crate::config::resolve::account(ctx.config(), &account_name)?;
@@ -540,6 +551,12 @@ pub(super) async fn unlock(ctx: &Ctx) -> Result<()> {
 
 /// `account lock` — drop the selected account's session in the agent (or
 /// every session with `--all`).
+#[cfg(not(unix))]
+pub(super) async fn lock(_ctx: &Ctx, _all: bool) -> Result<()> {
+    anyhow::bail!("the session agent is not available on Windows yet (see AUD-193)")
+}
+
+#[cfg(unix)]
 pub(super) async fn lock(ctx: &Ctx, all: bool) -> Result<()> {
     let body = if all {
         serde_json::json!({ "all": true })

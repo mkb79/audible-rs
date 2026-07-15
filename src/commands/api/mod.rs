@@ -1076,12 +1076,18 @@ mod tests {
 
     #[test]
     fn body_path_resolves_relative_to_file_dir() {
-        let base = Path::new("/cfg/reqs");
-        assert_eq!(
-            resolve_body_path("payload.xml", Some(base)),
-            "/cfg/reqs/payload.xml"
-        );
-        assert_eq!(resolve_body_path("/abs/p.xml", Some(base)), "/abs/p.xml");
+        // Path semantics are platform-specific: the join separator, and what
+        // counts as absolute (`/abs` is absolute on Unix, `C:\abs` on Windows).
+        // Assert the platform-correct result on each so both are really tested.
+        #[cfg(unix)]
+        let (base, rel_expected, abs_path) = ("/cfg/reqs", "/cfg/reqs/payload.xml", "/abs/p.xml");
+        #[cfg(windows)]
+        let (base, rel_expected, abs_path) =
+            (r"C:\cfg\reqs", r"C:\cfg\reqs\payload.xml", r"C:\abs\p.xml");
+
+        let base = Path::new(base);
+        assert_eq!(resolve_body_path("payload.xml", Some(base)), rel_expected);
+        assert_eq!(resolve_body_path(abs_path, Some(base)), abs_path);
         assert_eq!(resolve_body_path("-", Some(base)), "-");
         assert_eq!(resolve_body_path("rel.xml", None), "rel.xml");
     }

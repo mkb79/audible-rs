@@ -433,7 +433,14 @@ mod password_tests {
     #[tokio::test]
     async fn command_failure_is_an_error_without_leaking_stdout() {
         let mut acc = account(PasswordSource::Command);
-        acc.password_command = Some("echo secret-should-not-appear; exit 3".to_owned());
+        // The command prints to stdout, then exits non-zero. The shell differs
+        // by platform (sh -c vs cmd /C), so the command syntax does too — this
+        // way the failure path is really exercised on each, not just Unix.
+        #[cfg(unix)]
+        let command = "echo secret-should-not-appear; exit 3";
+        #[cfg(windows)]
+        let command = "echo secret-should-not-appear& exit 3";
+        acc.password_command = Some(command.to_owned());
         let err = resolve_password(Path::new("/nonexistent"), "alice", &acc)
             .await
             .unwrap_err()

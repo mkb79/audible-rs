@@ -284,6 +284,7 @@ where
 }
 
 /// Accept loop over a bound `UnixListener` (trusted); runs until aborted.
+#[cfg(unix)]
 pub async fn serve_unix(listener: tokio::net::UnixListener, backend: Arc<dyn Backend>) {
     loop {
         match listener.accept().await {
