@@ -92,8 +92,30 @@ fn tool_path(env_var: &str, name: &str) -> Option<PathBuf> {
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
+        .flat_map(|dir| executable_candidates(&dir, name))
         .find(|candidate| is_executable(candidate))
+}
+
+/// The filenames to try for `name` in one PATH directory. On Unix a program is
+/// its bare name; on Windows an executable carries an extension, so a bare
+/// `ffmpeg` never matches `ffmpeg.exe` — try each `PATHEXT` extension (unless
+/// the caller already gave one).
+#[cfg(not(windows))]
+fn executable_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
+    vec![dir.join(name)]
+}
+
+#[cfg(windows)]
+fn executable_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
+    if Path::new(name).extension().is_some() {
+        return vec![dir.join(name)];
+    }
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned());
+    pathext
+        .split(';')
+        .filter(|ext| !ext.is_empty())
+        .map(|ext| dir.join(format!("{name}{ext}")))
+        .collect()
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -538,6 +560,40 @@ fn pick_error(stderr: &str, stdout: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On Unix a tool is looked up by its bare name.
+    #[cfg(not(windows))]
+    #[test]
+    fn candidates_are_the_bare_name_on_unix() {
+        assert_eq!(
+            executable_candidates(Path::new("/usr/bin"), "ffmpeg"),
+            vec![PathBuf::from("/usr/bin/ffmpeg")]
+        );
+    }
+
+    /// On Windows the PATH search must try the executable extensions, so a
+    /// bare `ffmpeg` finds `ffmpeg.exe`. A name that already has an extension
+    /// is used verbatim.
+    #[cfg(windows)]
+    #[test]
+    fn candidates_apply_pathext_on_windows() {
+        let cands = executable_candidates(Path::new(r"C:\bin"), "ffmpeg");
+        assert!(
+            cands
+                .iter()
+                .any(|c| c.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))),
+            "{cands:?} should include an .exe candidate"
+        );
+        assert!(
+            cands.iter().all(|c| c.starts_with(r"C:\bin")),
+            "candidates stay in the given dir"
+        );
+        assert_eq!(
+            executable_candidates(Path::new(r"C:\bin"), "ffmpeg.exe"),
+            vec![PathBuf::from(r"C:\bin\ffmpeg.exe")],
+            "an explicit extension is used as-is"
+        );
+    }
 
     #[tokio::test]
     async fn ffmpeg_version_parses_release_and_git_strings() {
