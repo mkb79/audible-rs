@@ -91,7 +91,7 @@ pub(super) async fn download_one(
     let base = base_filename(ctx, plan.marketplace, asin).await?;
     // The custom filename mode may nest the title in subfolders; create them
     // before any artifact is written (a no-op for the flat modes).
-    let stem = plan.dir.join(&base);
+    let stem = crate::naming::join_relative(plan.dir, &base);
     if let Some(parent) = stem.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("could not create directory {}", parent.display()))?;

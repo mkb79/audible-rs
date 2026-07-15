@@ -22,12 +22,38 @@ pub(crate) fn download_dir(ctx: &Ctx) -> Result<PathBuf> {
 }
 
 pub(crate) fn expand_tilde(path: &Path) -> PathBuf {
-    if let Ok(rest) = path.strip_prefix("~")
-        && let Some(home) = std::env::home_dir()
-    {
-        return home.join(rest);
+    match std::env::home_dir() {
+        Some(home) => expand_tilde_from(path, &home),
+        None => path.to_path_buf(),
     }
-    path.to_path_buf()
+}
+
+/// Tilde expansion against an explicit home directory — the test seam, so the
+/// component logic is exercised without mutating the process environment.
+///
+/// `Path::strip_prefix` matches whole components, not text: on Windows both `/`
+/// and `\` are separators, so `~/sub` and `~\sub` each split into `["~", "sub"]`
+/// and expand the same way. A leading `~name` is a single component and is left
+/// untouched — we deliberately don't resolve other users' home directories.
+fn expand_tilde_from(path: &Path, home: &Path) -> PathBuf {
+    match path.strip_prefix("~") {
+        Ok(rest) => home.join(rest),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+/// Joins a relative filename onto `dir` with native path separators, even when
+/// the filename embeds `/` folder markers (custom naming mode nests the title in
+/// subfolders). `Path::join` keeps an embedded `/` verbatim, so on Windows it
+/// would produce — and the DB would then store — a mixed `C:\dir\sub/file`;
+/// pushing each segment yields a clean `C:\dir\sub\file`. A no-op on Unix, where
+/// `/` is already the separator.
+pub(crate) fn join_relative(dir: &Path, relative: &str) -> PathBuf {
+    let mut path = dir.to_path_buf();
+    for segment in relative.split('/').filter(|segment| !segment.is_empty()) {
+        path.push(segment);
+    }
+    path
 }
 
 /// Computes the base filename (relative to `download_dir`, may contain `/`
@@ -341,6 +367,119 @@ fn truncate_filename(name: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Tilde expansion is component-based, so a Unix CI never exercises the
+    // Windows separator path — these assert the real resolved paths on each
+    // platform (not just that it compiles). `expand_tilde_from` takes an
+    // explicit home so the test is deterministic and env-free.
+
+    #[cfg(not(windows))]
+    #[test]
+    fn tilde_expands_against_home() {
+        let home = PathBuf::from("/home/x");
+        // The `~/Audible` default resolves under the home directory.
+        assert_eq!(
+            expand_tilde_from(Path::new("~/Audible"), &home),
+            PathBuf::from("/home/x/Audible")
+        );
+        // A bare `~` is the home directory itself.
+        assert_eq!(expand_tilde_from(Path::new("~"), &home), home);
+        // Backslash is not a separator on Unix, so `~\x` is one literal
+        // component and is left untouched.
+        assert_eq!(
+            expand_tilde_from(Path::new(r"~\Audiobooks"), &home),
+            PathBuf::from(r"~\Audiobooks")
+        );
+        // An absolute path and a `~name` component are never rewritten.
+        assert_eq!(
+            expand_tilde_from(Path::new("/data/x"), &home),
+            PathBuf::from("/data/x")
+        );
+        assert_eq!(
+            expand_tilde_from(Path::new("~alice"), &home),
+            PathBuf::from("~alice")
+        );
+    }
+
+    // Windows accepts both separators after the tilde. `~\Audiobooks` is exactly
+    // what a Windows user types at the setup prompt (verified live 2026-07-15:
+    // `~/Audible` landed in `C:\Users\marcel\Audible`).
+    #[cfg(windows)]
+    #[test]
+    fn tilde_expands_with_both_separators() {
+        let home = PathBuf::from(r"C:\Users\x");
+        assert_eq!(
+            expand_tilde_from(Path::new("~/Audible"), &home),
+            PathBuf::from(r"C:\Users\x\Audible")
+        );
+        assert_eq!(
+            expand_tilde_from(Path::new(r"~\Audiobooks"), &home),
+            PathBuf::from(r"C:\Users\x\Audiobooks")
+        );
+        assert_eq!(expand_tilde_from(Path::new("~"), &home), home);
+        // An absolute Windows path and a `~name` component are never rewritten.
+        assert_eq!(
+            expand_tilde_from(Path::new(r"D:\media\x"), &home),
+            PathBuf::from(r"D:\media\x")
+        );
+        assert_eq!(
+            expand_tilde_from(Path::new("~alice"), &home),
+            PathBuf::from("~alice")
+        );
+    }
+
+    // Path composition must use native separators. The naming engine's `/`
+    // folder markers would otherwise survive verbatim in the joined PathBuf —
+    // displayed and stored as a mixed `C:\dir\sub/file` on Windows (verified
+    // live 2026-07-15). Component-based `PathBuf` equality hides that, so these
+    // assert the exact rendered string as well.
+
+    #[cfg(not(windows))]
+    #[test]
+    fn join_relative_uses_native_separators() {
+        // A nested (custom-mode) filename.
+        let joined = join_relative(Path::new("/dl"), "series/title.AAX_44_128.aaxc");
+        assert_eq!(joined, PathBuf::from("/dl/series/title.AAX_44_128.aaxc"));
+        assert_eq!(joined.to_string_lossy(), "/dl/series/title.AAX_44_128.aaxc");
+        // Deeper nesting.
+        assert_eq!(
+            join_relative(Path::new("/dl"), "a/b/c.aaxc"),
+            PathBuf::from("/dl/a/b/c.aaxc")
+        );
+        // A flat (no-folder) filename is joined unchanged.
+        assert_eq!(
+            join_relative(Path::new("/dl"), "title.aaxc"),
+            PathBuf::from("/dl/title.aaxc")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn join_relative_uses_native_separators() {
+        // The `/` folder marker becomes a backslash — not a mixed path.
+        let joined = join_relative(Path::new(r"C:\dl"), "series/title.AAX_44_128.aaxc");
+        assert_eq!(joined, PathBuf::from(r"C:\dl\series\title.AAX_44_128.aaxc"));
+        // The exact string form is what a mixed-separator bug would break.
+        assert_eq!(
+            joined.to_string_lossy(),
+            r"C:\dl\series\title.AAX_44_128.aaxc"
+        );
+        assert!(
+            !joined.to_string_lossy().contains('/'),
+            "{}",
+            joined.display()
+        );
+        // Deeper nesting stays native throughout.
+        assert_eq!(
+            join_relative(Path::new(r"C:\dl"), "a/b/c.aaxc"),
+            PathBuf::from(r"C:\dl\a\b\c.aaxc")
+        );
+        // A flat (no-folder) filename is joined unchanged.
+        assert_eq!(
+            join_relative(Path::new(r"C:\dl"), "title.aaxc"),
+            PathBuf::from(r"C:\dl\title.aaxc")
+        );
+    }
 
     /// A template context with every catalog variable present (empty by
     /// default), overridden by `pairs`. Building from the catalog also guards

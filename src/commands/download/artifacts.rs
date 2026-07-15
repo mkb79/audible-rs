@@ -7,6 +7,7 @@ use anyhow::{Context as _, Result, bail};
 
 use crate::config::ctx::Ctx;
 use crate::models::content::{DownloadLicense, Voucher};
+use crate::naming::join_relative;
 
 use super::item::{record_download, variant_recorded};
 use super::*;
@@ -33,8 +34,8 @@ pub(super) async fn download_audio(
     // of the same title do not overwrite each other on disk.
     let format = license.content_format.as_deref().filter(|f| !f.is_empty());
     let planned = match format {
-        Some(format) => dir.join(format!("{base}.{format}.aaxc")),
-        None => dir.join(format!("{base}.aaxc")),
+        Some(format) => join_relative(dir, &format!("{base}.{format}.aaxc")),
+        None => join_relative(dir, &format!("{base}.aaxc")),
     };
 
     // The on-disk extension follows the response Content-Type: the plain,
@@ -161,7 +162,7 @@ pub(super) async fn write_chapters(
     )
     .await
     .context("could not fetch chapter metadata")?;
-    let dest = dir.join(format!("{base}.chapters_{token}.json"));
+    let dest = join_relative(dir, &format!("{base}.chapters_{token}.json"));
     std::fs::write(&dest, serde_json::to_vec_pretty(&chapters)?)
         .with_context(|| format!("could not write {}", dest.display()))?;
 
@@ -221,7 +222,7 @@ pub(super) async fn download_pdf(
         "https://www.audible.{}/companion-file/{asin}",
         locale.domain
     );
-    let dest = dir.join(format!("{base}.pdf"));
+    let dest = join_relative(dir, &format!("{base}.pdf"));
 
     // PDFs are small — no byte bar, just counted in the summary.
     let (_, dest) = match download_to_file(
@@ -308,7 +309,7 @@ pub(super) async fn download_covers(
             eprintln!("no cover at size {size} for this title");
             continue;
         };
-        let dest = dir.join(format!("{base}.cover_{size}.jpg"));
+        let dest = join_relative(dir, &format!("{base}.cover_{size}.jpg"));
         // Covers are small — no byte bar, just counted in the summary.
         download_to_file(client, &url, &dest, None, force, None, &["image/jpeg"], &[]).await?;
 

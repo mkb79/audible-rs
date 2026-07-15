@@ -17,6 +17,7 @@ use crate::downloader::{
     DownloadOutcome, Quality, WidevineGrant, download_cenc_to_file, request_drmlicense,
     request_widevine_license,
 };
+use crate::naming::join_relative;
 use crate::widevine::{Cdm, ContentKey, Device, mpd};
 
 /// Loads the account's configured Widevine CDM. Returns the client plus the
@@ -153,7 +154,7 @@ pub(super) async fn download_audio_widevine(
         WidevineGrant::Widevine(license) => license,
         WidevineGrant::Mpeg(mpeg) => {
             eprintln!("{asin}: no Widevine asset — downloading the plain MP3");
-            let dest = dir.join(format!("{base}.{}.mp3", mpeg.content_format));
+            let dest = join_relative(dir, &format!("{base}.{}.mp3", mpeg.content_format));
             let (_, dest) = download_cenc_to_file(
                 &mpeg.offline_url,
                 &dest,
@@ -196,7 +197,7 @@ pub(super) async fn download_audio_widevine(
         super::request_kind::resolved(super::request_kind::Grant::Widevine, xhe, quality);
 
     // 2. content key (+ `.wvkey` sidecar next to the encrypted file).
-    let enc_path = dir.join(format!("{base}.{format}.cenc"));
+    let enc_path = join_relative(dir, &format!("{base}.{format}.cenc"));
     let wvkey_path = enc_path.with_extension("wvkey");
     let key = match read_wvkey(&wvkey_path) {
         Some(key) => key,
@@ -247,7 +248,10 @@ pub(super) async fn download_audio_widevine(
             eprintln!("{asin}: skipping decrypt — {format} already decrypted (use --force)");
             return Ok((written, pdf_url));
         }
-        let out = dir.join(format!("{base}.{format}.{}", decrypted_ext(&stream.codec)));
+        let out = join_relative(
+            dir,
+            &format!("{base}.{format}.{}", decrypted_ext(&stream.codec)),
+        );
         let kid = hex::encode(key.kid);
         let key_hex = hex::encode(&*key.key);
         eprintln!("decrypting {} with {} …", enc_dest.display(), tool.label());

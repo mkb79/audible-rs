@@ -9,7 +9,9 @@ use clap::{Arg, ArgAction};
 
 use crate::commands::prompt::confirm;
 use crate::config::ctx::Ctx;
-use crate::naming::{artifact_suffix, download_dir, expand_tilde, resolve_base, template_context};
+use crate::naming::{
+    artifact_suffix, download_dir, expand_tilde, join_relative, resolve_base, template_context,
+};
 
 fn filename_mode_from_str(value: &str) -> crate::config::schema::FilenameMode {
     use crate::config::schema::FilenameMode;
@@ -180,10 +182,13 @@ pub(super) async fn reorganize(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()>
             )?;
             let old = PathBuf::from(&entry.file_path);
             let ext = old.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let new = target_dir.join(format!(
-                "{base}{}",
-                artifact_suffix(&entry.kind, &entry.content_format, ext)
-            ));
+            let new = join_relative(
+                &target_dir,
+                &format!(
+                    "{base}{}",
+                    artifact_suffix(&entry.kind, &entry.content_format, ext)
+                ),
+            );
             if old == new {
                 continue;
             }
@@ -219,7 +224,7 @@ pub(super) async fn reorganize(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()>
                 &values,
             )?;
             let old = PathBuf::from(&path);
-            let new = target_dir.join(format!("{base}.annot"));
+            let new = join_relative(&target_dir, &format!("{base}.annot"));
             if old == new {
                 continue;
             }

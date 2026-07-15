@@ -88,6 +88,44 @@ mod tests {
         );
     }
 
+    // The Windows branches (APPDATA / LOCALAPPDATA) that a Unix CI never
+    // reaches — asserted here so the Windows build really tests them, not just
+    // compiles them.
+    #[cfg(windows)]
+    #[test]
+    fn appdata_dirs_on_windows() {
+        assert_eq!(
+            config_dir_from(
+                env_with(&[("APPDATA", r"C:\\Users\\x\\AppData\\Roaming")]),
+                PathBuf::from(r"C:\\Users\\x")
+            ),
+            PathBuf::from(r"C:\\Users\\x\\AppData\\Roaming\\audible")
+        );
+        assert_eq!(
+            data_dir_from(
+                env_with(&[("LOCALAPPDATA", r"C:\\Users\\x\\AppData\\Local")]),
+                PathBuf::from(r"C:\\Users\\x")
+            ),
+            PathBuf::from(r"C:\\Users\\x\\AppData\\Local\\audible")
+        );
+    }
+
+    // AUDIBLE_CONFIG_DIR wins over %APPDATA%, same as it wins over XDG on Unix.
+    #[cfg(windows)]
+    #[test]
+    fn explicit_override_beats_appdata_on_windows() {
+        assert_eq!(
+            config_dir_from(
+                env_with(&[
+                    ("AUDIBLE_CONFIG_DIR", r"D:\\cfg"),
+                    ("APPDATA", r"C:\\Users\\x\\AppData\\Roaming"),
+                ]),
+                PathBuf::from(r"C:\\Users\\x")
+            ),
+            PathBuf::from(r"D:\\cfg")
+        );
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn xdg_config_home_is_respected() {
