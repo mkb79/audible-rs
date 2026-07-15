@@ -141,7 +141,9 @@ fn read_or_empty(path: &Path) -> Result<String> {
     }
 }
 
-/// Writes `content` to `path` with `0600` permissions (parent dirs created).
+/// Writes `content` to `path` with owner-only (`0o600`) permissions (parent
+/// dirs created). On Windows the mode is a no-op — the `passwords` file rests on
+/// user-profile isolation, not an ACL (AUD-198).
 fn write_0600(path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)

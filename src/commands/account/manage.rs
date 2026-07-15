@@ -476,9 +476,11 @@ pub(super) async fn export(ctx: &Ctx, args: ExportArgs) -> Result<()> {
     Ok(())
 }
 
-/// Writes export content with owner-only permissions (0600). Without
-/// `force` the create fails when the file already exists (`create_new`,
-/// no TOCTOU window); with it, permissions are tightened afterwards too.
+/// Writes export content with owner-only permissions (`0o600`) on Unix; on
+/// Windows the mode is a no-op — the exported auth file rests on user-profile
+/// isolation, not an ACL (AUD-198). Without `force` the create fails when the
+/// file already exists (`create_new`, no TOCTOU window); with it, permissions
+/// are tightened afterwards too.
 fn write_export_file(path: &std::path::Path, content: &[u8], force: bool) -> std::io::Result<()> {
     use std::io::Write as _;
     let mut options = std::fs::OpenOptions::new();

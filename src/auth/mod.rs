@@ -904,8 +904,9 @@ async fn read_file(path: PathBuf) -> Result<Vec<u8>, AuthError> {
         .map_err(AuthError::Io)
 }
 
-/// Writes via a temp file next to the target plus rename, with owner
-/// only permissions on Unix.
+/// Writes via a temp file next to the target plus rename, with owner-only
+/// (`0o600`) permissions on Unix. On Windows the mode is a no-op — the auth
+/// envelope rests on user-profile isolation, not an ACL (AUD-198).
 fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
 

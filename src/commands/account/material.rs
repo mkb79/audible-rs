@@ -295,7 +295,9 @@ fn set_widevine_cdm(ctx: &Ctx, account: &str, path: &std::path::Path) -> Result<
     Ok(())
 }
 
-/// Writes bytes to a 0600 file (secrets: the `.wvd`).
+/// Writes bytes to an owner-only (`0o600`) file (secrets: the `.wvd`). On
+/// Windows the mode is a no-op — the file rests on user-profile isolation, not
+/// an ACL (AUD-198).
 #[cfg(unix)]
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;

@@ -37,7 +37,9 @@ impl Tool {
 /// missing/too-old tool fails before any download starts.
 pub(super) async fn select(backend: DecryptBackend) -> Result<Tool> {
     match backend {
-        DecryptBackend::Aaxclean => aaxclean_path().map(Tool::Aaxclean).context(NO_AAXCLEAN),
+        DecryptBackend::Aaxclean => aaxclean_path()
+            .map(Tool::Aaxclean)
+            .with_context(|| format!("{NO_AAXCLEAN}{INSTALL_HINT}")),
         DecryptBackend::Ffmpeg => usable_ffmpeg().await,
         DecryptBackend::Auto => {
             if let Some(path) = aaxclean_path() {
@@ -47,7 +49,7 @@ pub(super) async fn select(backend: DecryptBackend) -> Result<Tool> {
             } else {
                 bail!(
                     "no decrypt tool found — install aaxclean-cli or ffmpeg (≥ 4.4), \
-                     or set AUDIBLE_AAXCLEAN_CLI / AUDIBLE_FFMPEG"
+                     or set AUDIBLE_AAXCLEAN_CLI / AUDIBLE_FFMPEG{INSTALL_HINT}"
                 )
             }
         }
@@ -57,10 +59,20 @@ pub(super) async fn select(backend: DecryptBackend) -> Result<Tool> {
 const NO_AAXCLEAN: &str =
     "aaxclean-cli not found — install it or set AUDIBLE_AAXCLEAN_CLI to its path";
 
+/// Where to obtain a decrypt tool. Empty off Windows, where "install ffmpeg /
+/// aaxclean-cli" is already actionable; on Windows the tools are less obvious,
+/// so point at winget and the projects' releases.
+#[cfg(windows)]
+const INSTALL_HINT: &str = " (on Windows: `winget install ffmpeg`, or a gyan.dev \
+     build; aaxclean-cli from its GitHub releases)";
+#[cfg(not(windows))]
+const INSTALL_HINT: &str = "";
+
 /// ffmpeg, but only if it supports the aaxc demuxer (`-audible_key`, ≥ 4.4).
 async fn usable_ffmpeg() -> Result<Tool> {
-    let path =
-        ffmpeg_path().context("ffmpeg not found — install it or set AUDIBLE_FFMPEG to its path")?;
+    let path = ffmpeg_path().with_context(|| {
+        format!("ffmpeg not found — install it or set AUDIBLE_FFMPEG to its path{INSTALL_HINT}")
+    })?;
     match ffmpeg_version(&path).await {
         // Unparseable version (e.g. a git build) → assume recent enough.
         None => Ok(Tool::Ffmpeg(path)),
