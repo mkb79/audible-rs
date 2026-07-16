@@ -92,6 +92,15 @@ fn split_csv(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// The first item that is not a cover size, if any. `parse_cover_sizes` accepts
+/// only positive px, and the answer is a **list** — so each item is checked on
+/// its own: `500,900` is two sizes, not one unparsable number.
+fn invalid_cover_size(sizes: &[String]) -> Option<&String> {
+    sizes
+        .iter()
+        .find(|size| !size.parse::<u32>().is_ok_and(|px| px > 0))
+}
+
 fn setup(ctx: &Ctx) -> Result<()> {
     let term = console::Term::stderr();
     if !term.is_term() {
@@ -141,10 +150,7 @@ fn setup(ctx: &Ctx) -> Result<()> {
         let sizes = split_csv(&value);
         if sizes.is_empty() {
             eprintln!("pick at least one size");
-        } else if let Some(bad) = sizes
-            .iter()
-            .find(|size| !size.parse::<u32>().is_ok_and(|px| px > 0))
-        {
+        } else if let Some(bad) = invalid_cover_size(&sizes) {
             eprintln!("invalid cover size {bad:?} — use positive numbers of px, e.g. 500,900");
         } else {
             break value;
@@ -474,6 +480,41 @@ change_retention_days = 90
                 "{picked:?} is not offered by the menu"
             );
         }
+    }
+
+    /// Cover sizes are a **list**, so the check is per item — `500,900` is two
+    /// sizes, not one unparsable number. (Validating the raw answer as a single
+    /// integer would reject every multi-size setup, which the config, the
+    /// `--cover-size` flag and `settings set` all support.)
+    #[test]
+    fn cover_sizes_accept_a_comma_separated_list() {
+        let sizes = |value: &str| split_csv(value);
+
+        assert!(invalid_cover_size(&sizes("500")).is_none());
+        assert!(invalid_cover_size(&sizes("500,900")).is_none());
+        assert!(
+            invalid_cover_size(&sizes("500, 900 ,1215")).is_none(),
+            "surrounding spaces are trimmed away"
+        );
+
+        // Only the offending item is reported.
+        assert_eq!(
+            invalid_cover_size(&sizes("500,large")).map(String::as_str),
+            Some("large")
+        );
+        assert_eq!(
+            invalid_cover_size(&sizes("0")).map(String::as_str),
+            Some("0"),
+            "0 px is not a size"
+        );
+        assert_eq!(
+            invalid_cover_size(&sizes("-5")).map(String::as_str),
+            Some("-5")
+        );
+
+        // An empty answer splits to nothing; the caller handles that case.
+        assert!(sizes("").is_empty());
+        assert!(sizes(" , ").is_empty());
     }
 
     /// The counterpart: a question that *was* asked writes its key.
