@@ -954,10 +954,18 @@ impl Db {
             }
             // "This row misses at least one requested kind", for a row alias:
             // `b` over v_books (books + individually-subscribed episode items)
-            // and `e` over v_episodes (a followed show's episodes).
-            let missing_expr = |asin: &str, marketplace: &str| -> String {
+            // and `e` over v_episodes (a followed show's episodes). `doc_table`
+            // is where that row's document lives — neither view carries it.
+            let missing_expr = |asin: &str, marketplace: &str, doc_table: &str| -> String {
                 let mut parts: Vec<String> = Vec::new();
                 if has_other {
+                    // A kind that cannot exist for the row is never missing, so
+                    // the sweep never tries to fetch it (AUD-206).
+                    let possible = super::kind_possible_sql(&super::pdf_available_lookup_sql(
+                        doc_table,
+                        asin,
+                        marketplace,
+                    ));
                     parts.push(format!(
                         "EXISTS (
                              SELECT 1 FROM json_each(?) k
@@ -966,6 +974,7 @@ impl Db {
                                  WHERE d.asin = {asin} AND d.marketplace = {marketplace}
                                    AND d.kind = k.value
                              )
+                             AND {possible}
                          )"
                     ));
                 }
@@ -1014,7 +1023,7 @@ impl Db {
                        FROM v_books b
                       WHERE b.marketplace IN ({mp_placeholders})
                         AND ({}) {} {items_kind_clause}",
-                missing_expr("b.asin", "b.marketplace"),
+                missing_expr("b.asin", "b.marketplace", "items"),
                 not_archived_clause(include_archived),
             );
             if include_podcasts {
@@ -1033,7 +1042,7 @@ impl Db {
                             WHERE i.asin = e.asin AND i.marketplace = e.marketplace
                               AND i.is_deleted = 0
                         )",
-                    missing_expr("e.asin", "e.marketplace"),
+                    missing_expr("e.asin", "e.marketplace", "episodes"),
                     super::episode_not_archived_clause(include_archived),
                 ));
             }
@@ -2260,6 +2269,97 @@ mod tests {
             .await
             .unwrap()
             .is_empty()
+        );
+    }
+
+    /// A kind that cannot exist is never missing (AUD-206): `pdf` is reported
+    /// only for a title whose document advertises one — never for a book
+    /// without one, and never for a show (its episodes have none), which is
+    /// what used to make `download` probe the companion-file URL pointlessly.
+    #[tokio::test]
+    async fn missing_never_reports_a_pdf_that_cannot_exist() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        let doc = |asin: &str, extra: serde_json::Value| {
+            let mut value = serde_json::json!({
+                "asin": asin,
+                "title": asin,
+                "purchase_date": "2024-01-01",
+            });
+            for (key, item) in extra.as_object().unwrap() {
+                value[key] = item.clone();
+            }
+            crate::db::test_util::upsert(asin, value)
+        };
+        db.apply_page(
+            MP.into(),
+            vec![
+                doc("A1", serde_json::json!({"is_pdf_url_available": true})),
+                doc("A2", serde_json::json!({"is_pdf_url_available": false})),
+                doc(
+                    "P1",
+                    serde_json::json!({
+                        "content_type": "Podcast",
+                        "content_delivery_type": "PodcastParent",
+                        "is_pdf_url_available": false,
+                    }),
+                ),
+            ],
+            vec![],
+            default_log(),
+            None,
+        )
+        .await
+        .unwrap();
+        // The episode doc carries no PDF signal at all — absent must read as
+        // "no PDF", like an explicit `false`.
+        db.apply_episodes(
+            MP.into(),
+            "P1".into(),
+            vec![episode("E1", "Eins")],
+            ChangeRecording {
+                record: false,
+                mode: "delta",
+            },
+        )
+        .await
+        .unwrap();
+
+        // The list reports a PDF only where one can exist.
+        let rows = db
+            .books_missing_downloads(
+                vec![MP.to_owned()],
+                vec!["pdf".into()],
+                vec![],
+                u32::MAX,
+                0,
+                true,
+            )
+            .await
+            .unwrap();
+        let listed: Vec<&str> = rows.iter().map(|row| row.asin.as_str()).collect();
+        assert_eq!(
+            listed,
+            vec!["A1"],
+            "only the title advertising a PDF (not the PDF-less book, not the show)"
+        );
+
+        // The download sweep resolves to the same single leaf.
+        let leaves = db
+            .missing_download_asins(vec![MP.to_owned()], vec!["pdf".into()], vec![], true, true)
+            .await
+            .unwrap();
+        assert_eq!(leaves, vec!["A1".to_owned()]);
+
+        // And the episode drill-down reports no PDF for an episode.
+        let episodes = db
+            .episodes_missing_downloads(MP.into(), "P1".into(), vec!["pdf".into()], u32::MAX, 0)
+            .await
+            .unwrap();
+        assert!(
+            episodes.is_empty(),
+            "an episode has no PDF: {:?}",
+            episodes.iter().map(|e| &e.asin).collect::<Vec<_>>()
         );
     }
 

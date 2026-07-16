@@ -267,12 +267,24 @@ pub(super) async fn download_pdf(
 /// Whether the synced library doc advertises a companion PDF for the title
 /// (`is_pdf_url_available`, with a `pdf_url`-presence fallback). `None` when the
 /// doc is unavailable (DB closed, item not synced, `--no-db-write`).
+///
+/// Falls back to the `episodes` table (AUD-206): a child episode has no `items`
+/// row, so an items-only lookup returned `None` = "unknown" and the caller then
+/// probed the companion-file URL for **every** episode. Episode docs do carry
+/// the flag — verified across a real library, all of them report `false` — so
+/// the probe is now skipped.
 async fn library_pdf_flag(ctx: &Ctx, marketplace: &str, asin: &str) -> Option<bool> {
     let db = ctx.open_library_db().await.ok()?;
-    let doc = db
-        .item_doc(asin.to_owned(), marketplace.to_owned())
-        .await
-        .ok()??;
+    let doc = match db.item_doc(asin.to_owned(), marketplace.to_owned()).await {
+        Ok(Some(doc)) => doc,
+        Ok(None) => {
+            db.episode_doc(asin.to_owned(), marketplace.to_owned())
+                .await
+                .ok()??
+                .0
+        }
+        Err(_) => return None,
+    };
     let value: serde_json::Value = serde_json::from_str(&doc).ok()?;
     let flag = value
         .get("is_pdf_url_available")
