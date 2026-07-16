@@ -147,6 +147,15 @@ fn setup(ctx: &Ctx) -> Result<()> {
         &["auto", "aaxclean", "ffmpeg"],
         &enum_str(&default.decrypt_backend)?.unwrap_or_else(|| "auto".to_owned()),
     )?;
+    let include_podcasts = prompt_choice(
+        "Include podcasts in downloads (a show ASIN downloads all its episodes)",
+        &["yes", "no"],
+        if default.include_podcasts.unwrap_or(true) {
+            "yes"
+        } else {
+            "no"
+        },
+    )? == "yes";
 
     let auto_sync = prompt_choice(
         "Library auto-sync before local reads",
@@ -198,6 +207,7 @@ fn setup(ctx: &Ctx) -> Result<()> {
     let chapter_types = split_csv(&chapter_type);
     let decrypt = if decrypt { "true" } else { "false" };
     let decrypt_keep_source = if decrypt_keep_source { "true" } else { "false" };
+    let include_podcasts = if include_podcasts { "true" } else { "false" };
     write::edit_file(&ctx.config_file(), |content| {
         let mut fields: Vec<(&str, &str)> = vec![
             ("settings.default.download_dir", download_dir.as_str()),
@@ -210,6 +220,7 @@ fn setup(ctx: &Ctx) -> Result<()> {
             ("settings.default.decrypt", decrypt),
             ("settings.default.decrypt_keep_source", decrypt_keep_source),
             ("settings.default.decrypt_backend", decrypt_backend.as_str()),
+            ("settings.default.include_podcasts", include_podcasts),
             ("db.auto_sync", auto_sync.as_str()),
             ("db.sync_max_age", sync_max_age.as_str()),
             ("db.record_changes", record_changes),

@@ -63,18 +63,22 @@ fn parse_title_arg(raw: &str) -> Result<TitleQuery> {
 /// ASIN list. Per title: 0 hits → warning + skip; 1 → taken; many →
 /// interactive multi-select on a TTY, otherwise an "ambiguous" error.
 ///
-/// `include_episodes` (AUD-174) additionally matches the child episodes
-/// of followed podcasts (`episodes` table, LIKE), labeled `episode of
-/// <show>` in the picker — for consumers where an episode is a valid
-/// target (download, annotations, download records). Membership commands
-/// pass `false`: a child episode is not an own membership. Individually-
+/// `mode` (AUD-174, AUD-196) controls podcast handling:
+/// [`PodcastMode::ItemsOnly`] surfaces only items (membership commands — a
+/// child episode is not an own membership); [`PodcastMode::Episodes`]
+/// additionally matches the child episodes of followed podcasts (`episodes`
+/// table, LIKE), labeled `episode of <show>` (annotations, download records);
+/// [`PodcastMode::Download`] treats episodes as targets and expands a podcast
+/// parent to its episodes — an `--asin` parent becomes all its episodes and a
+/// `--title` parent is offered in the picker with its episodes beneath it —
+/// or, with `include == false`, drops all podcast content. Individually-
 /// subscribed episodes are `items` rows and are found either way.
 pub(crate) async fn resolve_asins(
     db: &crate::db::Db,
     marketplace: &str,
     asins: Vec<String>,
     titles: Vec<String>,
-    include_episodes: bool,
+    mode: PodcastMode,
 ) -> Result<Vec<String>> {
     let mut result: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -87,8 +91,17 @@ pub(crate) async fn resolve_asins(
 
     for asin in asins {
         let asin = asin.trim().to_owned();
-        if !asin.is_empty() {
-            push(asin);
+        if asin.is_empty() {
+            continue;
+        }
+        match mode {
+            // Download expands a podcast parent to its episodes (or drops
+            // podcast content under `--exclude-podcasts`); every other consumer
+            // takes the explicit ASIN verbatim (trusted as an exact id).
+            PodcastMode::Download { include } => {
+                resolve_asin_download(db, marketplace, &asin, include, &mut push).await?;
+            }
+            _ => push(asin),
         }
     }
 
@@ -101,51 +114,17 @@ pub(crate) async fn resolve_asins(
             eprintln!("ignoring empty --title");
             continue;
         }
-        // Candidates as (asin, display label): items first, then — when
-        // wanted — episode hits, deduped against the item hits (an
-        // individually-subscribed episode can be stored as both).
-        let mut candidates: Vec<(String, String)> = db
-            .search(
-                vec![marketplace.to_owned()],
-                Vec::new(), // all kinds — callers guard on kind themselves
-                tq.query.clone(),
-                tq.cap as u32,
-                true,
-            )
-            .await?
-            .into_iter()
-            .map(|row| {
-                let label = format!("{}  {}", row.asin, row.full_title);
-                (row.asin, label)
-            })
-            .collect();
-        if include_episodes {
-            let item_hits: std::collections::HashSet<String> =
-                candidates.iter().map(|(asin, _)| asin.clone()).collect();
-            for hit in db
-                .search_episodes(marketplace.to_owned(), tq.query.clone(), tq.cap as u32)
-                .await?
-            {
-                if !item_hits.contains(&hit.asin) {
-                    let label = format!(
-                        "{}  {}  (episode of {})",
-                        hit.asin, hit.full_title, hit.parent_title
-                    );
-                    candidates.push((hit.asin, label));
-                }
-            }
-        }
+        let candidates = title_candidates(db, marketplace, &tq, mode).await?;
         match candidates.len() {
             0 => {
                 eprintln!("no title matches {:?}", tq.query);
             }
             1 => {
-                push(candidates[0].0.clone());
+                choose(&candidates[0], &mut push);
             }
             _ => {
                 if console::Term::stderr().is_term() {
-                    let labels: Vec<&str> =
-                        candidates.iter().map(|(_, label)| label.as_str()).collect();
+                    let labels: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
                     // `report(false)`: the default echoes the whole chosen
                     // list back as one long line — we clear the picker and
                     // print a concise confirmation instead.
@@ -170,18 +149,33 @@ pub(crate) async fn resolve_asins(
                             tq.query
                         );
                         for i in selection {
-                            push(candidates[i].0.clone());
+                            choose(&candidates[i], &mut push);
                         }
                     }
                 } else {
-                    let listing: Vec<String> = candidates
+                    // Cap the dump — a single podcast show can expand to
+                    // hundreds of episode rows.
+                    const MAX_LISTED: usize = 20;
+                    let mut listing: Vec<String> = candidates
                         .iter()
-                        .map(|(_, label)| format!("  {label}"))
+                        .take(MAX_LISTED)
+                        .map(|c| format!("  {}", c.label))
                         .collect();
+                    if candidates.len() > MAX_LISTED {
+                        listing.push(format!("  … and {} more", candidates.len() - MAX_LISTED));
+                    }
+                    // A podcast show can only be taken whole non-interactively.
+                    let hint = if candidates.iter().any(|c| c.kind == "podcast") {
+                        "; a podcast show is among them — use --asin <ASIN> to take all its \
+                         episodes, or narrow the query"
+                    } else {
+                        "; pass --asin or run interactively"
+                    };
                     bail!(
-                        "{} titles match {:?}; pass --asin or run interactively:\n{}",
+                        "{} titles match {:?}{}:\n{}",
                         candidates.len(),
                         tq.query,
+                        hint,
                         listing.join("\n"),
                     );
                 }
@@ -194,6 +188,261 @@ pub(crate) async fn resolve_asins(
         eprintln!();
     }
     Ok(result)
+}
+
+/// How [`resolve_asins`] treats podcast shows and their episodes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PodcastMode {
+    /// Child episodes are not surfaced; podcast parents pass through as plain
+    /// items. (membership / collections / non-episode db paths)
+    ItemsOnly,
+    /// Child episodes are valid individual targets in title search; podcast
+    /// parents pass through unchanged, no expansion. (annotations, download
+    /// info, episode db paths)
+    Episodes,
+    /// `download`: episodes are targets and a podcast **parent expands to its
+    /// episodes** — a parent given by `--asin` becomes all its episodes; a
+    /// parent matched by `--title` is offered in the picker with its episodes
+    /// listed beneath it (AUD-196). When `include` is false, all podcast
+    /// parents and episodes are dropped from the result.
+    Download { include: bool },
+}
+
+impl PodcastMode {
+    /// Whether episode rows are surfaced as individual title-search targets.
+    fn surfaces_episodes(self) -> bool {
+        !matches!(self, PodcastMode::ItemsOnly)
+    }
+}
+
+/// A single row offered for a `--title` match.
+struct Candidate {
+    /// The row's own asin.
+    asin: String,
+    /// `book` | `podcast` | `episode`.
+    kind: &'static str,
+    /// Plain title (no episode-count suffix), used for the "expanding …" note.
+    title: String,
+    /// Preformatted picker label (mode-aware; a type column under `Download`).
+    label: String,
+    /// Episode asins to enqueue when a podcast **parent** is chosen; `None`
+    /// for a plain item (enqueue `asin`). A parent never enqueues its own
+    /// (un-downloadable) asin — only its episodes.
+    expand: Option<Vec<String>>,
+}
+
+/// Enqueues the asin(s) a chosen candidate stands for, announcing a podcast
+/// parent's expansion (or the absence of episodes).
+fn choose<F: FnMut(String)>(cand: &Candidate, push: &mut F) {
+    match &cand.expand {
+        None => push(cand.asin.clone()),
+        Some(eps) if eps.is_empty() => {
+            eprintln!(
+                "no episodes for \"{}\" in the library — run `library sync`",
+                cand.title
+            );
+        }
+        Some(eps) => {
+            eprintln!("expanding \"{}\" → {} episodes", cand.title, eps.len());
+            for asin in eps {
+                push(asin.clone());
+            }
+        }
+    }
+}
+
+/// Builds the `--title` candidate rows for one query under `mode`.
+async fn title_candidates(
+    db: &crate::db::Db,
+    marketplace: &str,
+    tq: &TitleQuery,
+    mode: PodcastMode,
+) -> Result<Vec<Candidate>> {
+    let (download, include) = match mode {
+        PodcastMode::Download { include } => (true, include),
+        _ => (false, false),
+    };
+    // `--exclude-podcasts` drops podcast content; the include path expands a
+    // show into its episodes.
+    let exclude = download && !include;
+    let include_show = download && include;
+    let rows = db
+        .search(
+            vec![marketplace.to_owned()],
+            Vec::new(), // all kinds — callers guard on kind themselves
+            tq.query.clone(),
+            tq.cap as u32,
+            true,
+        )
+        .await?;
+
+    // Only a lone podcast parent gets its episodes expanded into individual
+    // rows; with several shows in the results they stay collapsed (each still
+    // selectable as "all its episodes") to keep the picker readable.
+    let expand_rows = include_show && rows.iter().filter(|r| r.kind == "podcast").count() == 1;
+
+    let mut candidates: Vec<Candidate> = Vec::new();
+    let mut seen_asins: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for row in rows {
+        seen_asins.insert(row.asin.clone());
+        let kind: &'static str = match row.kind.as_str() {
+            "podcast" => "podcast",
+            "episode" => "episode",
+            _ => "book",
+        };
+        // --exclude-podcasts: no podcast content is a target.
+        if exclude && kind != "book" {
+            continue;
+        }
+        if include_show && kind == "podcast" {
+            let episodes = db
+                .episodes(marketplace.to_owned(), Some(row.asin.clone()), u32::MAX, 0)
+                .await?;
+            let ep_asins: Vec<String> = episodes.iter().map(|e| e.asin.clone()).collect();
+            candidates.push(Candidate {
+                label: format!(
+                    "{:<8} {}  {}  ({} episodes)",
+                    "podcast",
+                    row.asin,
+                    row.full_title,
+                    ep_asins.len()
+                ),
+                asin: row.asin,
+                kind: "podcast",
+                title: row.full_title,
+                expand: Some(ep_asins),
+            });
+            if expand_rows {
+                for e in episodes {
+                    seen_asins.insert(e.asin.clone());
+                    candidates.push(Candidate {
+                        label: format!("  {:<6} {}  {}", "episode", e.asin, e.full_title),
+                        asin: e.asin,
+                        kind: "episode",
+                        title: e.full_title,
+                        expand: None,
+                    });
+                }
+            }
+        } else {
+            candidates.push(Candidate {
+                label: if download {
+                    format!("{:<8} {}  {}", kind, row.asin, row.full_title)
+                } else {
+                    format!("{}  {}", row.asin, row.full_title)
+                },
+                asin: row.asin,
+                kind,
+                title: row.full_title,
+                expand: None,
+            });
+        }
+    }
+
+    // Episode text matches (individually-subscribed, or by episode title),
+    // deduped against item hits and any already-listed show episodes.
+    if mode.surfaces_episodes() && !exclude {
+        for hit in db
+            .search_episodes(marketplace.to_owned(), tq.query.clone(), tq.cap as u32)
+            .await?
+        {
+            if !seen_asins.insert(hit.asin.clone()) {
+                continue;
+            }
+            candidates.push(Candidate {
+                label: if download {
+                    format!(
+                        "{:<8} {}  {}  (episode of {})",
+                        "episode", hit.asin, hit.full_title, hit.parent_title
+                    )
+                } else {
+                    format!(
+                        "{}  {}  (episode of {})",
+                        hit.asin, hit.full_title, hit.parent_title
+                    )
+                },
+                asin: hit.asin,
+                kind: "episode",
+                title: hit.full_title,
+                expand: None,
+            });
+        }
+    }
+    Ok(candidates)
+}
+
+/// The library classification of an explicit `--asin` for `download` mode.
+enum AsinClass {
+    Parent {
+        title: String,
+    },
+    Episode,
+    /// A book, or an ASIN not (yet) in the library.
+    Other,
+}
+
+/// Classifies an explicit `--asin` against the local library.
+async fn classify_asin(db: &crate::db::Db, marketplace: &str, asin: &str) -> Result<AsinClass> {
+    if let Some(doc) = db.item_doc(asin.to_owned(), marketplace.to_owned()).await? {
+        let value: serde_json::Value =
+            serde_json::from_str(&doc).unwrap_or(serde_json::Value::Null);
+        return Ok(match crate::models::library::item_kind(&value) {
+            "podcast" => AsinClass::Parent {
+                title: crate::models::library::build_full_title(&value)
+                    .unwrap_or_else(|| asin.to_owned()),
+            },
+            "episode" => AsinClass::Episode,
+            _ => AsinClass::Other,
+        });
+    }
+    if db
+        .episode_doc(asin.to_owned(), marketplace.to_owned())
+        .await?
+        .is_some()
+    {
+        return Ok(AsinClass::Episode);
+    }
+    Ok(AsinClass::Other)
+}
+
+/// Resolves one explicit `--asin` under `download` mode: a podcast parent
+/// expands to all its episodes (or is dropped with `--exclude-podcasts`), an
+/// episode is dropped under `--exclude-podcasts`, and everything else passes
+/// through — books, plus AYCL/Plus titles not yet in the library (the
+/// unknown-ASIN gate is AUD-197).
+async fn resolve_asin_download<F: FnMut(String)>(
+    db: &crate::db::Db,
+    marketplace: &str,
+    asin: &str,
+    include: bool,
+    push: &mut F,
+) -> Result<()> {
+    match classify_asin(db, marketplace, asin).await? {
+        AsinClass::Parent { title } => {
+            if !include {
+                eprintln!("skipping podcast show {asin} (\"{title}\") — --exclude-podcasts");
+                return Ok(());
+            }
+            let episodes = db
+                .episodes(marketplace.to_owned(), Some(asin.to_owned()), u32::MAX, 0)
+                .await?;
+            if episodes.is_empty() {
+                eprintln!(
+                    "no episodes for \"{title}\" ({asin}) in the library — run `library sync`"
+                );
+            } else {
+                eprintln!("expanding \"{title}\" → {} episodes", episodes.len());
+                for e in episodes {
+                    push(e.asin);
+                }
+            }
+        }
+        AsinClass::Episode if !include => {
+            eprintln!("skipping podcast episode {asin} — --exclude-podcasts");
+        }
+        AsinClass::Episode | AsinClass::Other => push(asin.to_owned()),
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -220,6 +469,25 @@ mod tests {
                 "purchase_date": "2024-01-01",
                 "runtime_length_min": 60,
                 "language": "english",
+            })
+            .to_string(),
+            title: title.into(),
+            subtitle: None,
+            full_title: title.into(),
+            series: Vec::new(),
+        }
+    }
+
+    /// A podcast show (parent) item: `item_kind` classifies it as `podcast`.
+    fn parent(asin: &str, title: &str) -> UpsertItem {
+        UpsertItem {
+            asin: asin.into(),
+            doc: serde_json::json!({
+                "asin": asin,
+                "title": title,
+                "content_type": "Podcast",
+                "content_delivery_type": "PodcastParent",
+                "purchase_date": "2024-01-01",
             })
             .to_string(),
             title: title.into(),
@@ -292,28 +560,41 @@ mod tests {
             MP,
             vec!["A1".into(), "A1".into(), "ZZ".into()],
             vec![],
-            false,
+            PodcastMode::ItemsOnly,
         )
         .await
         .unwrap();
         assert_eq!(result, vec!["A1", "ZZ"]);
 
         // (b) title single match → taken
-        let result = resolve_asins(&db, MP, vec![], vec!["jedi".into()], false)
+        let result = resolve_asins(&db, MP, vec![], vec!["jedi".into()], PodcastMode::ItemsOnly)
             .await
             .unwrap();
         assert_eq!(result, vec!["A1"]);
 
         // (c) title no match → skip, empty result
-        let result = resolve_asins(&db, MP, vec![], vec!["nomatch".into()], false)
-            .await
-            .unwrap();
+        let result = resolve_asins(
+            &db,
+            MP,
+            vec![],
+            vec!["nomatch".into()],
+            PodcastMode::ItemsOnly,
+        )
+        .await
+        .unwrap();
         assert!(result.is_empty());
 
         // (d) title matching both items in non-TTY context → Err (ambiguous)
         // Tests run without a terminal, so the "many" branch bails.
         // "Jedi OR Star" uses FTS5 OR passthrough and matches both A1 and A2.
-        let err = resolve_asins(&db, MP, vec![], vec!["Jedi OR Star".into()], false).await;
+        let err = resolve_asins(
+            &db,
+            MP,
+            vec![],
+            vec!["Jedi OR Star".into()],
+            PodcastMode::ItemsOnly,
+        )
+        .await;
         assert!(
             err.is_err(),
             "expected ambiguous error for multi-match title"
@@ -325,7 +606,7 @@ mod tests {
             MP,
             vec!["A1".into()],
             vec!["jedi".into()], // also resolves to A1
-            false,
+            PodcastMode::ItemsOnly,
         )
         .await
         .unwrap();
@@ -333,9 +614,9 @@ mod tests {
     }
 
     /// Episode resolution (AUD-174): child episodes of a followed show are
-    /// found only with `include_episodes`; an individually-subscribed
-    /// episode (an `items` row) is found either way; an ASIN stored in
-    /// both tables is offered once.
+    /// found only when episodes are surfaced (`Episodes`/`Download`, not
+    /// `ItemsOnly`); an individually-subscribed episode (an `items` row) is
+    /// found either way; an ASIN stored in both tables is offered once.
     #[tokio::test]
     async fn resolve_asins_episode_scope() {
         let (_dir, db) = open_temp().await;
@@ -368,30 +649,139 @@ mod tests {
         .unwrap();
 
         // Child episode: invisible without the episode scope …
-        let result = resolve_asins(&db, MP, vec![], vec!["Anfang".into()], false)
-            .await
-            .unwrap();
+        let result = resolve_asins(
+            &db,
+            MP,
+            vec![],
+            vec!["Anfang".into()],
+            PodcastMode::ItemsOnly,
+        )
+        .await
+        .unwrap();
         assert!(
             result.is_empty(),
             "child episode must not match: {result:?}"
         );
         // … found with it.
-        let result = resolve_asins(&db, MP, vec![], vec!["Anfang".into()], true)
-            .await
-            .unwrap();
+        let result = resolve_asins(
+            &db,
+            MP,
+            vec![],
+            vec!["Anfang".into()],
+            PodcastMode::Episodes,
+        )
+        .await
+        .unwrap();
         assert_eq!(result, vec!["E1"]);
 
         // Individually-subscribed episode: an items row, found even
         // without the episode scope (the library-remove case).
-        let result = resolve_asins(&db, MP, vec![], vec!["Sonderfolge".into()], false)
-            .await
-            .unwrap();
+        let result = resolve_asins(
+            &db,
+            MP,
+            vec![],
+            vec!["Sonderfolge".into()],
+            PodcastMode::ItemsOnly,
+        )
+        .await
+        .unwrap();
         assert_eq!(result, vec!["E9"]);
         // With the scope it is offered once (deduped across the tables),
         // so the single-hit fast path still applies.
-        let result = resolve_asins(&db, MP, vec![], vec!["Sonderfolge".into()], true)
-            .await
-            .unwrap();
+        let result = resolve_asins(
+            &db,
+            MP,
+            vec![],
+            vec!["Sonderfolge".into()],
+            PodcastMode::Episodes,
+        )
+        .await
+        .unwrap();
         assert_eq!(result, vec!["E9"]);
+    }
+
+    /// Download mode (AUD-196): an explicit `--asin` podcast parent expands
+    /// to all its episodes; `--exclude-podcasts` drops podcast content; an
+    /// explicit child episode dedupes against the expansion.
+    #[tokio::test]
+    async fn resolve_asins_download_podcast_expansion() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        db.apply_page(
+            MP.into(),
+            vec![parent("P1", "Mein Podcast"), item("B1", "A Book")],
+            vec![],
+            default_log(),
+            None,
+        )
+        .await
+        .unwrap();
+        db.apply_episodes(
+            MP.into(),
+            "P1".into(),
+            vec![episode("E1", "Folge Eins"), episode("E2", "Folge Zwei")],
+            crate::db::ChangeRecording {
+                record: false,
+                mode: "delta",
+            },
+        )
+        .await
+        .unwrap();
+
+        // include: the show ASIN becomes all its episodes.
+        let mut result = resolve_asins(
+            &db,
+            MP,
+            vec!["P1".into()],
+            vec![],
+            PodcastMode::Download { include: true },
+        )
+        .await
+        .unwrap();
+        result.sort();
+        assert_eq!(result, vec!["E1".to_owned(), "E2".to_owned()]);
+
+        // exclude: the show ASIN is dropped entirely.
+        let result = resolve_asins(
+            &db,
+            MP,
+            vec!["P1".into()],
+            vec![],
+            PodcastMode::Download { include: false },
+        )
+        .await
+        .unwrap();
+        assert!(result.is_empty(), "show dropped under exclude: {result:?}");
+
+        // exclude also drops an explicit child episode.
+        let result = resolve_asins(
+            &db,
+            MP,
+            vec!["E1".into()],
+            vec![],
+            PodcastMode::Download { include: false },
+        )
+        .await
+        .unwrap();
+        assert!(
+            result.is_empty(),
+            "episode dropped under exclude: {result:?}"
+        );
+
+        // include: parent expansion + an explicit child + a book, deduped and
+        // order-preserving (book first, then the show's episodes once each).
+        let result = resolve_asins(
+            &db,
+            MP,
+            vec!["B1".into(), "P1".into(), "E1".into()],
+            vec![],
+            PodcastMode::Download { include: true },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            vec!["B1".to_owned(), "E1".to_owned(), "E2".to_owned()]
+        );
     }
 }

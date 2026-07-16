@@ -165,6 +165,12 @@ impl<'a> SettingsView<'a> {
         self.pick(|s| s.decrypt_keep_source).unwrap_or(true)
     }
 
+    /// Resolves whether `download` includes podcasts/episodes (built-in:
+    /// `true`; AUD-196).
+    pub fn include_podcasts(&self) -> bool {
+        self.pick(|s| s.include_podcasts).unwrap_or(true)
+    }
+
     /// Resolves the default cover size(s) (built-in: `["500"]`).
     pub fn cover_size(&self, cli: Option<Vec<String>>, env: Option<Vec<String>>) -> Vec<String> {
         cli.or(env)

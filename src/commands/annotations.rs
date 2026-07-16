@@ -136,7 +136,7 @@ async fn sync(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
                 marketplace,
                 asins.clone(),
                 titles.clone(),
-                true,
+                crate::commands::items::PodcastMode::Episodes,
             )
             .await?
         };
