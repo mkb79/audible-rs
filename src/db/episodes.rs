@@ -329,6 +329,104 @@ impl Db {
         })
         .await
     }
+
+    /// Episodes of one show that have no download record of at least one of
+    /// the given kinds (`library episodes <SHOW> --missing`), newest first —
+    /// the drill-down of the show roll-up that `library list --missing`
+    /// displays (AUD-205). Each row names the kinds it actually lacks.
+    ///
+    /// An episode is a **leaf**: unlike the show in
+    /// [`Db::books_missing_downloads`], which owns no record and rolls its
+    /// episodes up, the test here is simply "no record for this ASIN".
+    pub async fn episodes_missing_downloads(
+        &self,
+        marketplace: String,
+        parent_asin: String,
+        kinds: Vec<String>,
+        limit: u32,
+        offset: u64,
+    ) -> Result<Vec<MissingEpisodeRow>, DbError> {
+        let kinds_json = serde_json::to_string(&kinds).expect("strings serialize");
+        let offset = offset.min(i64::MAX as u64) as i64;
+        self.call(move |conn| {
+            let mut statement = conn.prepare_cached(
+                "SELECT asin, full_title, release_date, missing FROM (
+                     SELECT e.asin AS asin, e.full_title AS full_title,
+                            CAST(e.release_date AS TEXT) AS release_date,
+                            (SELECT group_concat(k.value)
+                             FROM json_each(?1) k
+                             WHERE NOT EXISTS (
+                                 SELECT 1 FROM downloads d
+                                 WHERE d.asin = e.asin AND d.marketplace = e.marketplace
+                                   AND d.kind = k.value
+                             )) AS missing
+                     FROM v_episodes e
+                     WHERE e.marketplace = ?2 AND e.parent_asin = ?3
+                 )
+                 WHERE missing IS NOT NULL
+                 ORDER BY release_date DESC, asin
+                 LIMIT ?4 OFFSET ?5",
+            )?;
+            let rows = statement
+                .query_map(
+                    rusqlite::params![kinds_json, marketplace, parent_asin, limit, offset],
+                    |row| {
+                        Ok(MissingEpisodeRow {
+                            asin: row.get(0)?,
+                            full_title: row.get(1)?,
+                            release_date: row.get(2)?,
+                            missing: row.get(3)?,
+                        })
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    /// Counts the rows [`Self::episodes_missing_downloads`] would return
+    /// without limit (for the `--page` end-of-pages message).
+    pub async fn count_episodes_missing_downloads(
+        &self,
+        marketplace: String,
+        parent_asin: String,
+        kinds: Vec<String>,
+    ) -> Result<u64, DbError> {
+        let kinds_json = serde_json::to_string(&kinds).expect("strings serialize");
+        self.call(move |conn| {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM v_episodes e
+                 WHERE e.marketplace = ?2 AND e.parent_asin = ?3
+                   AND EXISTS (
+                       SELECT 1 FROM json_each(?1) k
+                       WHERE NOT EXISTS (
+                           SELECT 1 FROM downloads d
+                           WHERE d.asin = e.asin AND d.marketplace = e.marketplace
+                             AND d.kind = k.value
+                       )
+                   )",
+                rusqlite::params![kinds_json, marketplace, parent_asin],
+                |row| row.get(0),
+            )?;
+            Ok(count as u64)
+        })
+        .await
+    }
+}
+
+/// One episode of a show that still lacks a download
+/// ([`Db::episodes_missing_downloads`]).
+#[derive(Debug, Clone)]
+pub struct MissingEpisodeRow {
+    /// Episode ASIN.
+    pub asin: String,
+    /// Episode title.
+    pub full_title: String,
+    /// Release date, if present in the document.
+    pub release_date: Option<String>,
+    /// The requested kinds this episode has no download record for.
+    pub missing: String,
 }
 
 #[cfg(test)]
@@ -345,6 +443,80 @@ mod tests {
     }
     #[allow(unused_imports)]
     use crate::db::*;
+
+    /// The episode drill-down (AUD-205): only the episodes actually lacking a
+    /// download are returned, each naming what it lacks — the leaf view of the
+    /// show roll-up that `library list --missing` displays.
+    #[tokio::test]
+    async fn episodes_missing_downloads_lists_only_undownloaded_episodes() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        db.apply_page(
+            MP.into(),
+            vec![item("P1", "A Show")],
+            vec![],
+            default_log(),
+            None,
+        )
+        .await
+        .unwrap();
+        db.apply_episodes(
+            MP.into(),
+            "P1".into(),
+            vec![
+                episode("E1", "Eins"),
+                episode("E2", "Zwei"),
+                episode("E3", "Drei"),
+            ],
+            no_recording(),
+        )
+        .await
+        .unwrap();
+        // Only E2 has its audio.
+        db.record_download(
+            MP.into(),
+            DownloadRecord {
+                asin: "E2".into(),
+                kind: "audio".into(),
+                acr: None,
+                content_format: String::new(),
+                variant: "original".into(),
+                request_kind: String::new(),
+                version: None,
+                sku: None,
+                file_path: "/dl/E2.aaxc".into(),
+                file_size: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut rows = db
+            .episodes_missing_downloads(MP.into(), "P1".into(), vec!["audio".into()], u32::MAX, 0)
+            .await
+            .unwrap();
+        rows.sort_by(|a, b| a.asin.cmp(&b.asin));
+        let asins: Vec<&str> = rows.iter().map(|row| row.asin.as_str()).collect();
+        assert_eq!(asins, vec!["E1", "E3"], "E2 is downloaded");
+        assert!(
+            rows.iter().all(|row| row.missing == "audio"),
+            "each row names what it lacks"
+        );
+        assert_eq!(
+            db.count_episodes_missing_downloads(MP.into(), "P1".into(), vec!["audio".into()])
+                .await
+                .unwrap(),
+            2,
+            "count matches the rows"
+        );
+        // Nothing was recorded for covers, so every episode lacks that kind.
+        assert_eq!(
+            db.count_episodes_missing_downloads(MP.into(), "P1".into(), vec!["cover".into()])
+                .await
+                .unwrap(),
+            3
+        );
+    }
 
     #[tokio::test]
     async fn episodes_lifecycle_with_parent_soft_delete() {

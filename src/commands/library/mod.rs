@@ -173,6 +173,20 @@ impl super::Command for LibraryCommand {
                             .value_name("SHOW")
                             .help("The followed podcast, by ASIN or title substring"),
                     )
+                    .arg(
+                        Arg::new("missing")
+                            .long("missing")
+                            .value_name("KINDS")
+                            .num_args(0..)
+                            .require_equals(true)
+                            .value_delimiter(',')
+                            .default_missing_value("audio")
+                            .value_parser(["audio", "chapter", "pdf", "cover", "annotation", "all"])
+                            .help(
+                                "Only episodes lacking a download record of these kinds \
+                                 (no value: audio; `all` covers every kind)",
+                            ),
+                    )
                     .arg(limit())
                     .arg(
                         Arg::new("page")
@@ -392,7 +406,10 @@ impl super::Command for LibraryCommand {
             }
             Some(("episodes", sub)) => {
                 let show = sub.get_one::<String>("show").expect("required").clone();
-                episodes::episodes(ctx, show, raw_limit(sub), page(sub)).await
+                // `--missing` present (with or without a value) switches the
+                // listing to the download drill-down.
+                let missing = sub.contains_id("missing").then(|| strings(sub, "missing"));
+                episodes::episodes(ctx, show, missing, raw_limit(sub), page(sub)).await
             }
             Some(("export", sub)) => {
                 let csv = sub.get_one::<String>("format").expect("default") == "csv";

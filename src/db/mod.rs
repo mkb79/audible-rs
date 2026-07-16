@@ -28,7 +28,7 @@ pub use changes::{ChangeFilter, ChangeRecord, ChangeRecording};
 pub use downloads::{
     DOWNLOAD_KINDS, DOWNLOAD_VARIANTS, DownloadEntry, DownloadRecord, LicenseGrant, ReorgDownload,
 };
-pub use episodes::{EpisodeHit, EpisodeRow, PodcastRow, UpsertEpisode};
+pub use episodes::{EpisodeHit, EpisodeRow, MissingEpisodeRow, PodcastRow, UpsertEpisode};
 pub use items::{
     ApplyOutcome, BookRow, BorrowedRow, ChangedItem, ExportBookRow, ItemRemoval,
     MissingDownloadsRow, SeriesRef, Settings, SyncLogEntry, UpsertItem, prepare_fts_query,

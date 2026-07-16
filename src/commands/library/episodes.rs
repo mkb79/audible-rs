@@ -16,7 +16,17 @@ use super::maybe_auto_sync;
 /// Lists the stored episodes of one followed show, newest first. The
 /// show is matched by ASIN or unique title substring across the selected
 /// marketplaces. Also used by the deprecated `podcasts episodes`.
-pub(crate) async fn episodes(ctx: &Ctx, show: String, limit: u32, page: u32) -> Result<()> {
+///
+/// `missing` (AUD-205) narrows the listing to the episodes lacking a download
+/// of those kinds, naming what each one lacks — the drill-down of the show
+/// roll-up that `library list --missing` displays.
+pub(crate) async fn episodes(
+    ctx: &Ctx,
+    show: String,
+    missing: Option<Vec<String>>,
+    limit: u32,
+    page: u32,
+) -> Result<()> {
     let db = ctx.open_library_db().await?;
     maybe_auto_sync(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;
@@ -53,6 +63,53 @@ pub(crate) async fn episodes(ctx: &Ctx, show: String, limit: u32, page: u32) -> 
     );
 
     let (query_limit, offset) = crate::commands::page_window(limit, page);
+    if let Some(kinds) = missing {
+        // Expand `all` and normalize to the canonical kind order, deduped —
+        // exactly as `library list --missing` does.
+        let all = kinds.iter().any(|kind| kind == "all");
+        let kinds: Vec<String> = crate::db::DOWNLOAD_KINDS
+            .iter()
+            .filter(|kind| all || kinds.iter().any(|k| k == *kind))
+            .map(|kind| (*kind).to_owned())
+            .collect();
+        let rows = if limit == 0 && page > 1 {
+            Vec::new() // page 1 holds everything; no need to query
+        } else {
+            db.episodes_missing_downloads(
+                marketplace.clone(),
+                parent.clone(),
+                kinds.clone(),
+                query_limit,
+                offset,
+            )
+            .await?
+        };
+        if rows.is_empty() {
+            if page > 1 {
+                let total = db
+                    .count_episodes_missing_downloads(marketplace, parent, kinds)
+                    .await?;
+                return Err(crate::commands::empty_page_error(page, limit, total));
+            }
+            eprintln!("no episodes lacking {} downloads", kinds.join("/"));
+        }
+        // Printed even when empty: `-o table` renders nothing, `-o json`
+        // still yields `[]` for consumers.
+        ctx.print(&Output::table(
+            vec!["asin", "title", "release_date", "missing"],
+            rows.into_iter()
+                .map(|episode| {
+                    vec![
+                        episode.asin,
+                        episode.full_title,
+                        episode.release_date.unwrap_or_default(),
+                        episode.missing,
+                    ]
+                })
+                .collect(),
+        ));
+        return Ok(());
+    }
     let episodes = if limit == 0 && page > 1 {
         Vec::new() // page 1 holds everything; no need to query
     } else {

@@ -66,6 +66,17 @@ pub(super) async fn list(ctx: &Ctx, kinds: Vec<String>, limit: u32, page: u32) -
                 eprintln!("library database is empty — run `audible library sync`");
             } else {
                 eprintln!("no items of kind {}", kinds.join("/"));
+                // `list` shows library memberships (the `items` table). A
+                // followed show's episodes live in `episodes` and surface here
+                // only when subscribed to individually, so `--kind episode` is
+                // almost always empty — point at what actually lists them
+                // (AUD-205).
+                if kinds.iter().any(|kind| kind == "episode") {
+                    eprintln!(
+                        "a followed show's episodes are not library items — \
+                         list them with `audible library episodes <SHOW>`"
+                    );
+                }
             }
         }
     }
@@ -121,7 +132,8 @@ pub(super) async fn list_missing(
             return Err(crate::commands::empty_page_error(page, limit, total));
         }
         eprintln!("no items lacking {} downloads", kinds.join("/"));
-        return Ok(());
+        // Falls through: `-o table` renders nothing for an empty table, while
+        // `-o json` still yields `[]` for consumers.
     }
     ctx.print(&crate::output::Output::table(
         vec!["mp", "asin", "title", "missing"],

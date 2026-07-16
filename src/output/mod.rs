@@ -76,6 +76,10 @@ impl Output {
 /// Renders the output in the requested format (no trailing newline).
 pub fn render(output: &Output, format: OutputFormat) -> String {
     match (output, format) {
+        // A header with no rows says nothing — the command's own stderr hint
+        // explains the empty result (AUD-205). Only the human format is
+        // suppressed: `Json` below keeps rendering `[]`, which consumers need.
+        (Output::Table { rows, .. }, OutputFormat::Table) if rows.is_empty() => String::new(),
         (Output::Table { columns, rows }, OutputFormat::Table) => {
             let mut table = ComfyTable::new();
             table.load_preset(presets::NOTHING);
@@ -138,7 +142,13 @@ pub fn render(output: &Output, format: OutputFormat) -> String {
 
 /// Renders to stdout.
 pub fn print(output: &Output, format: OutputFormat) {
-    println!("{}", render(output, format));
+    let rendered = render(output, format);
+    // Nothing to render (an empty table, or `plain` with no rows) prints
+    // nothing at all — not a lone header, not a blank line.
+    if rendered.is_empty() {
+        return;
+    }
+    println!("{rendered}");
 }
 
 #[cfg(test)]
@@ -175,6 +185,17 @@ mod tests {
     fn plain_format_is_tab_separated_without_headers() {
         let rendered = render(&sample_table(), OutputFormat::Plain);
         assert_eq!(rendered, "alice-de\tde\nalice-us\tus");
+    }
+
+    /// An empty table renders nothing for the human formats — a lone header
+    /// says nothing (AUD-205) — but `json` must keep emitting `[]`, which
+    /// consumers depend on.
+    #[test]
+    fn empty_table_is_silent_except_in_json() {
+        let empty = Output::table(vec!["name", "marketplace"], Vec::new());
+        assert_eq!(render(&empty, OutputFormat::Table), "");
+        assert_eq!(render(&empty, OutputFormat::Plain), "");
+        assert_eq!(render(&empty, OutputFormat::Json), "[]");
     }
 
     #[test]
