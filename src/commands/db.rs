@@ -344,8 +344,14 @@ async fn library_remove(
     // Destructive single-marketplace operation: -m must select one.
     let marketplace = ctx.marketplace_single()?;
 
-    let resolved =
-        crate::commands::items::resolve_asins(&db, &marketplace, asins, titles, false).await?;
+    let resolved = crate::commands::items::resolve_asins(
+        &db,
+        &marketplace,
+        asins,
+        titles,
+        crate::commands::items::PodcastMode::ItemsOnly,
+    )
+    .await?;
     if resolved.is_empty() {
         eprintln!("no items to remove");
         return Ok(());
@@ -728,10 +734,16 @@ async fn downloads_list(
     let asin_filter: Option<std::collections::HashSet<String>> = if has_source {
         let marketplace = ctx.marketplace_single()?;
         Some(
-            crate::commands::items::resolve_asins(&db, &marketplace, asins, titles, true)
-                .await?
-                .into_iter()
-                .collect(),
+            crate::commands::items::resolve_asins(
+                &db,
+                &marketplace,
+                asins,
+                titles,
+                crate::commands::items::PodcastMode::Episodes,
+            )
+            .await?
+            .into_iter()
+            .collect(),
         )
     } else {
         None
@@ -824,10 +836,16 @@ async fn downloads_remove(
     let asin_filter: Option<std::collections::HashSet<String>> = if has_source {
         let marketplace = ctx.marketplace_single()?;
         Some(
-            crate::commands::items::resolve_asins(&db, &marketplace, asins, titles, true)
-                .await?
-                .into_iter()
-                .collect(),
+            crate::commands::items::resolve_asins(
+                &db,
+                &marketplace,
+                asins,
+                titles,
+                crate::commands::items::PodcastMode::Episodes,
+            )
+            .await?
+            .into_iter()
+            .collect(),
         )
     } else {
         None

@@ -89,7 +89,9 @@ impl super::Command for DownloadCommand {
             .mut_arg("asin", |a| a.help_heading(H_SELECTION))
             .mut_arg("title", |a| a.help_heading(H_SELECTION))
             .mut_arg("missing", |a| a.help_heading(H_SELECTION))
-            .mut_arg("include_archived", |a| a.help_heading(H_SELECTION));
+            .mut_arg("include_archived", |a| a.help_heading(H_SELECTION))
+            .mut_arg("include_podcasts", |a| a.help_heading(H_SELECTION))
+            .mut_arg("exclude_podcasts", |a| a.help_heading(H_SELECTION));
         cmd.arg(
                 Arg::new("kind")
                     .help_heading(H_ARTIFACTS)
@@ -322,12 +324,23 @@ impl super::Command for DownloadCommand {
         // `download` operates on a single marketplace (one host per
         // request); `-m` must resolve to exactly one.
         let marketplace = ctx.marketplace_single()?;
+        // Podcast inclusion (AUD-196): the flag overrides the settings default.
+        let include_podcasts = if matches.get_flag("include_podcasts") {
+            true
+        } else if matches.get_flag("exclude_podcasts") {
+            false
+        } else {
+            ctx.settings_view()
+                .map(|v| v.include_podcasts())
+                .unwrap_or(true)
+        };
         let asins = resolve_source(
             ctx,
             &marketplace,
             matches,
             &base_targets,
             request_kind::candidates(force_widevine, codec_xhe, quality),
+            include_podcasts,
         )
         .await?;
         if asins.is_empty() {
@@ -523,6 +536,22 @@ fn add_source_args(cmd: clap::Command) -> clap::Command {
                      (archive state is as of the last library sync)",
                 ),
         )
+        .arg(
+            Arg::new("include_podcasts")
+                .long("include-podcasts")
+                .action(ArgAction::SetTrue)
+                .conflicts_with("exclude_podcasts")
+                .help(
+                    "Include podcast shows and their episodes (default; overrides \
+                     config). A show given by --asin downloads all its episodes",
+                ),
+        )
+        .arg(
+            Arg::new("exclude_podcasts")
+                .long("exclude-podcasts")
+                .action(ArgAction::SetTrue)
+                .help("Skip all podcast shows and episodes (overrides config)"),
+        )
         .group(
             // Not `required`: the `reorganize`/`orphans` subcommands need no
             // source. The download path enforces a source manually (see `run`).
@@ -543,6 +572,7 @@ async fn resolve_source(
     matches: &clap::ArgMatches,
     kinds: &BTreeSet<Artifact>,
     audio_request_kinds: Vec<String>,
+    include_podcasts: bool,
 ) -> Result<Vec<String>> {
     let asins: Vec<String> = matches
         .get_many::<String>("asin")
@@ -565,6 +595,7 @@ async fn resolve_source(
                 kind_values.clone(),
                 audio_request_kinds.clone(),
                 include_archived,
+                include_podcasts,
             )
             .await?;
         if !include_archived {
@@ -574,6 +605,7 @@ async fn resolve_source(
                     kind_values,
                     audio_request_kinds,
                     true,
+                    include_podcasts,
                 )
                 .await?;
             let skipped = unfiltered.len().saturating_sub(asins.len());
@@ -590,7 +622,16 @@ async fn resolve_source(
         .get_many::<String>("title")
         .map(|values| values.cloned().collect())
         .unwrap_or_default();
-    crate::commands::items::resolve_asins(&db, marketplace, asins, titles, true).await
+    crate::commands::items::resolve_asins(
+        &db,
+        marketplace,
+        asins,
+        titles,
+        crate::commands::items::PodcastMode::Download {
+            include: include_podcasts,
+        },
+    )
+    .await
 }
 
 /// A `--kind` artifact.
@@ -827,6 +868,24 @@ mod tests {
         assert!(parse(&["download", "--missing", "--include-archived"]).is_ok());
         // `--asin` and `--title` together remain allowed.
         assert!(parse(&["download", "--asin", "B0ASIN", "--title", "foo"]).is_ok());
+    }
+
+    #[test]
+    fn include_and_exclude_podcasts_are_mutually_exclusive() {
+        use crate::commands::Command as _;
+        let parse = |args: &[&str]| DownloadCommand.clap().try_get_matches_from(args);
+        assert!(parse(&["download", "--asin", "B0", "--include-podcasts"]).is_ok());
+        assert!(parse(&["download", "--asin", "B0", "--exclude-podcasts"]).is_ok());
+        assert!(
+            parse(&[
+                "download",
+                "--asin",
+                "B0",
+                "--include-podcasts",
+                "--exclude-podcasts"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

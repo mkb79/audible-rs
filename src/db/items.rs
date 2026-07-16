@@ -932,6 +932,7 @@ impl Db {
         kinds: Vec<String>,
         audio_request_kinds: Vec<String>,
         include_archived: bool,
+        include_podcasts: bool,
     ) -> Result<Vec<String>, DbError> {
         let audio = kinds.iter().any(|kind| kind == "audio");
         let other: Vec<String> = kinds.into_iter().filter(|kind| kind != "audio").collect();
@@ -979,14 +980,24 @@ impl Db {
                     ));
                 }
             }
+            // A podcast parent is never downloadable (episodes-only), so it must
+            // never be a `--missing` target (AUD-196 — it otherwise always looks
+            // "missing audio"). `--exclude-podcasts` drops episodes too, leaving
+            // books only.
+            let podcast_clause = if include_podcasts {
+                " AND b.kind != 'podcast'"
+            } else {
+                " AND b.kind = 'book'"
+            };
             let sql = format!(
                 "SELECT b.asin FROM v_books b
                  WHERE b.marketplace IN ({})
-                   AND ({}) {}
+                   AND ({}) {}{}
                  ORDER BY b.purchase_date DESC, b.asin, b.marketplace",
                 in_placeholders(marketplaces.len()),
                 missing.join(" OR "),
-                not_archived_clause(include_archived)
+                not_archived_clause(include_archived),
+                podcast_clause,
             );
             let mut statement = conn.prepare_cached(&sql)?;
             let mut params: Vec<&dyn rusqlite::ToSql> = Vec::new();
@@ -2157,6 +2168,7 @@ mod tests {
                 vec!["audio".into()],
                 default_high(),
                 true,
+                true,
             )
             .await
             .unwrap();
@@ -2171,6 +2183,7 @@ mod tests {
                 vec!["audio".into()],
                 vec!["widevine-xhe-high".to_owned(), "mpeg".to_owned()],
                 true,
+                true,
             )
             .await
             .unwrap();
@@ -2184,6 +2197,7 @@ mod tests {
                 vec!["audio".into(), "cover".into()],
                 default_high(),
                 true,
+                true,
             )
             .await
             .unwrap();
@@ -2196,12 +2210,50 @@ mod tests {
                 vec!["us".to_owned()],
                 vec!["audio".into()],
                 default_high(),
-                true
+                true,
+                true,
             )
             .await
             .unwrap()
             .is_empty()
         );
+    }
+
+    /// A podcast parent is never a `--missing` target — it has no downloadable
+    /// audio of its own, so it must not be selected (AUD-196).
+    #[tokio::test]
+    async fn missing_download_asins_excludes_podcast_parents() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        let mut show = item("P1", "A Show");
+        let mut doc: serde_json::Value = serde_json::from_str(&show.doc).unwrap();
+        doc["content_type"] = serde_json::Value::String("Podcast".into());
+        doc["content_delivery_type"] = serde_json::Value::String("PodcastParent".into());
+        show.doc = doc.to_string();
+        let log = SyncLogEntry {
+            request_time_utc: now_iso_utc(),
+            response_time_utc: now_iso_utc(),
+            http_status: Some(200),
+            ..Default::default()
+        };
+        // A book (A1) and a podcast show (P1), neither with any download.
+        db.apply_page(MP.into(), vec![item("A1", "Book"), show], vec![], log, None)
+            .await
+            .unwrap();
+
+        // Even with podcasts included, the parent stays excluded (never
+        // downloadable); only the book is reported missing.
+        let asins = db
+            .missing_download_asins(
+                vec![MP.to_owned()],
+                vec!["audio".into()],
+                vec!["mpeg".to_owned()],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(asins, vec!["A1".to_owned()]);
     }
 
     /// Archived items are excluded from every missing-downloads query
@@ -2232,12 +2284,24 @@ mod tests {
         .unwrap();
 
         let asins = db
-            .missing_download_asins(vec![MP.to_owned()], vec!["audio".into()], vec![], false)
+            .missing_download_asins(
+                vec![MP.to_owned()],
+                vec!["audio".into()],
+                vec![],
+                false,
+                true,
+            )
             .await
             .unwrap();
         assert_eq!(asins, vec!["A2".to_owned()]);
         let mut all = db
-            .missing_download_asins(vec![MP.to_owned()], vec!["audio".into()], vec![], true)
+            .missing_download_asins(
+                vec![MP.to_owned()],
+                vec!["audio".into()],
+                vec![],
+                true,
+                true,
+            )
             .await
             .unwrap();
         all.sort();

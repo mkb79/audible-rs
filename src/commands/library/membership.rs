@@ -190,7 +190,14 @@ pub(super) async fn remove(
     // No episode hits here: a child episode of a followed show is not an
     // own membership (individually-subscribed episodes are items rows and
     // are found either way, AUD-174).
-    let asins = items::resolve_asins(&db, &marketplace, asins, titles, false).await?;
+    let asins = items::resolve_asins(
+        &db,
+        &marketplace,
+        asins,
+        titles,
+        items::PodcastMode::ItemsOnly,
+    )
+    .await?;
     if asins.is_empty() {
         bail!("nothing to remove — pass --asin or --title");
     }

@@ -169,6 +169,13 @@ pub struct Settings {
     /// Keep the source aaxc after a successful decrypt (built-in: `true`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decrypt_keep_source: Option<bool>,
+    /// Include podcast shows and their episodes in `download` (built-in:
+    /// `true`). When `false`, `download` drops podcast parents and episodes
+    /// from every selection (AUD-196). A podcast parent given by `--asin`
+    /// expands to all its episodes; `--exclude-podcasts` overrides this per
+    /// run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_podcasts: Option<bool>,
 }
 
 /// The reserved name of the fallback settings bundle.
