@@ -76,7 +76,8 @@ powershell -c "irm https://raw.githubusercontent.com/mkb79/audible-rs/main/insta
 
 Installs into `%LOCALAPPDATA%\Programs\audible-rs` (override with `-BinDir`) and
 adds that folder to your user `PATH`. Options: `-Pre`, `-Version <tag>`,
-`-Force`, `-NoModifyPath`. No script? See [Manual download](#manual-download).
+`-Force`, `-NoModifyPath`, `-Completions`. No script? See
+[Manual download](#manual-download).
 
 ---
 
@@ -199,9 +200,21 @@ audible completions zsh  > ~/.local/share/zsh/site-functions/_audible
 audible completions fish > ~/.config/fish/completions/audible.fish
 ```
 
-`audible completions <shell>` also covers `powershell` and `elvish`
-(print-and-redirect only). Or let the installer set it up in one step:
-`install.sh --completions` runs `--install` for the shells it finds.
+`audible completions <shell>` also covers `powershell` and `elvish`. Or let the
+installer set it up in one step: `install.sh --completions` runs `--install` for
+the shells it finds.
+
+**Windows (PowerShell).** PowerShell has no auto-loaded completions directory,
+so `--install` does not apply there — completion is registered from your profile
+instead. The installer sets it up for you: run it with `-Completions` (or
+`$env:AUDIBLE_COMPLETIONS=1` for the piped one-liner). That adds a line to your
+`$PROFILE` which loads completion from the current `audible` on every new shell,
+so upgrades need nothing further. To turn it on after the fact, re-run the
+installer with `-Completions`, or add that line to your profile yourself:
+
+```powershell
+audible completions powershell | Out-String | Invoke-Expression
+```
 
 ## Commands
 
