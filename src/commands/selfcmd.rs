@@ -29,8 +29,26 @@ const REPO_API: &str = "https://api.github.com/repos/mkb79/audible-rs";
 const RELEASES_URL: &str = "https://api.github.com/repos/mkb79/audible-rs/releases";
 /// The branch releases are cut from — the head `--unreleased` compares to.
 const DEFAULT_BRANCH: &str = "main";
-/// The installer one-liner printed as the upgrade hint.
+/// The installer the upgrade hint points at — `install.sh` on Unix, its
+/// PowerShell analog `install.ps1` on Windows.
+#[cfg(not(windows))]
 const INSTALL_URL: &str = "https://raw.githubusercontent.com/mkb79/audible-rs/main/install.sh";
+#[cfg(windows)]
+const INSTALL_URL: &str = "https://raw.githubusercontent.com/mkb79/audible-rs/main/install.ps1";
+
+/// The platform-appropriate upgrade one-liner printed by `self check`: the
+/// `curl … | sh` installer on Unix (honouring `--pre`), the PowerShell
+/// `irm … | iex` form on Windows (the piped one-liner takes no flags — `-Pre`
+/// lives on `install.ps1` itself).
+#[cfg(not(windows))]
+fn upgrade_hint(tracking_pre: bool) -> String {
+    let flag = if tracking_pre { " -s -- --pre" } else { "" };
+    format!("curl -fsSL {INSTALL_URL} | sh{flag}")
+}
+#[cfg(windows)]
+fn upgrade_hint(_tracking_pre: bool) -> String {
+    format!("irm {INSTALL_URL} | iex")
+}
 /// GitHub's unauthenticated rate limit, named in the fail-soft message so
 /// the user can make sense of a 403 (it is theirs to keep an eye on).
 const RATE_LIMIT_HINT: &str =
@@ -685,12 +703,11 @@ async fn run(
     }
 
     if let Mode::Check { changelog } = mode {
-        let flag = if tracking_pre { " -s -- --pre" } else { "" };
         println!();
         if !changelog {
             println!("Release notes:  audible self check --changelog");
         }
-        println!("Upgrade:        curl -fsSL {INSTALL_URL} | sh{flag}");
+        println!("Upgrade:        {}", upgrade_hint(tracking_pre));
     }
     Ok(())
 }
@@ -729,6 +746,31 @@ async fn fetch_comparison(repo_api: &str, base: &str, head: &str) -> Result<Comp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The upgrade hint is platform-split, so a Unix CI never sees the Windows
+    // branch — assert both against the real installer URL for the target.
+    #[cfg(not(windows))]
+    #[test]
+    fn upgrade_hint_is_the_shell_installer() {
+        assert!(INSTALL_URL.ends_with("install.sh"));
+        assert_eq!(
+            upgrade_hint(false),
+            format!("curl -fsSL {INSTALL_URL} | sh")
+        );
+        assert_eq!(
+            upgrade_hint(true),
+            format!("curl -fsSL {INSTALL_URL} | sh -s -- --pre")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn upgrade_hint_is_the_powershell_installer() {
+        assert!(INSTALL_URL.ends_with("install.ps1"));
+        // The piped one-liner takes no flags, so --pre does not change it.
+        assert_eq!(upgrade_hint(false), format!("irm {INSTALL_URL} | iex"));
+        assert_eq!(upgrade_hint(true), format!("irm {INSTALL_URL} | iex"));
+    }
 
     /// A Ctx over a throwaway config dir — `self` needs no account, it only
     /// uses the output format.

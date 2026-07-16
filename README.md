@@ -45,26 +45,48 @@ stay Unix-only — if you need those on Windows, run audible-rs under
 
 ### Prebuilt binary (recommended)
 
-Download and install the latest release binary for your platform:
+Pick your platform below. The installer downloads the release binary, verifies
+it against the published checksums, and puts `audible` on your `PATH`. By
+default it installs the newest **stable** release; while the project is in alpha
+(no stable release yet) it installs the newest pre-release, and once a stable
+release exists you can pass `--pre` / `-Pre` to keep tracking pre-releases.
+
+#### Linux / macOS
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mkb79/audible-rs/main/install.sh | sh
 ```
 
-It installs `audible` into `~/.local/bin` (override with `--bin-dir <dir>`)
-and verifies the download against the release checksums. By default it
-installs the latest **stable** release; while the project is in alpha (no
-stable release yet) it installs the newest pre-release, and once a stable
-release exists you can pass `--pre` to keep tracking pre-releases.
+Installs into `~/.local/bin` (override with `--bin-dir <dir>`). Options:
+`--pre`, `--version <tag>`, `--force`, `--completions`.
 
-On **Windows**, the shell installer is Linux/macOS only — grab the `.zip` from
-[Manual download](#manual-download) and run `audible.exe`.
+#### Windows
+
+PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/mkb79/audible-rs/main/install.ps1 | iex
+```
+
+Command Prompt (cmd) — run it through PowerShell:
+
+```bat
+powershell -c "irm https://raw.githubusercontent.com/mkb79/audible-rs/main/install.ps1 | iex"
+```
+
+Installs into `%LOCALAPPDATA%\Programs\audible-rs` (override with `-BinDir`) and
+adds that folder to your user `PATH`. Options: `-Pre`, `-Version <tag>`,
+`-Force`, `-NoModifyPath`, `-Completions`. No script? See
+[Manual download](#manual-download).
+
+---
 
 audible-rs is the successor to `audible-cli` and shares the command name
 `audible`. If you already have `audible-cli` installed, the installer asks
-before replacing its command (pass `--force` to skip, or `--bin-dir` to
-install elsewhere); the config directories are separate, so `audible-cli`'s
-data is left untouched. Replacing an older audible-rs is a silent upgrade.
+before replacing its command (pass `--force`/`-Force` to skip, or the bin-dir
+override to install elsewhere); the config directories are separate, so
+`audible-cli`'s data is left untouched. Replacing an older audible-rs is a
+silent upgrade.
 
 ### Homebrew
 
@@ -178,9 +200,21 @@ audible completions zsh  > ~/.local/share/zsh/site-functions/_audible
 audible completions fish > ~/.config/fish/completions/audible.fish
 ```
 
-`audible completions <shell>` also covers `powershell` and `elvish`
-(print-and-redirect only). Or let the installer set it up in one step:
-`install.sh --completions` runs `--install` for the shells it finds.
+`audible completions <shell>` also covers `powershell` and `elvish`. Or let the
+installer set it up in one step: `install.sh --completions` runs `--install` for
+the shells it finds.
+
+**Windows (PowerShell).** PowerShell has no auto-loaded completions directory,
+so `--install` does not apply there — completion is registered from your profile
+instead. The installer sets it up for you: run it with `-Completions` (or
+`$env:AUDIBLE_COMPLETIONS=1` for the piped one-liner). That adds a line to your
+`$PROFILE` which loads completion from the current `audible` on every new shell,
+so upgrades need nothing further. To turn it on after the fact, re-run the
+installer with `-Completions`, or add that line to your profile yourself:
+
+```powershell
+audible completions powershell | Out-String | Invoke-Expression
+```
 
 ## Commands
 
