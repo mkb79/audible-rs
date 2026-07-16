@@ -16,6 +16,12 @@ pub const DEFAULT_RESPONSE_GROUPS: &str = "badge_types,is_archived,is_finished,i
      product_plans,product_plan_details,profile_sharing,rating,relationships_v2,\
      sample,sku,pdf_url,series";
 
+/// The cover sizes every library sync requests — the list `audible-cli`
+/// inherited from the Audible app, hence its order rather than a sorted one.
+///
+/// **Do not trim it** (AUD-208): the small entries and the large ones resolve to
+/// different source images, and the largest is the base every other size is
+/// derived from without a further request. Dropping it degrades covers silently.
 const DEFAULT_IMAGE_SIZES: &str = "900,1215,252,558,408,500";
 
 /// Hard cap on concurrent resolution fetches (episode + catalog) across all

@@ -274,18 +274,7 @@ pub(super) async fn download_pdf(
 /// the flag — verified across a real library, all of them report `false` — so
 /// the probe is now skipped.
 async fn library_pdf_flag(ctx: &Ctx, marketplace: &str, asin: &str) -> Option<bool> {
-    let db = ctx.open_library_db().await.ok()?;
-    let doc = match db.item_doc(asin.to_owned(), marketplace.to_owned()).await {
-        Ok(Some(doc)) => doc,
-        Ok(None) => {
-            db.episode_doc(asin.to_owned(), marketplace.to_owned())
-                .await
-                .ok()??
-                .0
-        }
-        Err(_) => return None,
-    };
-    let value: serde_json::Value = serde_json::from_str(&doc).ok()?;
+    let value = stored_doc(ctx, marketplace, asin).await?;
     let flag = value
         .get("is_pdf_url_available")
         .and_then(serde_json::Value::as_bool)
@@ -345,8 +334,8 @@ pub(super) async fn download_covers(
     Ok(written)
 }
 
-/// Resolves a cover URL for `asin` at `size`: the stored library item's
-/// `product_images` first (no API call), then a catalog lookup.
+/// Resolves a cover URL for `asin` at `size`: derived from the stored
+/// `product_images` (no API call), else a catalog lookup.
 async fn cover_url(
     ctx: &Ctx,
     client: &crate::api::client::Client,
@@ -360,22 +349,235 @@ async fn cover_url(
     Ok(request_cover_url(client, marketplace, asin, size).await?)
 }
 
-/// Reads the cover URL for `size` from the stored item's `product_images`.
+/// Sizes at or below this resolve to a different, smaller source image than
+/// larger ones do; a URL for such a size cannot serve a bigger one — it would
+/// silently stay small (AUD-208).
+const SMALL_MASTER_MAX: u32 = 500;
+
+/// The cover URL for `size`, derived from the stored `product_images` without
+/// any request: the size is part of the URL, so restating it is enough
+/// (AUD-208). `None` falls through to the catalog.
 async fn cover_url_from_library(
     ctx: &Ctx,
     marketplace: &str,
     asin: &str,
     size: &str,
 ) -> Option<String> {
+    let doc = stored_doc(ctx, marketplace, asin).await?;
+    let images = doc.get("product_images")?.as_object()?;
+
+    // An exact hit is the API's own URL for that size — take it as-is.
+    if let Some(url) = images.get(size).and_then(serde_json::Value::as_str) {
+        return Some(url.to_owned());
+    }
+
+    rewrite_size_marker(anchor_url(images, wants_large_master(size)?)?, size)
+}
+
+/// Whether a size needs the larger source image — `native` and anything above
+/// [`SMALL_MASTER_MAX`] do. `None` for a value that is neither a number nor
+/// `native` (rejected long before this by `schema::validate_cover_size`).
+fn wants_large_master(size: &str) -> Option<bool> {
+    if size.eq_ignore_ascii_case(crate::config::schema::COVER_SIZE_NATIVE) {
+        return Some(true);
+    }
+    Some(size.parse::<u32>().ok()? > SMALL_MASTER_MAX)
+}
+
+/// The stored URL to derive a size from — the one **the API itself would use**,
+/// so the result is its answer rather than ours. (The small and large sources
+/// are separate images; whether they hold identical artwork is unverified, and
+/// following the same rule makes that question moot.)
+///
+/// A large size needs a large source: with only small ones stored, `None`
+/// (→ catalog) beats silently handing back a small image.
+fn anchor_url(
+    images: &serde_json::Map<String, serde_json::Value>,
+    wants_large: bool,
+) -> Option<&str> {
+    let sizes = || {
+        images
+            .iter()
+            .filter_map(|(key, value)| Some((key.parse::<u32>().ok()?, value.as_str()?)))
+    };
+    let picked = if wants_large {
+        sizes()
+            .filter(|(px, _)| *px > SMALL_MASTER_MAX)
+            .max_by_key(|(px, _)| *px)?
+    } else {
+        // Largest small-source URL; failing that, any stored one still renders
+        // the size correctly.
+        sizes()
+            .filter(|(px, _)| *px <= SMALL_MASTER_MAX)
+            .max_by_key(|(px, _)| *px)
+            .or_else(|| sizes().max_by_key(|(px, _)| *px))?
+    };
+    Some(picked.1)
+}
+
+/// Restates an image URL at `size`, or at the largest available for
+/// [`COVER_SIZE_NATIVE`].
+///
+/// The URLs are `{image_id}[.{transform}].{ext}`; the id is opaque and always
+/// comes from the API, never derived. Only the one transform shape we actually
+/// see is understood — anything else returns `None`, so the caller falls back
+/// rather than rewriting a URL whose other parts it would drop. A URL without a
+/// transform is already the largest, and a valid base to render from (AUD-208).
+fn rewrite_size_marker(url: &str, size: &str) -> Option<String> {
+    let (stem, extension) = url.rsplit_once('.')?;
+    // Split off a transform block if there is one; `base` is the image id
+    // (with its path), which is all we rebuild from.
+    let base = match stem.rsplit_once('.') {
+        Some((base, block)) if block.starts_with('_') && block.ends_with('_') => {
+            let inner = &block[1..block.len() - 1];
+            let digits = inner.strip_prefix("SL")?;
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return None; // a block we do not understand
+            }
+            base
+        }
+        // No block, or a stem whose last dot is not a transform: render from it
+        // as-is.
+        _ => stem,
+    };
+    Some(
+        if size.eq_ignore_ascii_case(crate::config::schema::COVER_SIZE_NATIVE) {
+            format!("{base}.{extension}")
+        } else {
+            format!("{base}._SL{size}_.{extension}")
+        },
+    )
+}
+
+/// The stored library document for an asin: an `items` row, else the `episodes`
+/// row. A child episode has no `items` row, so an items-only lookup would treat
+/// every episode as unknown (AUD-206).
+async fn stored_doc(ctx: &Ctx, marketplace: &str, asin: &str) -> Option<serde_json::Value> {
     let db = ctx.open_library_db().await.ok()?;
-    let doc = db
-        .item_doc(asin.to_owned(), marketplace.to_owned())
-        .await
-        .ok()??;
-    let value: serde_json::Value = serde_json::from_str(&doc).ok()?;
-    value
-        .get("product_images")?
-        .get(size)?
-        .as_str()
-        .map(str::to_owned)
+    let doc = match db.item_doc(asin.to_owned(), marketplace.to_owned()).await {
+        Ok(Some(doc)) => doc,
+        Ok(None) => {
+            db.episode_doc(asin.to_owned(), marketplace.to_owned())
+                .await
+                .ok()??
+                .0
+        }
+        Err(_) => return None,
+    };
+    serde_json::from_str(&doc).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const URL: &str = "https://m.media-amazon.com/images/I/EXAMPLEID01._SL1215_.jpg";
+
+    /// The URL carries the size, so restating it is how any size is obtained
+    /// without a request; dropping it yields the largest available (AUD-208).
+    #[test]
+    fn rewrites_or_strips_the_size_marker() {
+        assert_eq!(
+            rewrite_size_marker(URL, "700").unwrap(),
+            "https://m.media-amazon.com/images/I/EXAMPLEID01._SL700_.jpg"
+        );
+        // Beyond the size it was fetched as: a request above what exists
+        // simply yields the largest available.
+        assert_eq!(
+            rewrite_size_marker(URL, "2000").unwrap(),
+            "https://m.media-amazon.com/images/I/EXAMPLEID01._SL2000_.jpg"
+        );
+        // `native` = the largest available, whatever that turns out to be.
+        assert_eq!(
+            rewrite_size_marker(URL, crate::config::schema::COVER_SIZE_NATIVE).unwrap(),
+            "https://m.media-amazon.com/images/I/EXAMPLEID01.jpg"
+        );
+        assert_eq!(
+            rewrite_size_marker(URL, "NATIVE").as_deref(),
+            Some("https://m.media-amazon.com/images/I/EXAMPLEID01.jpg")
+        );
+
+        // A URL that already is the largest renders any size just as well.
+        assert_eq!(
+            rewrite_size_marker("https://x/images/I/EXAMPLEID01.jpg", "500").unwrap(),
+            "https://x/images/I/EXAMPLEID01._SL500_.jpg"
+        );
+
+        // Only the shape we actually see is understood — any other falls
+        // through to the catalog rather than being rewritten with its other
+        // parts silently dropped.
+        assert!(rewrite_size_marker("https://x/I/abc._AC_SL1500_.jpg", "500").is_none());
+        assert!(rewrite_size_marker("https://x/I/abc._SL1215_QL85_.jpg", "500").is_none());
+        assert!(rewrite_size_marker("https://x/I/abc._CR0,0,500,500_.jpg", "500").is_none());
+        assert!(rewrite_size_marker("https://x/I/abc._SL_.jpg", "500").is_none());
+        assert!(rewrite_size_marker("https://x/I/abc._SLxx_.jpg", "500").is_none());
+    }
+
+    fn images(entries: &[(&str, &str)]) -> serde_json::Map<String, serde_json::Value> {
+        entries
+            .iter()
+            .map(|(size, id)| {
+                (
+                    (*size).to_owned(),
+                    serde_json::Value::String(format!(
+                        "https://m.media-amazon.com/images/I/{id}._SL{size}_.jpg"
+                    )),
+                )
+            })
+            .collect()
+    }
+
+    /// Small and large sizes resolve to different source images, and the API
+    /// picks by the requested size. The anchor must follow the *same* rule, so a
+    /// derived URL is the API's answer and not our own guess (AUD-208).
+    #[test]
+    fn anchors_on_the_master_audible_would_use() {
+        // What a sync stores: three small-source sizes, three large-source ones.
+        let synced = images(&[
+            ("252", "SMALLSRC01"),
+            ("408", "SMALLSRC01"),
+            ("500", "SMALLSRC01"),
+            ("558", "LARGESRC01"),
+            ("900", "LARGESRC01"),
+            ("1215", "LARGESRC01"),
+        ]);
+
+        // A large size anchors on the biggest large-source URL.
+        assert!(anchor_url(&synced, true).unwrap().contains("LARGESRC01"));
+        assert!(anchor_url(&synced, true).unwrap().contains("_SL1215_"));
+        // A small size anchors on the small source — as the API does — not on
+        // the large one just because it is bigger.
+        assert!(anchor_url(&synced, false).unwrap().contains("SMALLSRC01"));
+        assert!(anchor_url(&synced, false).unwrap().contains("_SL500_"));
+
+        // Only small ones stored: a large size must NOT be faked from them
+        // (it would silently stay small) — fall through to the catalog instead.
+        let small_only = images(&[("252", "SMALLSRC01"), ("500", "SMALLSRC01")]);
+        assert!(anchor_url(&small_only, true).is_none());
+        assert!(anchor_url(&small_only, false).unwrap().contains("_SL500_"));
+
+        // Only large ones stored: a small size still renders correctly off it.
+        let large_only = images(&[("1215", "LARGESRC01")]);
+        assert!(
+            anchor_url(&large_only, false)
+                .unwrap()
+                .contains("LARGESRC01")
+        );
+
+        assert!(anchor_url(&images(&[]), true).is_none());
+        assert!(anchor_url(&images(&[]), false).is_none());
+    }
+
+    /// `native` needs the large source; the boundary itself is inclusive.
+    #[test]
+    fn size_picks_the_right_master() {
+        assert_eq!(wants_large_master("native"), Some(true));
+        assert_eq!(wants_large_master("NATIVE"), Some(true));
+        assert_eq!(wants_large_master("2400"), Some(true));
+        assert_eq!(wants_large_master("558"), Some(true));
+        assert_eq!(wants_large_master("501"), Some(true));
+        assert_eq!(wants_large_master("500"), Some(false));
+        assert_eq!(wants_large_master("252"), Some(false));
+        assert_eq!(wants_large_master("nonsense"), None);
+    }
 }

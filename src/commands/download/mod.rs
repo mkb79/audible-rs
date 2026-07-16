@@ -115,8 +115,11 @@ impl super::Command for DownloadCommand {
                 Arg::new("cover_size")
                     .help_heading(H_ARTIFACTS)
                     .long("cover-size")
-                    .value_name("PX")
-                    .help("Cover size(s) in px, comma-separated (overrides config)"),
+                    .value_name("PX,...")
+                    .help(
+                        "Cover size(s), comma-separated (overrides config): px, or \
+                         `native` for each title's largest available cover",
+                    ),
             )
             .arg(
                 Arg::new("chapter_type")
@@ -663,22 +666,18 @@ impl Artifact {
     }
 }
 
-/// Common cover sizes (pixels) shown as a hint. Not exhaustive — Amazon's
-/// image CDN resizes to any requested size (e.g. 1242 seen in catalog
-/// traffic), so any positive number is accepted.
-const COVER_SIZES_HINT: &str = "252, 315, 360, 408, 500, 558, 570, 882, 900, 1215";
-
-/// Parses a comma-separated cover-size list (any positive pixel value),
-/// de-duplicating. A size the catalog has no image for is reported later.
+/// Parses a comma-separated cover-size list, de-duplicating. Each entry is a
+/// pixel value or `native`, validated by the same rule the config uses
+/// (`schema::validate_cover_size`), so a flag and a settings bundle cannot
+/// disagree about what a size is.
 fn parse_cover_sizes(sizes: &[String]) -> Result<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     for size in sizes.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        if size.parse::<u32>().is_ok_and(|n| n > 0) {
-            if !out.iter().any(|s| s == size) {
-                out.push(size.to_owned());
-            }
-        } else {
-            bail!("invalid cover size {size:?} (a positive number of px, e.g. {COVER_SIZES_HINT})");
+        crate::config::schema::validate_cover_size(size)
+            .map_err(|reason| anyhow::anyhow!(reason))?;
+        let size = size.to_ascii_lowercase();
+        if !out.contains(&size) {
+            out.push(size);
         }
     }
     if out.is_empty() {
