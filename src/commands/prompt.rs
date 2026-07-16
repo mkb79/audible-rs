@@ -51,6 +51,9 @@ pub(crate) fn prompt_choice(label: &str, choices: &[&str], default: &str) -> Res
             choices.len(),
             choices.join(", ")
         );
+        // The re-ask reprints the whole menu, so separate it from the failed
+        // attempt the same way the caller separates one question from the next.
+        eprintln!();
     }
 }
 

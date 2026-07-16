@@ -58,6 +58,40 @@ fn ask_yes_no(label: &str, default: bool) -> Result<bool> {
     Ok(ask_choice(label, &["yes", "no"], default)? == "yes")
 }
 
+/// The two chapter layouts combine to exactly three sensible answers, so the
+/// question is a menu rather than free text.
+const CHAPTER_CHOICES: [&str; 3] = ["tree", "flat", "tree,flat"];
+
+/// The stored chapter layouts expressed as one of [`CHAPTER_CHOICES`].
+///
+/// Anything else falls back to `tree` — including `both`, which an earlier
+/// wizard happily wrote because its label ("tree, flat, or both comma-separated")
+/// read as if `both` were a value, while `parse_chapter_types` only ever
+/// accepted `tree`/`flat`. Without this, a stored value the menu does not offer
+/// would make an empty answer re-ask forever.
+fn chapter_default(stored: Option<&[String]>) -> String {
+    let stored = stored.unwrap_or(&[]);
+    let has = |name: &str| {
+        stored
+            .iter()
+            .any(|value| value.trim().eq_ignore_ascii_case(name))
+    };
+    match (has("tree"), has("flat")) {
+        (true, true) => "tree,flat".to_owned(),
+        (false, true) => "flat".to_owned(),
+        _ => "tree".to_owned(),
+    }
+}
+
+/// Splits a comma-separated answer into trimmed, non-empty items.
+fn split_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 fn setup(ctx: &Ctx) -> Result<()> {
     let term = console::Term::stderr();
     if !term.is_term() {
@@ -92,22 +126,35 @@ fn setup(ctx: &Ctx) -> Result<()> {
         default.include_podcasts.unwrap_or(true),
     )?;
 
-    let cover_size = ask(
-        "Default cover size(s) in px (comma-separated)",
-        &default
-            .cover_size
-            .as_deref()
-            .map(|v| v.join(","))
-            .unwrap_or_else(|| "500".to_owned()),
-    )?;
+    // Verified here, like the template and the numbers: `parse_cover_sizes`
+    // only accepts positive px, and an unchecked answer would sit in the config
+    // until a download failed on it.
+    let cover_size = loop {
+        let value = ask(
+            "Default cover size(s) in px (comma-separated)",
+            &default
+                .cover_size
+                .as_deref()
+                .map(|v| v.join(","))
+                .unwrap_or_else(|| "500".to_owned()),
+        )?;
+        let sizes = split_csv(&value);
+        if sizes.is_empty() {
+            eprintln!("pick at least one size");
+        } else if let Some(bad) = sizes
+            .iter()
+            .find(|size| !size.parse::<u32>().is_ok_and(|px| px > 0))
+        {
+            eprintln!("invalid cover size {bad:?} — use positive numbers of px, e.g. 500,900");
+        } else {
+            break value;
+        }
+    };
 
-    let chapter_type = ask(
-        "Chapter title layout(s) (tree, flat, or both comma-separated)",
-        &default
-            .chapter_type
-            .as_deref()
-            .map(|v| v.join(","))
-            .unwrap_or_else(|| "tree".to_owned()),
+    let chapter_type = ask_choice(
+        "Chapter title layout(s)",
+        &CHAPTER_CHOICES,
+        &chapter_default(default.chapter_type.as_deref()),
     )?;
 
     section("File names");
@@ -222,13 +269,6 @@ fn setup(ctx: &Ctx) -> Result<()> {
         None
     };
 
-    let split_csv = |value: &str| -> Vec<String> {
-        value
-            .split(',')
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty())
-            .collect()
-    };
     let cover_sizes = split_csv(&cover_size);
     let chapter_types = split_csv(&chapter_type);
     let bool_str = |value: bool| if value { "true" } else { "false" };
@@ -400,6 +440,40 @@ change_retention_days = 90
         let twice = apply_answers(&after, &fields, &conditional, &cover, &chapter)
             .expect("removing an absent key is a no-op, not an error");
         assert_eq!(twice, after, "a repeated run changes nothing further");
+    }
+
+    /// The chapter question is a menu, so its prefill has to *be* one of the
+    /// choices — otherwise an empty answer returns a value the menu rejects and
+    /// the question re-asks forever. `both` is the real case: an earlier wizard
+    /// wrote it from a label that read as if it were a value, while only
+    /// `tree`/`flat` were ever valid.
+    #[test]
+    fn chapter_default_is_always_one_of_the_offered_choices() {
+        let stored =
+            |values: &[&str]| -> Vec<String> { values.iter().map(|v| (*v).to_owned()).collect() };
+        assert_eq!(chapter_default(Some(&stored(&["tree"]))), "tree");
+        assert_eq!(chapter_default(Some(&stored(&["flat"]))), "flat");
+        assert_eq!(
+            chapter_default(Some(&stored(&["tree", "flat"]))),
+            "tree,flat"
+        );
+        // Order and case must not matter.
+        assert_eq!(
+            chapter_default(Some(&stored(&["flat", "Tree"]))),
+            "tree,flat"
+        );
+        // Garbage a previous run may have written, and the unset case.
+        assert_eq!(chapter_default(Some(&stored(&["both"]))), "tree");
+        assert_eq!(chapter_default(Some(&stored(&[]))), "tree");
+        assert_eq!(chapter_default(None), "tree");
+
+        for values in [&["tree"][..], &["flat"][..], &["both"][..], &[][..]] {
+            let picked = chapter_default(Some(&stored(values)));
+            assert!(
+                CHAPTER_CHOICES.contains(&picked.as_str()),
+                "{picked:?} is not offered by the menu"
+            );
+        }
     }
 
     /// The counterpart: a question that *was* asked writes its key.
