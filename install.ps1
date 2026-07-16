@@ -14,7 +14,7 @@ cannot take parameters):
   -BinDir <dir>    AUDIBLE_INSTALL_DIR       install location (default: %LOCALAPPDATA%\Programs\audible-rs)
   -Force           AUDIBLE_FORCE=1           replace an existing non-audible-rs 'audible' without asking
   -NoModifyPath    AUDIBLE_NO_MODIFY_PATH=1  do not add the install dir to your user PATH
-  -NoCompletions   AUDIBLE_NO_COMPLETIONS=1  do not set up PowerShell tab completion
+  -Completions     AUDIBLE_COMPLETIONS=1     also set up PowerShell tab completion (edits your profile)
 
 By default the newest stable release is installed. While none exists yet
 (pre-alpha) it falls back to the newest pre-release; once a stable release is
@@ -25,7 +25,7 @@ audible-rs is the successor to audible-cli and shares the command name
 config directories are separate, so audible-cli's data is left untouched.
 
 No administrator rights are needed: it installs under your user profile and
-edits only your user PATH and (for tab completion) your PowerShell profile.
+edits only your user PATH (and, with -Completions, your PowerShell profile).
 Integrity: the download is verified against the release's SHA256SUMS over HTTPS.
 #>
 [CmdletBinding()]
@@ -35,7 +35,7 @@ param(
     [string] $BinDir,
     [switch] $Force,
     [switch] $NoModifyPath,
-    [switch] $NoCompletions
+    [switch] $Completions
 )
 
 # Stop on any error; skip Invoke-WebRequest's (slow) progress bar; force TLS 1.2
@@ -55,7 +55,7 @@ if (-not $Pre          -and $env:AUDIBLE_PRERELEASE -eq '1')     { $Pre = $true 
 if (-not $BinDir       -and $env:AUDIBLE_INSTALL_DIR)            { $BinDir = $env:AUDIBLE_INSTALL_DIR }
 if (-not $Force        -and $env:AUDIBLE_FORCE -eq '1')          { $Force = $true }
 if (-not $NoModifyPath  -and $env:AUDIBLE_NO_MODIFY_PATH -eq '1') { $NoModifyPath = $true }
-if (-not $NoCompletions -and $env:AUDIBLE_NO_COMPLETIONS -eq '1') { $NoCompletions = $true }
+if (-not $Completions   -and $env:AUDIBLE_COMPLETIONS -eq '1')    { $Completions = $true }
 
 if (-not $BinDir) { $BinDir = Join-Path $env:LOCALAPPDATA 'Programs\audible-rs' }
 
@@ -178,15 +178,16 @@ if ($resolved -and $resolved.Source -ne $dest) {
     Info "note: '$($resolved.Source)' comes earlier on your PATH and will run instead of $dest."
 }
 
-# --- tab completion (PowerShell) ------------------------------------------
-# On by default (like the user PATH above); -NoCompletions skips it. Write the
-# generated completion next to the exe and dot-source it from the profile,
-# creating the profile *and its directory* when missing — a fresh Windows has
-# neither, which is why editing $PROFILE by hand fails with "path not found".
-if (-not $NoCompletions) {
+# --- tab completion (opt-in, PowerShell) ----------------------------------
+# Opt-in, like install.sh's --completions. PowerShell has no auto-sourced
+# completion directory, so "install" means a line in your profile that
+# regenerates completion from the current `audible` at each shell start — an
+# upgrade therefore needs no completion re-install and there is no file to go
+# stale. Creates the profile *and its directory* when missing (a fresh Windows
+# has neither, which is why editing $PROFILE by hand fails with "path not
+# found").
+if ($Completions) {
     try {
-        $completionFile = Join-Path $BinDir 'audible.completion.ps1'
-        & $dest completions powershell | Out-File -FilePath $completionFile -Encoding utf8
         $profileDir = Split-Path -Parent $PROFILE
         if ($profileDir -and -not (Test-Path -LiteralPath $profileDir)) {
             New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
@@ -195,21 +196,24 @@ if (-not $NoCompletions) {
         $already = (Test-Path -LiteralPath $PROFILE) -and
                    (Select-String -LiteralPath $PROFILE -SimpleMatch $marker -Quiet)
         if (-not $already) {
-            # Guarded, so a later uninstall (file gone) does not error at startup.
+            # Guarded, so it silently no-ops if `audible` is later uninstalled.
             Add-Content -LiteralPath $PROFILE -Value @(
                 '',
                 $marker,
-                "if (Test-Path -LiteralPath '$completionFile') { . '$completionFile' }"
+                'if (Get-Command audible -ErrorAction SilentlyContinue) { audible completions powershell | Out-String | Invoke-Expression }'
             )
         }
         Info ''
-        Info 'tab completion installed - open a new PowerShell to use it (skip next time with -NoCompletions).'
+        Info 'tab completion set up in your PowerShell profile - open a new PowerShell to use it.'
     }
     catch {
         Info ''
         Info "note: could not set up tab completion ($($_.Exception.Message))."
-        Info '  do it manually: audible completions powershell | Out-String | Invoke-Expression'
     }
+}
+else {
+    Info ''
+    Info 'Tab completion: re-run with -Completions (or $env:AUDIBLE_COMPLETIONS=1) to enable it.'
 }
 
 # --- optional decrypt tools -----------------------------------------------
