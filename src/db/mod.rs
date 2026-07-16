@@ -195,6 +195,48 @@ fn episode_not_archived_clause(include_archived: bool) -> &'static str {
     }
 }
 
+/// Whether a document advertises a companion PDF — the SQL twin of
+/// `commands::download::artifacts::library_pdf_flag`: `is_pdf_url_available`,
+/// with a `pdf_url`-presence fallback. `doc_expr` must name a document column
+/// in scope (e.g. `e.doc`).
+///
+/// Verified against a real library (AUD-206): the flag and an actual `pdf_url`
+/// agree 100% (29 titles with both, 139 with neither), and **every** podcast
+/// episode reports `false` — so this is what tells a title that can have a PDF
+/// from one that cannot.
+fn pdf_available_sql(doc_expr: &str) -> String {
+    format!(
+        "(json_extract({doc_expr}, '$.is_pdf_url_available') = 1
+          OR json_extract({doc_expr}, '$.pdf_url') IS NOT NULL)"
+    )
+}
+
+/// As [`pdf_available_sql`], for a row that carries no `doc` column of its own
+/// (`v_books`/`v_episodes`): looks the document up in `table` by the row's
+/// `(asin, marketplace)`.
+fn pdf_available_lookup_sql(table: &str, asin_expr: &str, marketplace_expr: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM {table} pdfdoc
+                 WHERE pdfdoc.asin = {asin_expr}
+                   AND pdfdoc.marketplace = {marketplace_expr}
+                   AND {})",
+        pdf_available_sql("pdfdoc.doc")
+    )
+}
+
+/// Gates the requested kind `k.value` on the artifact being able to exist at
+/// all (AUD-206). Only `pdf` is gated: it is the one kind the library document
+/// advertises. There is deliberately **no** chapter gate — no document field
+/// says whether a title has chapters (they come from a live
+/// `content/{asin}/metadata` request), so the DB cannot know; and a cover is
+/// universal.
+///
+/// `pdf_available` is the row-appropriate [`pdf_available_sql`] /
+/// [`pdf_available_lookup_sql`] expression.
+fn kind_possible_sql(pdf_available: &str) -> String {
+    format!("(k.value != 'pdf' OR {pdf_available})")
+}
+
 /// Whether the requested download kind `k.value` is still missing for the
 /// `v_books` row aliased `b` — for queries that join `json_each(?) k` over the
 /// requested kinds (AUD-203).
@@ -205,8 +247,12 @@ fn episode_not_archived_clause(include_archived: bool) -> &'static str {
 /// kind while **any** of its episodes still lacks it; a show whose episodes are
 /// all downloaded (or that has none) is complete. Books and individually-
 /// subscribed episodes keep testing their own ASIN.
-fn missing_kind_predicate() -> &'static str {
-    "CASE WHEN b.kind = 'podcast' THEN
+///
+/// A kind that cannot exist for the row is never missing (AUD-206) — which is
+/// also what stops a show whose episodes have no PDF from reporting one.
+fn missing_kind_predicate() -> String {
+    format!(
+        "CASE WHEN b.kind = 'podcast' THEN
          EXISTS (
              SELECT 1 FROM episodes e
              WHERE e.parent_asin = b.asin AND e.marketplace = b.marketplace
@@ -216,6 +262,7 @@ fn missing_kind_predicate() -> &'static str {
                    WHERE d.asin = e.asin AND d.marketplace = e.marketplace
                      AND d.kind = k.value
                )
+               AND {}
          )
      ELSE
          NOT EXISTS (
@@ -223,7 +270,16 @@ fn missing_kind_predicate() -> &'static str {
              WHERE d.asin = b.asin AND d.marketplace = b.marketplace
                AND d.kind = k.value
          )
-     END"
+         AND {}
+     END",
+        // The roll-up reads the episode rows directly, so the doc is in scope.
+        kind_possible_sql(&pdf_available_sql("e.doc")),
+        kind_possible_sql(&pdf_available_lookup_sql(
+            "items",
+            "b.asin",
+            "b.marketplace"
+        )),
+    )
 }
 
 /// The content-kind expression over an item document column — the SQL

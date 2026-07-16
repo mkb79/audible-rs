@@ -349,7 +349,14 @@ impl Db {
         let kinds_json = serde_json::to_string(&kinds).expect("strings serialize");
         let offset = offset.min(i64::MAX as u64) as i64;
         self.call(move |conn| {
-            let mut statement = conn.prepare_cached(
+            // A kind that cannot exist for the episode is never missing — a
+            // podcast episode has no PDF, so it must not be reported (AUD-206).
+            let possible = super::kind_possible_sql(&super::pdf_available_lookup_sql(
+                "episodes",
+                "e.asin",
+                "e.marketplace",
+            ));
+            let sql = format!(
                 "SELECT asin, full_title, release_date, missing FROM (
                      SELECT e.asin AS asin, e.full_title AS full_title,
                             CAST(e.release_date AS TEXT) AS release_date,
@@ -359,14 +366,16 @@ impl Db {
                                  SELECT 1 FROM downloads d
                                  WHERE d.asin = e.asin AND d.marketplace = e.marketplace
                                    AND d.kind = k.value
-                             )) AS missing
+                             )
+                             AND {possible}) AS missing
                      FROM v_episodes e
                      WHERE e.marketplace = ?2 AND e.parent_asin = ?3
                  )
                  WHERE missing IS NOT NULL
                  ORDER BY release_date DESC, asin
-                 LIMIT ?4 OFFSET ?5",
-            )?;
+                 LIMIT ?4 OFFSET ?5"
+            );
+            let mut statement = conn.prepare_cached(&sql)?;
             let rows = statement
                 .query_map(
                     rusqlite::params![kinds_json, marketplace, parent_asin, limit, offset],
@@ -395,7 +404,12 @@ impl Db {
     ) -> Result<u64, DbError> {
         let kinds_json = serde_json::to_string(&kinds).expect("strings serialize");
         self.call(move |conn| {
-            let count: i64 = conn.query_row(
+            let possible = super::kind_possible_sql(&super::pdf_available_lookup_sql(
+                "episodes",
+                "e.asin",
+                "e.marketplace",
+            ));
+            let sql = format!(
                 "SELECT COUNT(*) FROM v_episodes e
                  WHERE e.marketplace = ?2 AND e.parent_asin = ?3
                    AND EXISTS (
@@ -405,7 +419,11 @@ impl Db {
                            WHERE d.asin = e.asin AND d.marketplace = e.marketplace
                              AND d.kind = k.value
                        )
-                   )",
+                       AND {possible}
+                   )"
+            );
+            let count: i64 = conn.query_row(
+                &sql,
                 rusqlite::params![kinds_json, marketplace, parent_asin],
                 |row| row.get(0),
             )?;
