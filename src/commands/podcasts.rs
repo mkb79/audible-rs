@@ -73,7 +73,9 @@ impl super::Command for PodcastsCommand {
                 let podcast = sub.get_one::<String>("podcast").expect("required").clone();
                 let limit = *sub.get_one::<u32>("limit").expect("default");
                 let page = *sub.get_one::<u32>("page").expect("default");
-                super::library::episodes::episodes(ctx, podcast, limit, page).await
+                // No `--missing` on the deprecated noun (AUD-175): use
+                // `library episodes <SHOW> --missing`.
+                super::library::episodes::episodes(ctx, podcast, None, limit, page).await
             }
             _ => unreachable!("subcommand required"),
         }
