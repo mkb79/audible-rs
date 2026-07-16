@@ -181,6 +181,40 @@ pub struct Settings {
 /// The reserved name of the fallback settings bundle.
 pub const DEFAULT_SETTINGS_NAME: &str = "default";
 
+/// Cover size meaning "the largest available for this title". A number cannot
+/// express it — the maximum differs from title to title (AUD-208).
+pub const COVER_SIZE_NATIVE: &str = "native";
+
+/// Upper bound for a *numeric* cover size — a **typo guard**, not a claim about
+/// what exists: an oversized request does not fail, it simply returns the
+/// largest available, so `5000` typed for `500` would quietly produce far larger
+/// files. Above this, [`COVER_SIZE_NATIVE`] is what was meant, which is why the
+/// bound costs no capability. Rationale: AUD-208.
+pub const COVER_SIZE_MAX: u32 = 4000;
+
+/// Validates one cover size: a positive number of px up to [`COVER_SIZE_MAX`],
+/// or [`COVER_SIZE_NATIVE`]. Shared by the config write paths (via
+/// [`Config::validate`], which covers `config set`, `settings add/set` and
+/// `setup` alike) and by `download --cover-size`.
+pub fn validate_cover_size(value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case(COVER_SIZE_NATIVE) {
+        return Ok(());
+    }
+    match value.parse::<u32>() {
+        Ok(px) if px > 0 && px <= COVER_SIZE_MAX => Ok(()),
+        Ok(0) => Err(format!("invalid cover size {value:?}: 0 px is not a size")),
+        Ok(_) => Err(format!(
+            "cover size {value:?} is above {COVER_SIZE_MAX} px and is almost certainly a typo; \
+             use \"{COVER_SIZE_NATIVE}\" for each title's largest available cover"
+        )),
+        Err(_) => Err(format!(
+            "invalid cover size {value:?} — a positive number of px (e.g. 500) \
+             or \"{COVER_SIZE_NATIVE}\""
+        )),
+    }
+}
+
 /// Password source for an account's auth file.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -487,6 +521,17 @@ impl Config {
                 return Err(ConfigError::Invalid(format!(
                     "settings {name:?} filename_template: {reason}"
                 )));
+            }
+            // Same idea for the cover sizes: rejected on write/load rather than
+            // at download time. This one check covers `config set`,
+            // `settings add/set` and `setup` at once — they all write through
+            // the validated path (AUD-208).
+            for size in settings.cover_size.iter().flatten() {
+                if let Err(reason) = validate_cover_size(size) {
+                    return Err(ConfigError::Invalid(format!(
+                        "settings {name:?} cover_size: {reason}"
+                    )));
+                }
             }
         }
         if let Some(default_account) = &self.default_account

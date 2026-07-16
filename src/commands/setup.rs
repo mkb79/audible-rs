@@ -92,13 +92,15 @@ fn split_csv(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// The first item that is not a cover size, if any. `parse_cover_sizes` accepts
-/// only positive px, and the answer is a **list** — so each item is checked on
-/// its own: `500,900` is two sizes, not one unparsable number.
-fn invalid_cover_size(sizes: &[String]) -> Option<&String> {
+/// The first item that is not a cover size, with the reason — or `None` when
+/// all are fine. The answer is a **list**, so each item is checked on its own:
+/// `500,900` is two sizes, not one unparsable number. The rule itself is the
+/// config's ([`crate::config::schema::validate_cover_size`]), so the wizard
+/// cannot drift from what `config set` accepts.
+fn invalid_cover_size(sizes: &[String]) -> Option<String> {
     sizes
         .iter()
-        .find(|size| !size.parse::<u32>().is_ok_and(|px| px > 0))
+        .find_map(|size| crate::config::schema::validate_cover_size(size).err())
 }
 
 fn setup(ctx: &Ctx) -> Result<()> {
@@ -135,12 +137,13 @@ fn setup(ctx: &Ctx) -> Result<()> {
         default.include_podcasts.unwrap_or(true),
     )?;
 
-    // Verified here, like the template and the numbers: `parse_cover_sizes`
-    // only accepts positive px, and an unchecked answer would sit in the config
-    // until a download failed on it.
+    // Verified here, like the template and the numbers — an unchecked answer
+    // would otherwise sit in the config until a download failed on it. (The
+    // config write validates too; this just fails at the question rather than
+    // at the end of the wizard.)
     let cover_size = loop {
         let value = ask(
-            "Default cover size(s) in px (comma-separated)",
+            "Default cover size(s): px, or `native` for each title's largest (comma-separated)",
             &default
                 .cover_size
                 .as_deref()
@@ -150,8 +153,8 @@ fn setup(ctx: &Ctx) -> Result<()> {
         let sizes = split_csv(&value);
         if sizes.is_empty() {
             eprintln!("pick at least one size");
-        } else if let Some(bad) = invalid_cover_size(&sizes) {
-            eprintln!("invalid cover size {bad:?} — use positive numbers of px, e.g. 500,900");
+        } else if let Some(reason) = invalid_cover_size(&sizes) {
+            eprintln!("{reason}");
         } else {
             break value;
         }
@@ -497,20 +500,22 @@ change_retention_days = 90
             "surrounding spaces are trimmed away"
         );
 
-        // Only the offending item is reported.
-        assert_eq!(
-            invalid_cover_size(&sizes("500,large")).map(String::as_str),
-            Some("large")
-        );
-        assert_eq!(
-            invalid_cover_size(&sizes("0")).map(String::as_str),
-            Some("0"),
+        // `native` — the master itself — is a size like any other, alone or mixed.
+        assert!(invalid_cover_size(&sizes("native")).is_none());
+        assert!(invalid_cover_size(&sizes("500,native")).is_none());
+
+        // Only the offending item is reported, and it is named.
+        let reason = invalid_cover_size(&sizes("500,large")).expect("\"large\" is not a size");
+        assert!(reason.contains("large"), "names the culprit: {reason}");
+        assert!(
+            invalid_cover_size(&sizes("0")).is_some(),
             "0 px is not a size"
         );
-        assert_eq!(
-            invalid_cover_size(&sizes("-5")).map(String::as_str),
-            Some("-5")
-        );
+        assert!(invalid_cover_size(&sizes("-5")).is_some());
+
+        // Above the typo guard the message has to point at what was meant.
+        let reason = invalid_cover_size(&sizes("5000")).expect("above the cap");
+        assert!(reason.contains("native"), "points at native: {reason}");
 
         // An empty answer splits to nothing; the caller handles that case.
         assert!(sizes("").is_empty());
