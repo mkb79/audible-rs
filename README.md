@@ -45,41 +45,47 @@ stay Unix-only — if you need those on Windows, run audible-rs under
 
 ### Prebuilt binary (recommended)
 
-Download and install the latest release binary for your platform:
+Pick your platform below. The installer downloads the release binary, verifies
+it against the published checksums, and puts `audible` on your `PATH`. By
+default it installs the newest **stable** release; while the project is in alpha
+(no stable release yet) it installs the newest pre-release, and once a stable
+release exists you can pass `--pre` / `-Pre` to keep tracking pre-releases.
+
+#### Linux / macOS
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mkb79/audible-rs/main/install.sh | sh
 ```
 
-It installs `audible` into `~/.local/bin` (override with `--bin-dir <dir>`)
-and verifies the download against the release checksums. By default it
-installs the latest **stable** release; while the project is in alpha (no
-stable release yet) it installs the newest pre-release, and once a stable
-release exists you can pass `--pre` to keep tracking pre-releases.
+Installs into `~/.local/bin` (override with `--bin-dir <dir>`). Options:
+`--pre`, `--version <tag>`, `--force`, `--completions`.
 
-On **Windows**, use the PowerShell installer — it does the same (download the
-`.zip`, verify the checksum, install `audible.exe`, add it to your user `PATH`):
+#### Windows
+
+PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/mkb79/audible-rs/main/install.ps1 | iex
 ```
 
-From the Command Prompt (cmd), run it through PowerShell:
+Command Prompt (cmd) — run it through PowerShell:
 
 ```bat
 powershell -c "irm https://raw.githubusercontent.com/mkb79/audible-rs/main/install.ps1 | iex"
 ```
 
-It installs into `%LOCALAPPDATA%\Programs\audible-rs` (override with `-BinDir`)
-and mirrors the shell installer's options (`-Pre`, `-Version <tag>`, `-Force`,
-`-NoModifyPath`). The [Manual download](#manual-download) below is the no-script
-alternative.
+Installs into `%LOCALAPPDATA%\Programs\audible-rs` (override with `-BinDir`) and
+adds that folder to your user `PATH`. Options: `-Pre`, `-Version <tag>`,
+`-Force`, `-NoModifyPath`. No script? See [Manual download](#manual-download).
+
+---
 
 audible-rs is the successor to `audible-cli` and shares the command name
 `audible`. If you already have `audible-cli` installed, the installer asks
-before replacing its command (pass `--force` to skip, or `--bin-dir` to
-install elsewhere); the config directories are separate, so `audible-cli`'s
-data is left untouched. Replacing an older audible-rs is a silent upgrade.
+before replacing its command (pass `--force`/`-Force` to skip, or the bin-dir
+override to install elsewhere); the config directories are separate, so
+`audible-cli`'s data is left untouched. Replacing an older audible-rs is a
+silent upgrade.
 
 ### Homebrew
 
