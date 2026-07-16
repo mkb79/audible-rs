@@ -716,6 +716,13 @@ impl Db {
     /// marketplace. `kinds` are matched regardless of content format.
     /// Archived items (`is_archived` in the doc, AUD-110) are excluded
     /// unless `include_archived`.
+    ///
+    /// A podcast show is a **roll-up**: it owns no download record (the record
+    /// sits on the episode), so it counts as missing a kind while any of its
+    /// episodes still lacks it, and drops off the list once they are all
+    /// downloaded (AUD-203; see [`super::missing_kind_predicate`]). The
+    /// download twin [`Self::missing_download_asins`] expresses the same rule
+    /// as leaves — the episodes themselves.
     pub async fn books_missing_downloads(
         &self,
         marketplaces: Vec<String>,
@@ -736,17 +743,14 @@ impl Db {
                      SELECT b.marketplace, b.asin, b.full_title, b.purchase_date,
                             (SELECT group_concat(k.value)
                              FROM json_each(?) k
-                             WHERE NOT EXISTS (
-                                 SELECT 1 FROM downloads d
-                                 WHERE d.asin = b.asin AND d.marketplace = b.marketplace
-                                   AND d.kind = k.value
-                             )) AS missing
+                             WHERE {}) AS missing
                      FROM v_books b
                      WHERE b.marketplace IN ({}) {} {}
                  )
                  WHERE missing IS NOT NULL
                  ORDER BY purchase_date DESC, asin, marketplace
                  LIMIT ? OFFSET ?",
+                super::missing_kind_predicate(),
                 in_placeholders(marketplaces.len()),
                 not_archived_clause(include_archived),
                 super::kind_clause("b.kind", &item_kinds)
@@ -793,13 +797,10 @@ impl Db {
                  WHERE b.marketplace IN ({})
                    AND EXISTS (
                      SELECT 1 FROM json_each(?) k
-                     WHERE NOT EXISTS (
-                         SELECT 1 FROM downloads d
-                         WHERE d.asin = b.asin AND d.marketplace = b.marketplace
-                           AND d.kind = k.value
-                     )
+                     WHERE {}
                  ) {} {}",
                 in_placeholders(marketplaces.len()),
+                super::missing_kind_predicate(),
                 not_archived_clause(include_archived),
                 super::kind_clause("b.kind", &item_kinds)
             );
@@ -918,14 +919,23 @@ impl Db {
         .await
     }
 
-    /// ASINs of active items missing a download record of at least one of
-    /// the given kinds, newest purchases first (`download --missing`).
-    /// Audio is format-aware (AUD-96): it counts as present only when a
-    /// downloaded row's `request_kind` is one of `audio_request_kinds` (the
-    /// run's candidate set, as in the per-item skip); other kinds stay
-    /// kind-level. Archived items are excluded unless `include_archived`
-    /// (AUD-110). Lean variant of [`Self::books_missing_downloads`]: only
-    /// the ASINs, no pagination — built to scale to whole-library downloads.
+    /// ASINs missing a download record of at least one of the given kinds,
+    /// newest first (`download --missing`). Audio is format-aware (AUD-96): it
+    /// counts as present only when a downloaded row's `request_kind` is one of
+    /// `audio_request_kinds` (the run's candidate set, as in the per-item
+    /// skip); other kinds stay kind-level. Archived items are excluded unless
+    /// `include_archived` (AUD-110). Lean variant of
+    /// [`Self::books_missing_downloads`]: only the ASINs, no pagination —
+    /// built to scale to whole-library downloads.
+    ///
+    /// Returns **leaves only** — every ASIN is directly downloadable (AUD-203):
+    ///
+    /// * `include_podcasts`: books, individually-subscribed episode items, and
+    ///   the **missing episodes of followed shows** (an episode inherits its
+    ///   parent's archive state). The show's own ASIN is never returned: it has
+    ///   no audio of its own and would fail the licenserequest. This is the
+    ///   leaf form of the roll-up that `library list --missing` displays.
+    /// * `!include_podcasts` (`--exclude-podcasts`): books only.
     pub async fn missing_download_asins(
         &self,
         marketplaces: Vec<String>,
@@ -942,74 +952,108 @@ impl Db {
             if marketplaces.is_empty() || (!audio && !has_other) {
                 return Ok(Vec::new());
             }
-            let mut missing: Vec<String> = Vec::new();
-            if has_other {
-                missing.push(
-                    "EXISTS (
-                         SELECT 1 FROM json_each(?) k
-                         WHERE NOT EXISTS (
-                             SELECT 1 FROM downloads d
-                             WHERE d.asin = b.asin AND d.marketplace = b.marketplace
-                               AND d.kind = k.value
-                         )
-                     )"
-                    .to_owned(),
-                );
-            }
-            if audio {
-                // With no candidate set the audio check degrades to
-                // kind-level (defensive; the caller always passes ≥ `mpeg`).
-                if audio_request_kinds.is_empty() {
-                    missing.push(
-                        "NOT EXISTS (
-                             SELECT 1 FROM downloads d
-                             WHERE d.asin = b.asin AND d.marketplace = b.marketplace
-                               AND d.kind = 'audio'
-                         )"
-                        .to_owned(),
-                    );
-                } else {
-                    let placeholders = vec!["?"; audio_request_kinds.len()].join(",");
-                    missing.push(format!(
-                        "NOT EXISTS (
-                             SELECT 1 FROM downloads d
-                             WHERE d.asin = b.asin AND d.marketplace = b.marketplace
-                               AND d.kind = 'audio' AND d.status = 'downloaded'
-                               AND d.request_kind IN ({placeholders})
+            // "This row misses at least one requested kind", for a row alias:
+            // `b` over v_books (books + individually-subscribed episode items)
+            // and `e` over v_episodes (a followed show's episodes).
+            let missing_expr = |asin: &str, marketplace: &str| -> String {
+                let mut parts: Vec<String> = Vec::new();
+                if has_other {
+                    parts.push(format!(
+                        "EXISTS (
+                             SELECT 1 FROM json_each(?) k
+                             WHERE NOT EXISTS (
+                                 SELECT 1 FROM downloads d
+                                 WHERE d.asin = {asin} AND d.marketplace = {marketplace}
+                                   AND d.kind = k.value
+                             )
                          )"
                     ));
                 }
-            }
-            // A podcast parent is never downloadable (episodes-only), so it must
-            // never be a `--missing` target (AUD-196 — it otherwise always looks
-            // "missing audio"). `--exclude-podcasts` drops episodes too, leaving
-            // books only.
-            let podcast_clause = if include_podcasts {
-                " AND b.kind != 'podcast'"
-            } else {
-                " AND b.kind = 'book'"
+                if audio {
+                    // With no candidate set the audio check degrades to
+                    // kind-level (defensive; the caller always passes ≥ `mpeg`).
+                    if audio_request_kinds.is_empty() {
+                        parts.push(format!(
+                            "NOT EXISTS (
+                                 SELECT 1 FROM downloads d
+                                 WHERE d.asin = {asin} AND d.marketplace = {marketplace}
+                                   AND d.kind = 'audio'
+                             )"
+                        ));
+                    } else {
+                        let placeholders = vec!["?"; audio_request_kinds.len()].join(",");
+                        parts.push(format!(
+                            "NOT EXISTS (
+                                 SELECT 1 FROM downloads d
+                                 WHERE d.asin = {asin} AND d.marketplace = {marketplace}
+                                   AND d.kind = 'audio' AND d.status = 'downloaded'
+                                   AND d.request_kind IN ({placeholders})
+                             )"
+                        ));
+                    }
+                }
+                parts.join(" OR ")
             };
-            let sql = format!(
-                "SELECT b.asin FROM v_books b
-                 WHERE b.marketplace IN ({})
-                   AND ({}) {}{}
-                 ORDER BY b.purchase_date DESC, b.asin, b.marketplace",
-                in_placeholders(marketplaces.len()),
-                missing.join(" OR "),
+
+            let mp_placeholders = in_placeholders(marketplaces.len());
+            // A podcast parent is never a download target: it owns no audio —
+            // its episodes do (AUD-203). With podcasts included, the episodes
+            // branch below contributes a show's *missing* episodes as leaves, so
+            // the sweep fetches exactly what is missing and never hands the
+            // un-downloadable parent to the download path. `--exclude-podcasts`
+            // narrows the sweep to books.
+            let items_kind_clause = if include_podcasts {
+                "AND b.kind != 'podcast'"
+            } else {
+                "AND b.kind = 'book'"
+            };
+            let mut sql = format!(
+                "SELECT asin FROM (
+                     SELECT b.asin AS asin, b.purchase_date AS sort_date,
+                            b.marketplace AS marketplace
+                       FROM v_books b
+                      WHERE b.marketplace IN ({mp_placeholders})
+                        AND ({}) {} {items_kind_clause}",
+                missing_expr("b.asin", "b.marketplace"),
                 not_archived_clause(include_archived),
-                podcast_clause,
             );
+            if include_podcasts {
+                // A followed show's episodes. One that is also its own library
+                // membership is already covered by the items branch, so it is
+                // excluded here instead of being emitted twice.
+                sql.push_str(&format!(
+                    " UNION ALL
+                     SELECT e.asin AS asin, e.release_date AS sort_date,
+                            e.marketplace AS marketplace
+                       FROM v_episodes e
+                      WHERE e.marketplace IN ({mp_placeholders})
+                        AND ({}) {}
+                        AND NOT EXISTS (
+                            SELECT 1 FROM items i
+                            WHERE i.asin = e.asin AND i.marketplace = e.marketplace
+                              AND i.is_deleted = 0
+                        )",
+                    missing_expr("e.asin", "e.marketplace"),
+                    super::episode_not_archived_clause(include_archived),
+                ));
+            }
+            sql.push_str(" ) ORDER BY sort_date DESC, asin, marketplace");
             let mut statement = conn.prepare_cached(&sql)?;
+            // One parameter set per UNION branch, in textual order: the
+            // marketplaces, then the missing expression's own placeholders.
             let mut params: Vec<&dyn rusqlite::ToSql> = Vec::new();
-            for marketplace in &marketplaces {
-                params.push(marketplace);
-            }
-            if has_other {
-                params.push(&other_json);
-            }
-            if audio {
-                for kind in &audio_request_kinds {
-                    params.push(kind);
+            let branches = if include_podcasts { 2 } else { 1 };
+            for _ in 0..branches {
+                for marketplace in &marketplaces {
+                    params.push(marketplace);
+                }
+                if has_other {
+                    params.push(&other_json);
+                }
+                if audio {
+                    for kind in &audio_request_kinds {
+                        params.push(kind);
+                    }
                 }
             }
             let asins = statement
@@ -2219,41 +2263,139 @@ mod tests {
         );
     }
 
-    /// A podcast parent is never a `--missing` target — it has no downloadable
-    /// audio of its own, so it must not be selected (AUD-196).
+    /// A podcast show is a **roll-up**, never a download target (AUD-203): the
+    /// list reports it missing while any episode is missing and drops it once
+    /// they are all downloaded; the download twin resolves it to the missing
+    /// **episodes** as leaves and never returns the show itself.
     #[tokio::test]
-    async fn missing_download_asins_excludes_podcast_parents() {
+    async fn missing_podcast_rolls_up_in_list_and_resolves_to_episodes_in_download() {
         let (_dir, db) = open_temp().await;
         db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
-        let mut show = item("P1", "A Show");
-        let mut doc: serde_json::Value = serde_json::from_str(&show.doc).unwrap();
-        doc["content_type"] = serde_json::Value::String("Podcast".into());
-        doc["content_delivery_type"] = serde_json::Value::String("PodcastParent".into());
-        show.doc = doc.to_string();
-        let log = SyncLogEntry {
-            request_time_utc: now_iso_utc(),
-            response_time_utc: now_iso_utc(),
-            http_status: Some(200),
-            ..Default::default()
+        let show = |asin: &str, title: &str| {
+            crate::db::test_util::upsert(
+                asin,
+                serde_json::json!({
+                    "asin": asin,
+                    "title": title,
+                    "content_type": "Podcast",
+                    "content_delivery_type": "PodcastParent",
+                    "purchase_date": "2024-01-01",
+                }),
+            )
         };
-        // A book (A1) and a podcast show (P1), neither with any download.
-        db.apply_page(MP.into(), vec![item("A1", "Book"), show], vec![], log, None)
+        // A book, a half-downloaded show, a fully-downloaded one, and a show
+        // whose episodes were never synced.
+        db.apply_page(
+            MP.into(),
+            vec![
+                item("A1", "Book"),
+                show("P1", "Half"),
+                show("P2", "Complete"),
+                show("P3", "No episodes"),
+            ],
+            vec![],
+            default_log(),
+            None,
+        )
+        .await
+        .unwrap();
+        let recording = || ChangeRecording {
+            record: false,
+            mode: "delta",
+        };
+        db.apply_episodes(
+            MP.into(),
+            "P1".into(),
+            vec![episode("E1", "Eins"), episode("E2", "Zwei")],
+            recording(),
+        )
+        .await
+        .unwrap();
+        db.apply_episodes(
+            MP.into(),
+            "P2".into(),
+            vec![episode("F1", "Eins")],
+            recording(),
+        )
+        .await
+        .unwrap();
+
+        let audio = |asin: &str| DownloadRecord {
+            asin: asin.into(),
+            kind: "audio".into(),
+            acr: None,
+            content_format: String::new(),
+            variant: "original".into(),
+            request_kind: String::new(),
+            version: None,
+            sku: None,
+            file_path: format!("/dl/{asin}.aaxc"),
+            file_size: None,
+        };
+        // P1 has only E1 downloaded (E2 still missing); P2's single episode is
+        // downloaded, so the show is complete.
+        db.record_download(MP.into(), audio("E1")).await.unwrap();
+        db.record_download(MP.into(), audio("F1")).await.unwrap();
+
+        // The list rolls up: the half-done show is listed, the complete one is
+        // not, and a show with no episodes has nothing to miss.
+        let rows = db
+            .books_missing_downloads(
+                vec![MP.to_owned()],
+                vec!["audio".into()],
+                vec![],
+                u32::MAX,
+                0,
+                true,
+            )
             .await
             .unwrap();
+        let listed: Vec<&str> = rows.iter().map(|row| row.asin.as_str()).collect();
+        assert!(listed.contains(&"A1"), "book missing audio: {listed:?}");
+        assert!(
+            listed.contains(&"P1"),
+            "show with a missing episode: {listed:?}"
+        );
+        assert!(
+            !listed.contains(&"P2"),
+            "fully downloaded show must not be listed: {listed:?}"
+        );
+        assert!(
+            !listed.contains(&"P3"),
+            "show without episodes has nothing missing: {listed:?}"
+        );
+        let count = db
+            .count_books_missing_downloads(vec![MP.to_owned()], vec!["audio".into()], vec![], true)
+            .await
+            .unwrap();
+        assert_eq!(count as usize, rows.len(), "count matches the roll-up rows");
 
-        // Even with podcasts included, the parent stays excluded (never
-        // downloadable); only the book is reported missing.
-        let asins = db
+        // The download resolves to leaves: the missing episode, never a show.
+        let mut leaves = db
             .missing_download_asins(
                 vec![MP.to_owned()],
                 vec!["audio".into()],
-                vec!["mpeg".to_owned()],
+                vec![],
                 true,
                 true,
             )
             .await
             .unwrap();
-        assert_eq!(asins, vec!["A1".to_owned()]);
+        leaves.sort();
+        assert_eq!(leaves, vec!["A1".to_owned(), "E2".to_owned()]);
+
+        // --exclude-podcasts narrows the sweep to books.
+        let books_only = db
+            .missing_download_asins(
+                vec![MP.to_owned()],
+                vec!["audio".into()],
+                vec![],
+                true,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(books_only, vec!["A1".to_owned()]);
     }
 
     /// Archived items are excluded from every missing-downloads query
