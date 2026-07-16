@@ -181,6 +181,51 @@ fn not_archived_clause(include_archived: bool) -> &'static str {
     }
 }
 
+/// The archive filter for a query over `v_episodes` aliased `e`: an episode
+/// has no archive flag of its own, so it inherits its parent show's
+/// (AUD-110/AUD-203). Twin of [`not_archived_clause`], which assumes the `b`
+/// alias over `v_books`.
+fn episode_not_archived_clause(include_archived: bool) -> &'static str {
+    if include_archived {
+        ""
+    } else {
+        "AND COALESCE((SELECT json_extract(i.doc, '$.is_archived')
+                       FROM items i
+                       WHERE i.asin = e.parent_asin AND i.marketplace = e.marketplace), 0) = 0"
+    }
+}
+
+/// Whether the requested download kind `k.value` is still missing for the
+/// `v_books` row aliased `b` — for queries that join `json_each(?) k` over the
+/// requested kinds (AUD-203).
+///
+/// A podcast **parent** owns no download record: the record always sits on the
+/// episode. Testing the parent's own ASIN would therefore report it missing
+/// forever, even with every episode downloaded. So a show counts as missing a
+/// kind while **any** of its episodes still lacks it; a show whose episodes are
+/// all downloaded (or that has none) is complete. Books and individually-
+/// subscribed episodes keep testing their own ASIN.
+fn missing_kind_predicate() -> &'static str {
+    "CASE WHEN b.kind = 'podcast' THEN
+         EXISTS (
+             SELECT 1 FROM episodes e
+             WHERE e.parent_asin = b.asin AND e.marketplace = b.marketplace
+               AND e.is_deleted = 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM downloads d
+                   WHERE d.asin = e.asin AND d.marketplace = e.marketplace
+                     AND d.kind = k.value
+               )
+         )
+     ELSE
+         NOT EXISTS (
+             SELECT 1 FROM downloads d
+             WHERE d.asin = b.asin AND d.marketplace = b.marketplace
+               AND d.kind = k.value
+         )
+     END"
+}
+
 /// The content-kind expression over an item document column — the SQL
 /// twin of [`crate::models::library::item_kind`] (AUD-173), for queries
 /// selecting from `items` directly. `v_books` embeds the same CASE as its
