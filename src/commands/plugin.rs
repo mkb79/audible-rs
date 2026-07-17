@@ -219,14 +219,19 @@ fn scopes_or_none(scopes: &[String]) -> String {
 /// binary stays well under this; scripts are tiny.
 const MAX_DOWNLOAD: u64 = 64 * 1024 * 1024;
 
-/// Downloads an https source into a temp dir, shows what was fetched
-/// (url, size, sha256, verified manifest incl. scopes) and installs it
-/// after the user confirms. `None` = declined. This downloads runnable
-/// code, so unlike a local `add` the confirmation is mandatory.
+/// Downloads an https source into a private temp dir and installs it
+/// after **two** confirmations: first for the describe probe — which
+/// executes the downloaded file — and then, with the manifest and its
+/// scopes on the table, for the install. `None` = declined. Declining
+/// the first prompt means the downloaded code never ran (audit
+/// 2026-07-17, B2: the probe used to run before any consent).
 async fn add_remote(ctx: &Ctx, url: &str, yes: bool) -> Result<Option<plugins::Installed>> {
     let file_name = https_file_name(url)?;
-    let temp = TempDir::new()?;
-    let path = temp.path.join(&file_name);
+    // An unpredictable, owner-only temp dir (B4): a fixed
+    // `/tmp/audible-plugin-add-<pid>` could be pre-owned by any local
+    // user, and the file swapped between probe and install.
+    let temp = tempfile::TempDir::new()?;
+    let path = temp.path().join(&file_name);
     let (size, sha256) = download_https(url, &path).await?;
     // A downloaded file has no exec bit; a Tier-A plugin needs one (both
     // for the describe probe and for the installed copy).
@@ -236,14 +241,27 @@ async fn add_remote(ctx: &Ctx, url: &str, yes: bool) -> Result<Option<plugins::I
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
     }
 
-    // Verify up front so the confirmation can show the real manifest;
-    // `install` re-checks the same facts before anything lands.
     let (name, tier) = plugins::classify_file_name(&file_name).ok_or_else(|| {
         anyhow::anyhow!(
             "{file_name} does not follow the plugin naming convention — the URL must end \
              in audible-<name> or cmd_<name>.py"
         )
     })?;
+
+    // Consent BEFORE the probe: `describe` executes the fetched file
+    // (sandboxed: no TTY, 5 s timeout, captured stdio — AUD-162), and a
+    // decline must mean the code never ran.
+    eprintln!("fetched {url}");
+    eprintln!("  file:    {file_name} ({})", indicatif::BinaryBytes(size));
+    eprintln!("  sha256:  {sha256}");
+    if !super::prompt::confirm(
+        yes,
+        "Read its manifest? This EXECUTES the downloaded file (--audible-describe)",
+    )? {
+        eprintln!("aborted — the downloaded file was never executed, nothing installed");
+        return Ok(None);
+    }
+
     let candidate = plugins::Discovered {
         name,
         tier,
@@ -254,9 +272,6 @@ async fn add_remote(ctx: &Ctx, url: &str, yes: bool) -> Result<Option<plugins::I
         .await
         .map_err(|reason| anyhow::anyhow!("{url} is not a usable plugin: {reason}"))?;
 
-    eprintln!("fetched {url}");
-    eprintln!("  file:    {file_name} ({})", indicatif::BinaryBytes(size));
-    eprintln!("  sha256:  {sha256}");
     eprintln!("  plugin:  {} {}", manifest.name, manifest.version);
     if !manifest.description.is_empty() {
         eprintln!("  about:   {}", manifest.description);
@@ -343,26 +358,6 @@ async fn download_https(url: &str, dest: &Path) -> Result<(u64, String)> {
         .map(|b| format!("{b:02x}"))
         .collect();
     Ok((size, sha256))
-}
-
-/// Self-cleaning temp dir for the download (removed on drop).
-struct TempDir {
-    path: std::path::PathBuf,
-}
-
-impl TempDir {
-    fn new() -> Result<Self> {
-        let path = std::env::temp_dir().join(format!("audible-plugin-add-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path)?;
-        Ok(Self { path })
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
 }
 
 /// `plugin remove <NAME>` — delete the plugin-dir entry: the symlink
