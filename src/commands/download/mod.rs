@@ -40,8 +40,8 @@ use indicatif::MultiProgress;
 
 use crate::config::ctx::Ctx;
 use crate::downloader::{
-    DownloadError, DownloadOutcome, Quality, download_to_file, request_chapters, request_cover_url,
-    request_license,
+    DownloadError, DownloadOutcome, Quality, download_to_file, request_chapters,
+    request_cover_images, request_license,
 };
 use crate::output::Output;
 
