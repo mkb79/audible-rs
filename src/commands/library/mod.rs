@@ -289,11 +289,8 @@ impl super::Command for LibraryCommand {
                 clap::Command::new("add")
                     .about("Add subscription (AYCL/Plus) titles, podcasts or episodes to your library")
                     .arg(
-                        Arg::new("asin")
-                            .long("asin")
-                            .action(ArgAction::Append)
-                            .value_name("ASIN")
-                            .help("ASIN to add (repeatable)"),
+                        super::items::asin_arg()
+                            .help("ASIN(s) to add — comma-separated or repeated"),
                     )
                     .arg(
                         Arg::new("title")
@@ -329,11 +326,8 @@ impl super::Command for LibraryCommand {
                 clap::Command::new("remove")
                     .about("Remove titles, podcasts or episodes from your library (returns loans, unfollows podcasts)")
                     .arg(
-                        Arg::new("asin")
-                            .long("asin")
-                            .action(ArgAction::Append)
-                            .value_name("ASIN")
-                            .help("ASIN to remove (repeatable)"),
+                        super::items::asin_arg()
+                            .help("ASIN(s) to remove — comma-separated or repeated"),
                     )
                     .arg(
                         Arg::new("title")
@@ -463,3 +457,25 @@ pub(crate) use sync::{maybe_auto_sync, sync};
 
 use changes::{changes, changes_prune};
 use list::{export, list, list_borrowed, list_missing, list_remote, search};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shared `--asin` contract (AUD-220/C3): `--asin A,B` splits into
+    /// two ASINs in `library add`/`remove`, exactly like everywhere else —
+    /// it used to reach the API as one literal ASIN "A,B" here.
+    #[test]
+    fn add_and_remove_split_comma_separated_asins() {
+        use crate::commands::Command as _;
+        for verb in ["add", "remove"] {
+            let matches = LibraryCommand
+                .clap()
+                .try_get_matches_from(["library", verb, "--asin", "B0A,B0B"])
+                .unwrap();
+            let (_, sub) = matches.subcommand().unwrap();
+            let asins: Vec<&String> = sub.get_many::<String>("asin").unwrap().collect();
+            assert_eq!(asins, ["B0A", "B0B"], "{verb} must split comma ASINs");
+        }
+    }
+}

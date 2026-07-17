@@ -6,18 +6,24 @@
 use anyhow::{Result, bail};
 use clap::{Arg, ArgAction};
 
+/// The shared `--asin` input: comma-separated **and** repeatable, one
+/// contract everywhere. Commands that pair it with their own `--title`
+/// semantics (`library add/remove`, `collections …`) take this arg and
+/// override only the help — hand-rolling the arg is what let `--asin A,B`
+/// silently become one literal ASIN "A,B" in half the commands.
+pub(crate) fn asin_arg() -> Arg {
+    Arg::new("asin")
+        .long("asin")
+        .value_name("ASIN")
+        .value_delimiter(',')
+        .action(ArgAction::Append)
+        .help("Item ASIN(s) — comma-separated or repeated")
+}
+
 /// Adds the shared `--asin`/`--title` inputs (both multi: comma-separated
 /// and repeatable). Requiredness/grouping is the caller's choice.
 pub(crate) fn item_source_args(cmd: clap::Command) -> clap::Command {
-    cmd.arg(
-        Arg::new("asin")
-            .long("asin")
-            .value_name("ASIN")
-            .value_delimiter(',')
-            .action(ArgAction::Append)
-            .help("Item ASIN(s) — comma-separated or repeated"),
-    )
-    .arg(
+    cmd.arg(asin_arg()).arg(
         Arg::new("title")
             .long("title")
             .value_name("QUERY")

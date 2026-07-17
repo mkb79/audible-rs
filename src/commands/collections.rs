@@ -154,13 +154,7 @@ fn noun_command(noun: &'static Noun) -> clap::Command {
     };
     let mut add = clap::Command::new("add")
         .about(format!("Add titles to {}", noun.phrase))
-        .arg(
-            Arg::new("asin")
-                .long("asin")
-                .action(ArgAction::Append)
-                .value_name("ASIN")
-                .help("ASIN to add (repeatable)"),
-        )
+        .arg(super::items::asin_arg().help("ASIN(s) to add — comma-separated or repeated"))
         .arg(
             Arg::new("title")
                 .long("title")
@@ -176,13 +170,7 @@ fn noun_command(noun: &'static Noun) -> clap::Command {
         );
     let mut remove = clap::Command::new("remove")
         .about(format!("Remove titles from {}", noun.phrase))
-        .arg(
-            Arg::new("asin")
-                .long("asin")
-                .action(ArgAction::Append)
-                .value_name("ASIN")
-                .help("ASIN to remove (repeatable)"),
-        )
+        .arg(super::items::asin_arg().help("ASIN(s) to remove — comma-separated or repeated"))
         .arg(
             Arg::new("title")
                 .long("title")
@@ -939,6 +927,13 @@ mod tests {
             ])
             .is_ok()
         );
+        // The shared --asin contract (AUD-220/C3): comma-separated splits
+        // exactly like repetition — "A,B" is never one literal ASIN.
+        let matches = parse(&["collections", "wishlist", "add", "--asin", "B0A,B0B"]).unwrap();
+        let (_, sub) = matches.subcommand().unwrap();
+        let (_, sub) = sub.subcommand().unwrap();
+        let asins: Vec<&String> = sub.get_many::<String>("asin").unwrap().collect();
+        assert_eq!(asins, ["B0A", "B0B"]);
         // Wishlist add takes --asin and/or --title (catalog search) but no --sync.
         assert!(parse(&["collections", "wishlist", "add"]).is_err());
         assert!(parse(&["collections", "wishlist", "add", "--title", "x"]).is_ok());
