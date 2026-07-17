@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use reqwest::Method;
 use serde_json::Value;
 
@@ -219,42 +219,17 @@ pub(crate) async fn resolve_catalog_titles(
                 push(hit.asin.clone());
             }
             many => {
-                if console::Term::stderr().is_term() {
-                    let labels: Vec<String> = many.iter().map(hit_label).collect();
-                    // `report(false)`: as in the library resolver, the
-                    // echoed one-line summary replaces dialoguer's default.
-                    let selection = dialoguer::MultiSelect::with_theme(
-                        &dialoguer::theme::ColorfulTheme::default(),
-                    )
-                    .with_prompt(format!(
-                        "Catalog matches for {query:?} — space toggles · a all · enter confirms"
-                    ))
-                    .items(&labels)
-                    .report(false)
-                    .interact_on(&console::Term::stderr())?;
-                    interacted = true;
-                    if selection.is_empty() {
-                        eprintln!("no titles selected for {query:?}");
-                    } else {
-                        eprintln!(
-                            "selected {} of {} for {query:?}",
-                            selection.len(),
-                            many.len()
-                        );
-                        for index in selection {
-                            push(many[index].asin.clone());
-                        }
-                    }
-                } else {
-                    let listing: Vec<String> = many
-                        .iter()
-                        .map(|hit| format!("  {}", hit_label(hit)))
-                        .collect();
-                    bail!(
-                        "{} catalog titles match {query:?}; pass --asin or run interactively:\n{}",
-                        many.len(),
-                        listing.join("\n"),
-                    );
+                let labels: Vec<String> = many.iter().map(hit_label).collect();
+                let selection = crate::commands::prompt::pick_many(
+                    "Catalog matches",
+                    "catalog titles",
+                    query,
+                    &labels,
+                    "; pass --asin or run interactively",
+                )?;
+                interacted = true;
+                for index in selection {
+                    push(many[index].asin.clone());
                 }
             }
         }

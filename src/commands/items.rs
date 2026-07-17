@@ -3,7 +3,7 @@
 //! Title search reuses the FTS5 engine (Db::search), so the same query
 //! syntax works here and in `library search`.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::{Arg, ArgAction};
 
 /// The shared `--asin` input: comma-separated **and** repeatable, one
@@ -129,61 +129,19 @@ pub(crate) async fn resolve_asins(
                 choose(&candidates[0], &mut push);
             }
             _ => {
-                if console::Term::stderr().is_term() {
-                    let labels: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
-                    // `report(false)`: the default echoes the whole chosen
-                    // list back as one long line — we clear the picker and
-                    // print a concise confirmation instead.
-                    let selection = dialoguer::MultiSelect::with_theme(
-                        &dialoguer::theme::ColorfulTheme::default(),
-                    )
-                    .with_prompt(format!(
-                        "Matches for {:?} — space toggles · a all · enter confirms",
-                        tq.query
-                    ))
-                    .items(&labels)
-                    .report(false)
-                    .interact_on(&console::Term::stderr())?;
-                    interacted = true;
-                    if selection.is_empty() {
-                        eprintln!("no titles selected for {:?}", tq.query);
-                    } else {
-                        eprintln!(
-                            "selected {} of {} for {:?}",
-                            selection.len(),
-                            candidates.len(),
-                            tq.query
-                        );
-                        for i in selection {
-                            choose(&candidates[i], &mut push);
-                        }
-                    }
+                let labels: Vec<String> = candidates.iter().map(|c| c.label.clone()).collect();
+                // A podcast show can only be taken whole non-interactively.
+                let hint = if candidates.iter().any(|c| c.kind == "podcast") {
+                    "; a podcast show is among them — use --asin <ASIN> to take all its \
+                     episodes, or narrow the query"
                 } else {
-                    // Cap the dump — a single podcast show can expand to
-                    // hundreds of episode rows.
-                    const MAX_LISTED: usize = 20;
-                    let mut listing: Vec<String> = candidates
-                        .iter()
-                        .take(MAX_LISTED)
-                        .map(|c| format!("  {}", c.label))
-                        .collect();
-                    if candidates.len() > MAX_LISTED {
-                        listing.push(format!("  … and {} more", candidates.len() - MAX_LISTED));
-                    }
-                    // A podcast show can only be taken whole non-interactively.
-                    let hint = if candidates.iter().any(|c| c.kind == "podcast") {
-                        "; a podcast show is among them — use --asin <ASIN> to take all its \
-                         episodes, or narrow the query"
-                    } else {
-                        "; pass --asin or run interactively"
-                    };
-                    bail!(
-                        "{} titles match {:?}{}:\n{}",
-                        candidates.len(),
-                        tq.query,
-                        hint,
-                        listing.join("\n"),
-                    );
+                    "; pass --asin or run interactively"
+                };
+                let selection =
+                    super::prompt::pick_many("Matches", "titles", &tq.query, &labels, hint)?;
+                interacted = true;
+                for i in selection {
+                    choose(&candidates[i], &mut push);
                 }
             }
         }
