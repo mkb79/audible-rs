@@ -333,6 +333,7 @@ async fn resolve_episodes(
             .query("parent_asin", parent_asin)
             .query("response_groups", response_groups)
             .query("num_results", page_size)
+            .query("image_sizes", DEFAULT_IMAGE_SIZES)
             .query("status", "Active")
     });
     futures::pin_mut!(stream);
@@ -448,6 +449,7 @@ async fn fetch_catalog_details(
             .country_code(marketplace)
             .query("asins", &joined)
             .query("response_groups", CATALOG_RESPONSE_GROUPS)
+            .query("image_sizes", DEFAULT_IMAGE_SIZES)
             .send()
             .await?;
         let body: serde_json::Value = response.error_for_status()?.json().await?;
