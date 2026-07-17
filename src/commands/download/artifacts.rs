@@ -95,7 +95,7 @@ pub(super) async fn download_audio(
         size,
         no_db_write,
     )
-    .await;
+    .await?;
 
     Ok(dest.display().to_string())
 }
@@ -148,7 +148,7 @@ pub(super) async fn write_chapters(
     // chapter files of the same title stay distinct.
     let token = chapter_type.as_str();
 
-    if !force && !no_db_write && variant_recorded(ctx, marketplace, asin, "chapter", token).await {
+    if !force && !no_db_write && variant_recorded(ctx, marketplace, asin, "chapter", token).await? {
         eprintln!("skipping chapter ({token}) — already recorded (use --force)");
         return Ok(None);
     }
@@ -182,7 +182,7 @@ pub(super) async fn write_chapters(
         size,
         no_db_write,
     )
-    .await;
+    .await?;
 
     Ok(Some(dest.display().to_string()))
 }
@@ -261,7 +261,7 @@ pub(super) async fn download_pdf(
         size,
         no_db_write,
     )
-    .await;
+    .await?;
 
     Ok(Some(dest.display().to_string()))
 }
@@ -308,7 +308,8 @@ pub(super) async fn download_covers(
     let mut fetched: Option<Option<ImageMap>> = None;
 
     for size in sizes {
-        if !force && !no_db_write && variant_recorded(ctx, marketplace, asin, "cover", size).await {
+        if !force && !no_db_write && variant_recorded(ctx, marketplace, asin, "cover", size).await?
+        {
             eprintln!("skipping cover {size} — already recorded (use --force)");
             continue;
         }
@@ -357,7 +358,7 @@ pub(super) async fn download_covers(
             file_size,
             no_db_write,
         )
-        .await;
+        .await?;
         written.push(dest.display().to_string());
     }
     Ok(written)

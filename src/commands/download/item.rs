@@ -117,7 +117,8 @@ pub(super) async fn download_one(
     // and the license-reuse lookup below.
     let audio_candidates = request_kind::candidates(plan.widevine, plan.codec_xhe, plan.quality);
     if !plan.force && !plan.no_db_write {
-        skip_already_downloaded(ctx, plan.marketplace, asin, &mut targets, &audio_candidates).await;
+        skip_already_downloaded(ctx, plan.marketplace, asin, &mut targets, &audio_candidates)
+            .await?;
         // With --decrypt, fall through even when every download target is
         // already recorded — the decrypt step may still have work (AUD-97)
         // and brings its own format-aware skip. Without it, bulk re-runs
@@ -337,17 +338,20 @@ pub(super) async fn download_one(
 
 /// Drops, from `targets`, every artifact already recorded in the
 /// `downloads` table (the record is authoritative — the file may have
-/// been decrypted and deleted).
+/// been decrypted and deleted). A database error is an error, never
+/// "not recorded" — reading it that way silently re-downloaded whole
+/// libraries after one transient SQLite failure.
 async fn skip_already_downloaded(
     ctx: &Ctx,
     marketplace: &str,
     asin: &str,
     targets: &mut BTreeSet<Artifact>,
     audio_request_kinds: &[String],
-) {
-    let Ok(db) = ctx.open_library_db().await else {
-        return;
-    };
+) -> Result<()> {
+    let db = ctx
+        .open_library_db()
+        .await
+        .context("could not consult the download records (skip check)")?;
     let mut keep = BTreeSet::new();
     for target in targets.iter().copied() {
         // Covers (per size) and chapters (per flat/tree) have variants; their
@@ -362,18 +366,19 @@ async fn skip_already_downloaded(
             // the same title is not blocked (covers both variants).
             db.downloaded_request_kinds(asin.to_owned(), marketplace.to_owned())
                 .await
-                .map(|kinds| kinds.iter().any(|k| audio_request_kinds.contains(k)))
-                .unwrap_or(false)
+                .context("could not consult the download records (skip check)")?
+                .iter()
+                .any(|k| audio_request_kinds.contains(k))
         } else {
             // PDF has no format variants — the coarse (asin, kind) check fits.
-            db.download_files(
+            !db.download_files(
                 asin.to_owned(),
                 marketplace.to_owned(),
                 target.kind().to_owned(),
             )
             .await
-            .map(|paths| !paths.is_empty())
-            .unwrap_or(false)
+            .context("could not consult the download records (skip check)")?
+            .is_empty()
         };
         if recorded {
             eprintln!(
@@ -385,38 +390,47 @@ async fn skip_already_downloaded(
         }
     }
     *targets = keep;
+    Ok(())
 }
 
 /// Whether a specific artifact variant (`kind` + `content_format`) is
 /// already recorded for the item — for per-variant skip (cover sizes,
-/// chapter layouts).
+/// chapter layouts). A database error propagates: answering "not
+/// recorded" would re-download the variant.
 pub(super) async fn variant_recorded(
     ctx: &Ctx,
     marketplace: &str,
     asin: &str,
     kind: &str,
     content_format: &str,
-) -> bool {
-    let Ok(db) = ctx.open_library_db().await else {
-        return false;
-    };
+) -> Result<bool> {
+    let db = ctx
+        .open_library_db()
+        .await
+        .context("could not consult the download records (skip check)")?;
     // Covers/chapters are always `original` downloads.
-    db.download_record(
-        asin.to_owned(),
-        marketplace.to_owned(),
-        kind.to_owned(),
-        content_format.to_owned(),
-        "original".to_owned(),
-    )
-    .await
-    .map(|record| record.is_some())
-    .unwrap_or(false)
+    let record = db
+        .download_record(
+            asin.to_owned(),
+            marketplace.to_owned(),
+            kind.to_owned(),
+            content_format.to_owned(),
+            "original".to_owned(),
+        )
+        .await
+        .context("could not consult the download records (skip check)")?;
+    Ok(record.is_some())
 }
 
 /// Records a downloaded artifact in the `downloads` table. `license`
 /// supplies the audio metadata (acr/version/sku) when present; chapter
 /// and PDF artifacts carry an empty `content_format`. A no-op under
 /// `--no-db-write` — the quick-grab run leaves no trace in the database.
+///
+/// A failed record is an error, not a warning: the file is on disk but
+/// nothing tracks it, so the next `--missing` would re-download it and
+/// `download orphans` would offer it for deletion. The item must count
+/// as failed and the run must not exit 0.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn record_download(
     ctx: &Ctx,
@@ -430,13 +444,20 @@ pub(super) async fn record_download(
     dest: &Path,
     size: Option<u64>,
     no_db_write: bool,
-) {
+) -> Result<()> {
     if no_db_write {
-        return;
+        return Ok(());
     }
-    let Ok(db) = ctx.open_library_db().await else {
-        return;
+    let context = || {
+        format!(
+            "{} downloaded to {}, but recording it in the database failed — \
+             the file is fine, yet untracked: a later --missing run would \
+             fetch it again and `download orphans` would list it",
+            kind,
+            dest.display()
+        )
     };
+    let db = ctx.open_library_db().await.with_context(context)?;
     let record = crate::db::DownloadRecord {
         asin: asin.to_owned(),
         kind: kind.to_owned(),
@@ -449,9 +470,9 @@ pub(super) async fn record_download(
         file_path: dest.display().to_string(),
         file_size: size,
     };
-    if let Err(error) = db.record_download(marketplace.to_owned(), record).await {
-        tracing::warn!(%error, "could not record the download in the database");
-    }
+    db.record_download(marketplace.to_owned(), record)
+        .await
+        .with_context(context)
 }
 
 #[cfg(test)]

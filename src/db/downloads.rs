@@ -281,8 +281,9 @@ impl Db {
                 .query_map(rusqlite::params![asin, marketplace], |row| {
                     row.get::<_, String>(0)
                 })?
-                .filter_map(Result::ok)
-                .collect();
+                // Row errors propagate: a swallowed error here reads as
+                // "nothing downloaded" and triggers silent re-downloads.
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         })
         .await

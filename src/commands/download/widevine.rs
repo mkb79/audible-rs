@@ -161,7 +161,7 @@ pub(super) async fn download_audio_widevine(
                 size,
                 no_db_write,
             )
-            .await;
+            .await?;
             // A Mpeg fallback (podcast / asset-less title) has no companion PDF.
             return Ok((
                 vec![("audio".to_string(), dest.display().to_string())],
@@ -218,14 +218,14 @@ pub(super) async fn download_audio_widevine(
         enc_size,
         no_db_write,
     )
-    .await;
+    .await?;
     let mut written = vec![("audio".to_string(), enc_dest.display().to_string())];
 
     // 4. optional lossless decrypt (only with --decrypt).
     if let Some(tool) = decrypt {
         if !force
             && !no_db_write
-            && super::decrypt::decrypted_recorded(ctx, marketplace, asin, &format).await
+            && super::decrypt::decrypted_recorded(ctx, marketplace, asin, &format).await?
         {
             eprintln!("{asin}: skipping decrypt — {format} already decrypted (use --force)");
             return Ok((written, pdf_url));
@@ -254,14 +254,14 @@ pub(super) async fn download_audio_widevine(
             out_size,
             no_db_write,
         )
-        .await;
+        .await?;
 
         // `--remove-source` drops the encrypted CENC (+ key) and its record.
         if !keep_source {
             let _ = tokio::fs::remove_file(&enc_dest).await;
             let _ = tokio::fs::remove_file(&wvkey_path).await;
             super::decrypt::drop_original_record(ctx, marketplace, asin, &format, no_db_write)
-                .await;
+                .await?;
             written.clear();
         }
         written.push(("audio".into(), out.display().to_string()));

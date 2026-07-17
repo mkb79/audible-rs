@@ -385,7 +385,7 @@ async fn decrypt_aaxc(
     no_db_write: bool,
 ) -> Result<Option<((String, String), bool)>> {
     let out = aaxc.with_extension("m4b");
-    if !force && !no_db_write && decrypted_recorded(ctx, marketplace, asin, format).await {
+    if !force && !no_db_write && decrypted_recorded(ctx, marketplace, asin, format).await? {
         eprintln!("skipping decrypt — {format} already decrypted (use --force)");
         return Ok(None);
     }
@@ -423,7 +423,7 @@ async fn decrypt_aaxc(
         size,
         no_db_write,
     )
-    .await;
+    .await?;
 
     let mut audio_superseded = false;
     if !keep_source {
@@ -432,7 +432,7 @@ async fn decrypt_aaxc(
         // Drop the now-obsolete (audio, original) record so the DB keeps no
         // ghost path (reorganize never tries to move a deleted aaxc); the
         // decrypted row marks the item as downloaded.
-        drop_original_record(ctx, marketplace, asin, format, no_db_write).await;
+        drop_original_record(ctx, marketplace, asin, format, no_db_write).await?;
         audio_superseded = true;
     }
     Ok(Some((
@@ -446,20 +446,26 @@ async fn decrypt_aaxc(
 /// it removed itself. The `decrypted` row — same content_format and
 /// request_kind — keeps the item recorded for the format-aware skip. A
 /// no-op under `--no-db-write` (there is no record to drop, and existing
-/// records must stay untouched).
+/// records must stay untouched). A failed drop propagates: the database
+/// would keep a `downloaded` row for a file this run just deleted, and
+/// the run must not report that state with exit 0.
 pub(super) async fn drop_original_record(
     ctx: &Ctx,
     marketplace: &str,
     asin: &str,
     content_format: &str,
     no_db_write: bool,
-) {
+) -> Result<()> {
     if no_db_write {
-        return;
+        return Ok(());
     }
-    let Ok(db) = ctx.open_library_db().await else {
-        return;
+    let context = || {
+        format!(
+            "{asin}: the aaxc was decrypted and removed, but dropping its \
+             database record failed — the record now points at a deleted file"
+        )
     };
+    let db = ctx.open_library_db().await.with_context(context)?;
     let key = (
         asin.to_owned(),
         marketplace.to_owned(),
@@ -467,9 +473,8 @@ pub(super) async fn drop_original_record(
         content_format.to_owned(),
         "original".to_owned(),
     );
-    if let Err(error) = db.delete_downloads(vec![key]).await {
-        tracing::warn!(%error, "could not drop the original audio record after decrypt");
-    }
+    db.delete_downloads(vec![key]).await.with_context(context)?;
+    Ok(())
 }
 
 /// Reads the `{ "key", "iv" }` voucher sidecar. `None` if absent/unreadable.
@@ -498,29 +503,30 @@ fn aaxc_format(audio: &Path) -> String {
 
 /// Whether a `decrypted` audio row for exactly this `content_format` is
 /// recorded (AUD-95: keyed by format, so one format's playable file does not
-/// block decrypting another format of the same title).
+/// block decrypting another format of the same title). A database error
+/// propagates — answering "not recorded" would re-run a whole decrypt.
 pub(super) async fn decrypted_recorded(
     ctx: &Ctx,
     marketplace: &str,
     asin: &str,
     content_format: &str,
-) -> bool {
-    let Ok(db) = ctx.open_library_db().await else {
-        return false;
-    };
-    db.download_records_variant(
-        asin.to_owned(),
-        marketplace.to_owned(),
-        "audio".to_owned(),
-        "decrypted".to_owned(),
-    )
-    .await
-    .map(|records| {
-        records
-            .iter()
-            .any(|record| record.content_format == content_format)
-    })
-    .unwrap_or(false)
+) -> Result<bool> {
+    let db = ctx
+        .open_library_db()
+        .await
+        .context("could not consult the download records (skip check)")?;
+    let records = db
+        .download_records_variant(
+            asin.to_owned(),
+            marketplace.to_owned(),
+            "audio".to_owned(),
+            "decrypted".to_owned(),
+        )
+        .await
+        .context("could not consult the download records (skip check)")?;
+    Ok(records
+        .iter()
+        .any(|record| record.content_format == content_format))
 }
 
 /// The recorded `(audio, original)` download (the aaxc to decrypt) whose file
