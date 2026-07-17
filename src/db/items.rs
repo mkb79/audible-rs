@@ -222,13 +222,41 @@ pub fn state_token_iso(raw: &str) -> Option<String> {
     timestamp.format(format).ok()
 }
 
+/// The `items_fts` columns a `col:term` filter may target. `asin` is
+/// UNINDEXED and cannot appear in a MATCH, so it is deliberately absent.
+const FTS_FILTER_COLUMNS: [&str; 3] = ["full_title", "title", "subtitle"];
+
+/// True when every `:` in the query directly follows a real FTS column
+/// name (`title:dune`, negated `-title:dune`). Only then is a colon FTS5
+/// syntax; in "Dune: Part Two" it is title punctuation, and passing it
+/// through would make FTS5 read `Dune:` as a filter on a nonexistent
+/// column ("no such column: Dune").
+fn colons_are_column_filters(text: &str) -> bool {
+    let mut found_any = false;
+    for (idx, _) in text.match_indices(':') {
+        let ident_rev: String = text[..idx]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        let ident: String = ident_rev.chars().rev().collect();
+        if !FTS_FILTER_COLUMNS.contains(&ident.as_str()) {
+            return false;
+        }
+        found_any = true;
+    }
+    found_any
+}
+
 /// Prepares a user query for an FTS5 `MATCH`. Plain words become
 /// quoted prefix tokens joined by an implicit AND, so `jed` finds
 /// "Jedi" and punctuation can no longer break the query syntax
 /// (`c++` would otherwise be a syntax error). If the input already
-/// uses FTS5 syntax (`"`, `*`, `(`, `)`, `:`, `^`, or a bare
-/// `AND`/`OR`/`NOT`/`NEAR` token), it is passed through unchanged so
-/// power users keep full control.
+/// uses FTS5 syntax (`"`, `*`, `(`, `)`, `^`, a `column:` filter, or a
+/// bare `AND`/`OR`/`NOT`/`NEAR` token), it is passed through unchanged
+/// so power users keep full control. A colon after anything that is
+/// not an FTS column ("Dune: Part Two") is ordinary punctuation and is
+/// tokenized like any other word.
 pub fn prepare_fts_query(input: &str) -> String {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -239,8 +267,8 @@ pub fn prepare_fts_query(input: &str) -> String {
         || trimmed.contains('*')
         || trimmed.contains('(')
         || trimmed.contains(')')
-        || trimmed.contains(':')
         || trimmed.contains('^')
+        || colons_are_column_filters(trimmed)
     {
         return trimmed.to_owned();
     }
@@ -2729,6 +2757,38 @@ mod tests {
         assert_eq!(prepare_fts_query("NEAR(jedi sith)"), "NEAR(jedi sith)");
     }
 
+    #[test]
+    fn prepare_fts_query_colon_is_punctuation_unless_column_filter() {
+        // A subtitle colon is punctuation: tokenized, not passed through
+        // (passthrough would raise "no such column: Dune" in FTS5).
+        assert_eq!(
+            prepare_fts_query("Dune: Part Two"),
+            "\"Dune:\"* \"Part\"* \"Two\"*"
+        );
+        // Colon glued to the next word, same story.
+        assert_eq!(
+            prepare_fts_query("12:30 to Paris"),
+            "\"12:30\"* \"to\"* \"Paris\"*"
+        );
+        // A real column filter is power-user FTS5 syntax: passthrough.
+        assert_eq!(prepare_fts_query("title:dune"), "title:dune");
+        assert_eq!(prepare_fts_query("subtitle:two"), "subtitle:two");
+        assert_eq!(
+            prepare_fts_query("full_title:dune title:part"),
+            "full_title:dune title:part"
+        );
+        // Negated column filter keeps working.
+        assert_eq!(prepare_fts_query("-title:dune"), "-title:dune");
+        // One real filter plus one punctuation colon: not a valid filter
+        // query as a whole, so it is tokenized.
+        assert_eq!(
+            prepare_fts_query("title:dune Bonus: extras"),
+            "\"title:dune\"* \"Bonus:\"* \"extras\"*"
+        );
+        // The UNINDEXED asin column cannot be matched: treat as text.
+        assert_eq!(prepare_fts_query("asin:B0EXAMPLE1"), "\"asin:B0EXAMPLE1\"*");
+    }
+
     #[tokio::test]
     async fn fts_prefix_search_finds_partial_title() {
         let (_dir, db) = open_temp().await;
@@ -2773,5 +2833,54 @@ mod tests {
             .unwrap();
         assert_eq!(exact.len(), 1);
         assert_eq!(exact[0].asin, "SW1");
+    }
+
+    #[tokio::test]
+    async fn fts_search_matches_titles_with_colons() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        db.apply_page(
+            MP.into(),
+            vec![item("DN2", "Dune: Part Two"), item("SW1", "Star Wars")],
+            vec![],
+            SyncLogEntry {
+                request_time_utc: now_iso_utc(),
+                response_time_utc: now_iso_utc(),
+                http_status: Some(200),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Searching with the colon typed exactly as the title carries it
+        // used to raise "no such column: Dune"; it must match the title.
+        let results = db
+            .search(
+                vec![MP.to_owned()],
+                vec![],
+                "Dune: Part Two".into(),
+                10,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1, "colon query must find 'Dune: Part Two'");
+        assert_eq!(results[0].asin, "DN2");
+
+        // A genuine column filter still reaches FTS5 untouched.
+        let filtered = db
+            .search(
+                vec![MP.to_owned()],
+                vec![],
+                "full_title:dune".into(),
+                10,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].asin, "DN2");
     }
 }
