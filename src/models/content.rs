@@ -110,6 +110,22 @@ impl DownloadLicense {
         self.status_code == "Granted" && self.offline_url.is_some()
     }
 
+    /// The content-version identity for resume validation (A9):
+    /// `acr:version:file_version`. `None` when the license carries none of
+    /// them (nothing to gate on). A corrected re-release changes acr and
+    /// version, so a stale partial's marker no longer matches.
+    pub fn version_tag(&self) -> Option<String> {
+        if self.acr.is_none() && self.version.is_none() && self.file_version.is_none() {
+            return None;
+        }
+        Some(format!(
+            "{}:{}:{}",
+            self.acr.as_deref().unwrap_or(""),
+            self.version.as_deref().unwrap_or(""),
+            self.file_version.as_deref().unwrap_or("")
+        ))
+    }
+
     /// Decrypts the aaxc voucher to obtain the file's `key`/`iv`.
     ///
     /// The voucher key is `sha256(device_type + device_serial +

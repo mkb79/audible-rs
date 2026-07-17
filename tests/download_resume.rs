@@ -48,6 +48,7 @@ async fn fresh_download_writes_the_whole_file() {
         None,
         &[],
         &[],
+        None,
     )
     .await
     .unwrap();
@@ -95,6 +96,7 @@ async fn resumes_from_a_partial_file() {
         None,
         &[],
         &[],
+        None,
     )
     .await
     .unwrap();
@@ -124,6 +126,7 @@ async fn already_complete_file_is_not_refetched() {
         None,
         &[],
         &[],
+        None,
     )
     .await
     .unwrap();
@@ -152,6 +155,7 @@ async fn an_extension_corrected_file_counts_as_complete() {
         None,
         &[],
         &[("audio/mpeg", "mp3"), ("audio/mp4", "m4a")],
+        None,
     )
     .await
     .unwrap();
@@ -186,6 +190,7 @@ async fn force_refetches_an_already_complete_file() {
         None,
         &[],
         &[],
+        None,
     )
     .await
     .unwrap();
@@ -222,6 +227,7 @@ async fn rejects_wrong_content_type() {
         None,
         &["audio/aax", "audio/vnd.audible.aax", "audio/mpeg"],
         &[],
+        None,
     )
     .await
     .unwrap_err();
@@ -254,6 +260,7 @@ async fn cenc_rejects_wrong_content_type() {
         false,
         None,
         &["audio/mp4", "video/mp4"],
+        None,
     )
     .await
     .unwrap_err();
@@ -300,6 +307,7 @@ async fn a_416_discards_the_partial_and_restarts() {
         None,
         &[],
         &[],
+        None,
     )
     .await
     .unwrap();
@@ -336,6 +344,7 @@ async fn a_short_transfer_keeps_the_partial_and_errors() {
         None,
         &[],
         &[],
+        None,
     )
     .await
     .unwrap_err();
@@ -374,6 +383,7 @@ async fn an_oversized_transfer_discards_the_partial_and_errors() {
         None,
         &[],
         &[],
+        None,
     )
     .await
     .unwrap_err();
@@ -384,6 +394,89 @@ async fn an_oversized_transfer_discards_the_partial_and_errors() {
         !dest.with_file_name("Book.aaxc.part").exists(),
         "a mixed-content partial must not survive"
     );
+}
+
+/// A9: a `.part` from a different content version is discarded and the
+/// file re-fetched clean — the CDN gives no HTTP validator, so the guard
+/// is the license version stamped in a `<part>.ver` marker. This catches
+/// the one case the size check cannot: a corrected re-release at the
+/// exact same byte length.
+#[tokio::test]
+async fn a_partial_of_a_different_version_is_discarded() {
+    let server = MockServer::start().await;
+    // The whole file is served fresh (no Range honoured) — a clean
+    // restart must fetch all 20 bytes, not resume the 8 stale ones.
+    Mock::given(method("GET"))
+        .and(path("/file"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(FULL))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("Book.aaxc");
+    // A stale 8-byte partial stamped with an OLD version marker.
+    std::fs::write(dest.with_file_name("Book.aaxc.part"), b"OLDBYTES").unwrap();
+    std::fs::write(dest.with_file_name("Book.aaxc.part.ver"), "CR!OLD:1:1").unwrap();
+
+    let client = make_client(&server);
+    let (outcome, _) = download_to_file(
+        &client,
+        &format!("{}/file", server.uri()),
+        &dest,
+        Some(20),
+        false,
+        None,
+        &[],
+        &[],
+        Some("CR!NEW:2:1"), // the current license is a newer version
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, DownloadOutcome::Downloaded);
+    assert_eq!(
+        std::fs::read(&dest).unwrap(),
+        FULL,
+        "the new version is fetched whole; no stale bytes survive"
+    );
+    // Both the partial and its marker are gone after completion.
+    assert!(!dest.with_file_name("Book.aaxc.part").exists());
+    assert!(!dest.with_file_name("Book.aaxc.part.ver").exists());
+}
+
+/// A9: a `.part` with a MATCHING version marker is resumed normally, and
+/// the marker is cleaned up on completion.
+#[tokio::test]
+async fn a_partial_of_the_same_version_resumes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/file"))
+        .and(header("range", "bytes=8-"))
+        .respond_with(ResponseTemplate::new(206).set_body_bytes(&FULL[8..]))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("Book.aaxc");
+    std::fs::write(dest.with_file_name("Book.aaxc.part"), &FULL[..8]).unwrap();
+    std::fs::write(dest.with_file_name("Book.aaxc.part.ver"), "CR!SAME:7:1").unwrap();
+
+    let client = make_client(&server);
+    let (outcome, _) = download_to_file(
+        &client,
+        &format!("{}/file", server.uri()),
+        &dest,
+        Some(20),
+        false,
+        None,
+        &[],
+        &[],
+        Some("CR!SAME:7:1"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, DownloadOutcome::Downloaded);
+    assert_eq!(std::fs::read(&dest).unwrap(), FULL, "resumed to completion");
+    assert!(!dest.with_file_name("Book.aaxc.part.ver").exists());
 }
 
 #[tokio::test]
@@ -411,6 +504,7 @@ async fn accepts_matching_content_type() {
         None,
         &["audio/aax"],
         &[],
+        None,
     )
     .await
     .unwrap();

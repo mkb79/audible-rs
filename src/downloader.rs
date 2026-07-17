@@ -113,6 +113,7 @@ pub async fn download_to_file(
     progress: Option<&MultiProgress>,
     expected_content_type: &[&str],
     ext_overrides: &[(&str, &str)],
+    version_tag: Option<&str>,
 ) -> Result<(DownloadOutcome, PathBuf), DownloadError> {
     stream_to_file(
         dest,
@@ -122,6 +123,7 @@ pub async fn download_to_file(
         expected_content_type,
         ext_overrides,
         url,
+        version_tag,
         // Auth flow required (a plain GET 403s); a Range header only when
         // actually resuming.
         |offset| async move {
@@ -165,6 +167,7 @@ pub async fn download_cenc_to_file(
     force: bool,
     progress: Option<&MultiProgress>,
     expected_content_type: &[&str],
+    version_tag: Option<&str>,
 ) -> Result<(DownloadOutcome, PathBuf), DownloadError> {
     stream_to_file(
         dest,
@@ -174,6 +177,7 @@ pub async fn download_cenc_to_file(
         expected_content_type,
         &[],
         url,
+        version_tag,
         // The CENC host requires a ranged request even from zero
         // (`bytes=0-`) and 403s on the API client's Accept-Encoding, so
         // this path uses the plain client with the player User-Agent.
@@ -200,16 +204,27 @@ pub async fn download_cenc_to_file(
 /// partial restarts; a `416` no longer trusts the partial (see below).
 /// On success the part file is renamed onto the final destination.
 ///
-/// Resume validation (audit 2026-07-17, A9 — the locally provable half;
-/// `If-Range`/version validation awaits wire confirmation):
-/// - a `416` proves only that the partial is at/past the remote EOF — a
-///   shrunk replacement file (PDF/cover re-issue) would otherwise strand
-///   truncated old bytes as "complete". The partial is discarded and the
-///   transfer restarts from zero.
-/// - after the transfer, the written byte count must equal
-///   `expected_size` (when known): short = kept partial + error, long =
-///   the remote file changed (a resumed partial would be head-of-old +
-///   tail-of-new) → partial discarded + error. Never a silent rename.
+/// Resume validation (audit 2026-07-17, A9). The CDN gives no HTTP
+/// validator on content responses — no `ETag`, no `Last-Modified`,
+/// `x-amz-version-id: null` (confirmed against live captures) — so
+/// `If-Range` is impossible; the version identity comes from the license
+/// instead, via `version_tag` (`acr:version:file_version`, which the
+/// signed URL also encodes in its path). The three guards:
+/// - **version marker**: a resumable `.part` is trusted only when its
+///   sibling `<part>.ver` matches `version_tag`. A corrected re-release
+///   (new acr/version, even at the *same* byte length — the one case the
+///   size check below cannot catch) mismatches, so the partial is
+///   discarded and the transfer restarts clean.
+/// - **416**: proves only that the partial is at/past the remote EOF — a
+///   shrunk replacement file (PDF/cover re-issue, `expected_size`
+///   unknown) would otherwise strand truncated old bytes as "complete".
+///   The partial is discarded and the transfer restarts from zero.
+/// - **post-transfer byte count** must equal `expected_size` (when
+///   known): short = kept partial + error, long = the remote file
+///   changed → partial discarded + error. Never a silent rename.
+///
+/// `version_tag` is `None` for artifacts with no license version (covers,
+/// PDFs, chapters): those keep only the 416 + size guards.
 #[allow(clippy::too_many_arguments)]
 async fn stream_to_file<Fut>(
     dest: &Path,
@@ -219,6 +234,7 @@ async fn stream_to_file<Fut>(
     expected_content_type: &[&str],
     ext_overrides: &[(&str, &str)],
     url: &str,
+    version_tag: Option<&str>,
     build_request: impl Fn(u64) -> Fut,
 ) -> Result<(DownloadOutcome, PathBuf), DownloadError>
 where
@@ -248,6 +264,7 @@ where
     }
 
     let part = part_path(dest);
+    let marker = version_marker_path(&part);
     let mut offset = if force {
         0
     } else {
@@ -256,6 +273,26 @@ where
             Err(_) => 0,
         }
     };
+    // Version-gate a resumable partial (A9): trust it only when its
+    // `<part>.ver` marker matches the license version we are about to
+    // download with. A corrected re-release mismatches (or a
+    // marker-less partial from before this check exists) → discard and
+    // restart clean, so no head-of-old + tail-of-new can survive.
+    if offset > 0
+        && let Some(tag) = version_tag
+    {
+        let recorded = tokio::fs::read_to_string(&marker).await.ok();
+        if recorded.as_deref() != Some(tag) {
+            tracing::warn!(
+                partial = %part.display(),
+                "the partial belongs to a different content version — discarding and \
+                 restarting from scratch"
+            );
+            tokio::fs::remove_file(&part).await?;
+            let _ = tokio::fs::remove_file(&marker).await;
+            offset = 0;
+        }
+    }
     // Verify a resumable partial against the expected size before asking
     // the server: an oversized partial is corrupt (restart from scratch),
     // a partial exactly at the expected size needs no request at all.
@@ -271,6 +308,7 @@ where
             offset = 0;
         } else if offset == size && offset > 0 {
             tokio::fs::rename(&part, dest).await?;
+            let _ = tokio::fs::remove_file(&marker).await;
             return Ok((DownloadOutcome::Downloaded, dest.to_path_buf()));
         }
     }
@@ -362,6 +400,14 @@ where
         .open(&part)
         .await?;
 
+    // Stamp the partial's content version so a later resume can trust
+    // (or reject) it. Written for a fresh start and a validated resume
+    // alike; best-effort — a missing marker just forces a clean restart
+    // next time, never a wrong resume.
+    if let Some(tag) = version_tag {
+        let _ = tokio::fs::write(&marker, tag).await;
+    }
+
     let mut stream = response.bytes_stream();
     let mut written = offset;
     while let Some(chunk) = stream.next().await {
@@ -388,13 +434,14 @@ where
             // More data than expected: the remote file changed — an
             // appended-to partial would be head-of-old + tail-of-new.
             tokio::fs::remove_file(&part).await?;
+            let _ = tokio::fs::remove_file(&marker).await;
             return Err(DownloadError::SizeMismatch {
                 written,
                 expected: size,
             });
         }
         // Short: the stream ended early without an error. Keep the
-        // partial — the next run resumes exactly there.
+        // partial (and its version marker) — the next run resumes there.
         return Err(DownloadError::ShortTransfer {
             written,
             expected: size,
@@ -402,7 +449,17 @@ where
     }
 
     tokio::fs::rename(&part, &final_dest).await?;
+    // The completed file needs no version marker.
+    let _ = tokio::fs::remove_file(&marker).await;
     Ok((DownloadOutcome::Downloaded, final_dest))
+}
+
+/// The sibling marker of a `.part` that records the content version it was
+/// written for (A9). Kept next to the partial and removed on completion.
+fn version_marker_path(part: &Path) -> PathBuf {
+    let mut name = part.file_name().unwrap_or_default().to_os_string();
+    name.push(".ver");
+    part.with_file_name(name)
 }
 
 /// The extension to use for a response `Content-Type`, if an override matches
@@ -637,6 +694,13 @@ mod tests {
                     Some("https://cds.example/companion.pdf")
                 );
                 assert_eq!(license.content_size, Some(123));
+                // A9: the CENC resume gate depends on this being populated
+                // from content_reference (acr:version). The version is the
+                // same identifier that appears in the signed CENC URL path
+                // (verified live), so a re-release changes it.
+                assert_eq!(license.acr.as_deref(), Some("CR!ABC"));
+                assert_eq!(license.version.as_deref(), Some("42"));
+                assert_eq!(license.version_tag().as_deref(), Some("CR!ABC:42"));
             }
             WidevineGrant::Mpeg(_) => panic!("expected a Widevine grant"),
         }
@@ -955,6 +1019,21 @@ pub struct WidevineLicense {
     pub content_size: Option<u64>,
     /// Companion PDF URL, if the title has one and `pdf_url` was requested.
     pub pdf_url: Option<String>,
+}
+
+impl WidevineLicense {
+    /// The content-version identity for CENC resume validation (A9):
+    /// `acr:version`. `None` when the grant carries neither.
+    pub fn version_tag(&self) -> Option<String> {
+        if self.acr.is_none() && self.version.is_none() {
+            return None;
+        }
+        Some(format!(
+            "{}:{}",
+            self.acr.as_deref().unwrap_or(""),
+            self.version.as_deref().unwrap_or("")
+        ))
+    }
 }
 
 /// A Mpeg fallback grant from a `[Widevine, Mpeg]` request — a plain, DRM-free

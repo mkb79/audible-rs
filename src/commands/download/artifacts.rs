@@ -68,6 +68,9 @@ pub(super) async fn download_audio(
             ("audio/mp4", "m4a"),
             ("audio/x-m4a", "m4a"),
         ],
+        // Gate a resumed partial on the license's content version (A9):
+        // a corrected re-release must not be resumed over old bytes.
+        license.version_tag().as_deref(),
     )
     .await?;
     match outcome {
@@ -238,7 +241,9 @@ pub(super) async fn download_pdf(
         &format!("{base}{}", crate::naming::artifact_suffix("pdf", "", "pdf")),
     );
 
-    // PDFs are small — no byte bar, just counted in the summary.
+    // PDFs are small — no byte bar, just counted in the summary. No
+    // version tag: a companion PDF carries no license version, and its
+    // unknown size already routes re-issues through the 416 guard.
     let (_, dest) = match download_to_file(
         client,
         &url,
@@ -248,6 +253,7 @@ pub(super) async fn download_pdf(
         None,
         &["application/octet-stream", "application/pdf"],
         &[],
+        None,
     )
     .await
     {
@@ -355,7 +361,18 @@ pub(super) async fn download_covers(
             ),
         );
         // Covers are small — no byte bar, just counted in the summary.
-        download_to_file(client, &url, &dest, None, force, None, &["image/jpeg"], &[]).await?;
+        download_to_file(
+            client,
+            &url,
+            &dest,
+            None,
+            force,
+            None,
+            &["image/jpeg"],
+            &[],
+            None,
+        )
+        .await?;
 
         let file_size = std::fs::metadata(&dest).ok().map(|m| m.len());
         record_download(

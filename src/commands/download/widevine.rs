@@ -150,6 +150,9 @@ pub(super) async fn download_audio_widevine(
                 force,
                 mp,
                 &["audio/mpeg"],
+                // The Mpeg fallback grant carries no content_reference
+                // version; its size guard covers a re-issue.
+                None,
             )
             .await?;
             let size = std::fs::metadata(&dest).ok().map(|meta| meta.len());
@@ -214,6 +217,8 @@ pub(super) async fn download_audio_widevine(
         force,
         mp,
         &["audio/mp4", "video/mp4"],
+        // Gate a resumed CENC partial on the grant's content version (A9).
+        license.version_tag().as_deref(),
     )
     .await?;
     if matches!(outcome, DownloadOutcome::AlreadyComplete) {
