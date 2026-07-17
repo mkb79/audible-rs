@@ -38,6 +38,8 @@ pub(super) struct DownloadPlan<'a> {
     pub(super) codec_xhe: bool,
     /// Request Dolby Atmos on the Widevine path (guarded by the CDM's L1 level).
     pub(super) spatial: bool,
+    /// Catalog documents for titles the library does not hold (AUD-197).
+    pub(super) external: &'a super::ExternalDocs,
     /// The account's loaded Widevine CDM (+ security level), if configured.
     pub(super) cdm: Option<&'a (crate::widevine::Cdm, u8)>,
     /// Where heavy (audio) transfers add their byte bar; `None` when no
@@ -88,7 +90,16 @@ pub(super) async fn download_one(
     plan: &DownloadPlan<'_>,
 ) -> Result<Vec<(String, String)>> {
     let mut targets = plan.base_targets.clone();
-    let base = base_filename(ctx, plan.marketplace, asin).await?;
+    // A title the library holds names itself from its stored document. One it
+    // does not hold has none to read, so it is named from the catalog document
+    // this run fetched, and filed apart — see `external_base_filename` for why
+    // apart (AUD-197).
+    let base = match plan.external.get(asin) {
+        Some(doc) => {
+            crate::naming::external_base_filename(ctx, plan.marketplace, asin, doc).await?
+        }
+        None => base_filename(ctx, plan.marketplace, asin).await?,
+    };
     // The custom filename mode may nest the title in subfolders; create them
     // before any artifact is written (a no-op for the flat modes).
     let stem = crate::naming::join_relative(plan.dir, &base);
