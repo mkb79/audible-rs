@@ -133,11 +133,37 @@ pub(super) async fn download_one(
         }
     }
 
-    // Re-use a stored, still-valid license for this title (the content URL
-    // is stable), which skips a fresh licenserequest entirely — unless
-    // `--relicense` forces a fresh grant. With no download targets left
-    // (decrypt-only fall-through) no license is needed at all.
-    let mut license = if plan.relicense || targets.is_empty() {
+    // `--widevine` forces the DASH path for audio; otherwise a title with no
+    // downloadable aaxc asset (aaxc licenserequest → 000307/acr:null — e.g. an
+    // AYCL/Plus title Audible now serves via Widevine only) falls back to it,
+    // which is what makes the aaxc attempt below the detection for it.
+    let mut widevine_audio = plan.widevine;
+
+    // A license only ever serves the aaxc audio download: PDFs load from the
+    // companion-file URL without one (AUD-103), chapters and covers come from
+    // metadata, and the Widevine path brings its own. No aaxc audio in this run
+    // means no license — not a stored one either.
+    //
+    // The reuse used to run for *any* target, which is how a cover-only run came
+    // to announce `stored license URL expired — re-licensing` and then re-license
+    // nothing: the message is printed where the lookup happens, while whether a
+    // request follows is decided here (AUD-214). One condition now answers both,
+    // so the two cannot drift apart again.
+    //
+    // Read before the fallback above can fire, and deliberately so: `false` here
+    // must mean "the user forced the DASH path", never "the title turned out to
+    // have no aaxc" — that is only known *because* this request is attempted.
+    // Both uses sit above it; a third one below would silently read the other
+    // answer.
+    let wants_aaxc_audio = !widevine_audio
+        && targets
+            .iter()
+            .any(|target| matches!(target, Artifact::Audio));
+
+    // Re-use a stored, still-valid license for this title (the content URL is
+    // stable), which skips a fresh licenserequest entirely — unless
+    // `--relicense` forces a fresh grant.
+    let mut license = if plan.relicense || !wants_aaxc_audio {
         None
     } else {
         reuse_license(ctx, plan.marketplace, asin, audio_candidates).await
@@ -146,18 +172,7 @@ pub(super) async fn download_one(
         eprintln!("reusing stored license for {asin}");
     }
 
-    // `--widevine` forces the DASH path for audio; otherwise a title with no
-    // downloadable aaxc asset (aaxc licenserequest → 000307/acr:null — e.g. an
-    // AYCL/Plus title Audible now serves via Widevine only) falls back to it.
-    let mut widevine_audio = plan.widevine;
-
-    // A license is needed only for the aaxc audio download: PDFs load from the
-    // companion-file URL without one (AUD-103), chapters/cover come from
-    // metadata, and the Widevine path brings its own license.
-    let needs_license = license.is_none()
-        && targets
-            .iter()
-            .any(|target| matches!(target, Artifact::Audio) && !widevine_audio);
+    let needs_license = license.is_none() && wants_aaxc_audio;
     if needs_license {
         match acquire_license(
             ctx,
@@ -171,9 +186,16 @@ pub(super) async fn download_one(
         {
             Ok(granted) => license = Some(granted),
             // No downloadable aaxc asset (an AYCL/Plus title Audible serves via
-            // Widevine only): route audio through Widevine.
+            // Widevine only): route audio through Widevine. This failure *is*
+            // the detection — nothing else tells us a title is streaming-only.
             Err(error) if is_no_aaxc_asset(&error) => {
-                eprintln!("{asin}: no aaxc asset (Widevine only) — using the Widevine path");
+                // Only claim the Widevine path when there is a CDM to walk it
+                // with. Without one the audio branch stops right below, naming
+                // the reason and the way out, so a line promising a path we are
+                // about to fail on would contradict the next one (AUD-215).
+                if plan.cdm.is_some() {
+                    eprintln!("{asin}: no aaxc asset (Widevine only) — using the Widevine path");
+                }
                 widevine_audio = true;
             }
             Err(error) => return Err(error),
