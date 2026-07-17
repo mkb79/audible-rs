@@ -247,7 +247,17 @@ async fn save_annot(
 ) -> Result<std::path::PathBuf> {
     let base = base_filename(ctx, marketplace, asin).await?;
     let dir = download_dir(ctx)?;
-    let dest = dir.join(format!("{base}.annot"));
+    // join_relative, not a plain join (audit 2026-07-17, C6): a custom
+    // template embeds `/` in `base`, and a plain join records
+    // mixed-separator paths on Windows — the exact hazard the naming
+    // module exists to prevent; `reorganize` already goes through it.
+    let dest = crate::naming::join_relative(
+        &dir,
+        &format!(
+            "{base}{}",
+            crate::naming::artifact_suffix("annotation", "", "annot")
+        ),
+    );
     // `base` may nest folders (custom filename mode); create the parent.
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;

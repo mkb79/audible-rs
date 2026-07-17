@@ -280,7 +280,10 @@ pub(super) async fn reorganize(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()>
                 &values,
             )?;
             let old = PathBuf::from(&path);
-            let new = join_relative(&target_dir, &format!("{base}.annot"));
+            let new = join_relative(
+                &target_dir,
+                &format!("{base}{}", artifact_suffix("annotation", "", "annot")),
+            );
             if old == new {
                 continue;
             }

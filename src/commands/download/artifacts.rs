@@ -33,10 +33,13 @@ pub(super) async fn download_audio(
     // The content format is part of the file name so different qualities
     // of the same title do not overwrite each other on disk.
     let format = license.content_format.as_deref().filter(|f| !f.is_empty());
-    let planned = match format {
-        Some(format) => join_relative(dir, &format!("{base}.{format}.aaxc")),
-        None => join_relative(dir, &format!("{base}.aaxc")),
-    };
+    let planned = join_relative(
+        dir,
+        &format!(
+            "{base}{}",
+            crate::naming::artifact_suffix("audio", format.unwrap_or(""), "aaxc")
+        ),
+    );
 
     // The on-disk extension follows the response Content-Type: the plain,
     // DRM-free variants (`audio/mpeg` → .mp3, AAC-in-MP4 → .m4a) get their
@@ -77,8 +80,8 @@ pub(super) async fn download_audio(
     // encrypted `.aaxc` downloads need one — plain media (mp3/m4a podcast
     // episodes) is DRM-free and its license carries only an empty voucher, so
     // write the sidecar only when the file actually stayed encrypted.
-    if dest.extension().and_then(|ext| ext.to_str()) == Some("aaxc") {
-        write_keyfile(client, license, &dest.with_extension("voucher"));
+    if let Some(sidecar) = crate::naming::sidecar_path(&dest) {
+        write_keyfile(client, license, &sidecar);
     }
 
     let size = std::fs::metadata(&dest).ok().map(|m| m.len());
@@ -164,7 +167,13 @@ pub(super) async fn write_chapters(
     )
     .await
     .context("could not fetch chapter metadata")?;
-    let dest = join_relative(dir, &format!("{base}.chapters_{token}.json"));
+    let dest = join_relative(
+        dir,
+        &format!(
+            "{base}{}",
+            crate::naming::artifact_suffix("chapter", token, "json")
+        ),
+    );
     std::fs::write(&dest, serde_json::to_vec_pretty(&chapters)?)
         .with_context(|| format!("could not write {}", dest.display()))?;
 
@@ -224,7 +233,10 @@ pub(super) async fn download_pdf(
         "https://www.audible.{}/companion-file/{asin}",
         locale.domain
     );
-    let dest = join_relative(dir, &format!("{base}.pdf"));
+    let dest = join_relative(
+        dir,
+        &format!("{base}{}", crate::naming::artifact_suffix("pdf", "", "pdf")),
+    );
 
     // PDFs are small — no byte bar, just counted in the summary.
     let (_, dest) = match download_to_file(
@@ -335,7 +347,13 @@ pub(super) async fn download_covers(
             }
             continue;
         };
-        let dest = join_relative(dir, &format!("{base}.cover_{size}.jpg"));
+        let dest = join_relative(
+            dir,
+            &format!(
+                "{base}{}",
+                crate::naming::artifact_suffix("cover", size, "jpg")
+            ),
+        );
         // Covers are small — no byte bar, just counted in the summary.
         download_to_file(client, &url, &dest, None, force, None, &["image/jpeg"], &[]).await?;
 

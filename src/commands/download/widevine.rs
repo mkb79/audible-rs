@@ -136,7 +136,13 @@ pub(super) async fn download_audio_widevine(
         WidevineGrant::Widevine(license) => license,
         WidevineGrant::Mpeg(mpeg) => {
             eprintln!("{asin}: no Widevine asset — downloading the plain MP3");
-            let dest = join_relative(dir, &format!("{base}.{}.mp3", mpeg.content_format));
+            let dest = join_relative(
+                dir,
+                &format!(
+                    "{base}{}",
+                    crate::naming::artifact_suffix("audio", &mpeg.content_format, "mp3")
+                ),
+            );
             let (_, dest) = download_cenc_to_file(
                 &mpeg.offline_url,
                 &dest,
@@ -179,8 +185,17 @@ pub(super) async fn download_audio_widevine(
         super::request_kind::resolved(super::request_kind::Grant::Widevine, xhe, quality);
 
     // 2. content key (+ `.wvkey` sidecar next to the encrypted file).
-    let enc_path = join_relative(dir, &format!("{base}.{format}.cenc"));
-    let wvkey_path = enc_path.with_extension("wvkey");
+    let enc_path = join_relative(
+        dir,
+        &format!(
+            "{base}{}",
+            crate::naming::artifact_suffix("audio", &format, "cenc")
+        ),
+    );
+    // The key-sidecar location comes from the shared extension map
+    // (AUD-99) — the same rule reorganize/orphans/remove follow.
+    let wvkey_path =
+        crate::naming::sidecar_path(&enc_path).expect("a .cenc path always has a key-sidecar twin");
     let key = match read_wvkey(&wvkey_path) {
         Some(key) => key,
         None => {
@@ -232,7 +247,10 @@ pub(super) async fn download_audio_widevine(
         }
         let out = join_relative(
             dir,
-            &format!("{base}.{format}.{}", decrypted_ext(&stream.codec)),
+            &format!(
+                "{base}{}",
+                crate::naming::artifact_suffix("audio", &format, decrypted_ext(&stream.codec))
+            ),
         );
         let kid = hex::encode(key.kid);
         let key_hex = hex::encode(&*key.key);

@@ -159,6 +159,11 @@ pub(crate) async fn disambiguated_base(
 /// artifact. `ext` is the actual on-disk extension (e.g. `aaxc`/`mp3` for
 /// audio) — for reorganize it comes from the existing file, so a renamed
 /// (`.mp3`) audio keeps its extension.
+///
+/// This is the **single home** of the suffix contract (audit 2026-07-17,
+/// C5): the artifact writers build their file names through it, and
+/// `reorganize` recomputes the same names from the records — a suffix
+/// renamed in only one place would silently stop matching fresh files.
 pub(crate) fn artifact_suffix(kind: &str, content_format: &str, ext: &str) -> String {
     match kind {
         // Audio keeps the quality segment; the decrypted m4b and any reencode
@@ -167,6 +172,7 @@ pub(crate) fn artifact_suffix(kind: &str, content_format: &str, ext: &str) -> St
         "audio" => format!(".{content_format}.{ext}"),
         "cover" => format!(".cover_{content_format}.{ext}"),
         "chapter" => format!(".chapters_{content_format}.{ext}"),
+        "annotation" => ".annot".to_owned(),
         _ => format!(".{ext}"), // pdf and any single-extension artifact
     }
 }
@@ -744,6 +750,7 @@ mod tests {
             ".chapters_tree.json"
         );
         assert_eq!(artifact_suffix("pdf", "", "pdf"), ".pdf");
+        assert_eq!(artifact_suffix("annotation", "", "annot"), ".annot");
     }
 
     #[test]

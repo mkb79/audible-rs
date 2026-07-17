@@ -394,7 +394,15 @@ async fn decrypt_aaxc(
     // `download --decrypt` always fetches audio first, so it is present; a
     // future standalone `audible decrypt` would regenerate it from the stored
     // license when the sidecar is gone.
-    let voucher = aaxc.with_extension("voucher");
+    // The sidecar location comes from the shared extension map (AUD-99);
+    // this branch only ever sees .aaxc inputs, which always have one.
+    let Some(voucher) = crate::naming::sidecar_path(aaxc) else {
+        eprintln!(
+            "{asin}: cannot decrypt {} — not an encrypted original",
+            aaxc.display()
+        );
+        return Ok(None);
+    };
     let Some((key, iv)) = read_keyfile(&voucher) else {
         eprintln!(
             "{asin}: cannot decrypt — no key/iv sidecar at {} (re-run with --kind audio)",
