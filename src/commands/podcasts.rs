@@ -10,7 +10,7 @@ use clap::Arg;
 use crate::config::ctx::Ctx;
 use crate::output::Output;
 
-use super::library::maybe_auto_sync;
+use crate::library_sync::maybe_auto_sync;
 
 /// `audible podcasts` (deprecated).
 pub struct PodcastsCommand;

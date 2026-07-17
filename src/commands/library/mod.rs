@@ -7,37 +7,9 @@ use clap::{Arg, ArgAction};
 
 use crate::config::ctx::Ctx;
 
-/// Response groups every sync request uses; pinned per database
-/// (reference branch default).
-pub const DEFAULT_RESPONSE_GROUPS: &str = "badge_types,is_archived,is_finished,is_playable,is_removable,is_visible,\
-     order_details,origin_asin,percent_complete,shared,ws4v_rights,badges,\
-     category_ladders,category_media,category_metadata,contributors,customer_rights,\
-     media,product_attrs,product_desc,product_details,product_extended_attrs,\
-     product_plans,product_plan_details,profile_sharing,rating,relationships_v2,\
-     sample,sku,pdf_url,series";
-
-/// The cover sizes every library sync requests — the list `audible-cli`
-/// inherited from the Audible app, hence its order rather than a sorted one.
-///
-/// **Do not trim it** (AUD-208): the small entries and the large ones resolve to
-/// different source images, and the largest is the base every other size is
-/// derived from without a further request. Dropping it degrades covers silently.
-const DEFAULT_IMAGE_SIZES: &str = "900,1215,252,558,408,500";
-
-/// Hard cap on concurrent resolution fetches (episode + catalog) across all
-/// marketplaces, shared via one semaphore — multiplexed over HTTP/2.
-const SYNC_RESOLUTION_CONCURRENCY: usize = 10;
 /// How many marketplaces sync concurrently (each paginates sequentially via
 /// its own continuation/state token).
 const SYNC_MARKETPLACE_CONCURRENCY: usize = 4;
-
-/// Response groups valid on `/1.0/catalog/products` — taken verbatim
-/// from captured iOS-app traffic (minus the app-specific
-/// `feature_support`). Library-only groups are rejected there, and
-/// without any groups the catalog returns documents without titles.
-pub(crate) const CATALOG_RESPONSE_GROUPS: &str = "badges,category_ladders,contributors,customer_rights,media,product_attrs,\
-     product_desc,product_details,product_extended_attrs,product_plans,\
-     product_plan_details,profile_sharing,rating,relationships_v2,sample,sku,ws4v_rights";
 
 /// `audible library`.
 pub struct LibraryCommand;
@@ -448,8 +420,7 @@ mod list;
 mod membership;
 mod sync;
 
-pub use sync::{SyncOptions, SyncSummary, sync_library};
-pub(crate) use sync::{maybe_auto_sync, poll_until_reflected, sync};
+pub(crate) use sync::{poll_until_reflected, sync};
 
 use changes::{changes, changes_prune};
 use list::{export, list, list_borrowed, list_missing, list_remote, search};

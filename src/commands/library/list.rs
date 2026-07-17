@@ -8,9 +8,8 @@ use reqwest::Method;
 use crate::api::paginator;
 use crate::config::ctx::Ctx;
 use crate::db::{self};
+use crate::library_sync::{DEFAULT_RESPONSE_GROUPS, maybe_auto_sync};
 use crate::models::library as model;
-
-use super::*;
 
 const BOOK_COLUMNS: [&str; 5] = ["asin", "title", "purchase_date", "runtime_min", "language"];
 

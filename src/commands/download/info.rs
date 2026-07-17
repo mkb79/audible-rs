@@ -47,7 +47,7 @@ pub(super) async fn info(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
 async fn show(ctx: &Ctx, asins: Vec<String>, titles: Vec<String>) -> Result<()> {
     let marketplace = ctx.marketplace_single()?;
     let db = ctx.open_library_db().await?;
-    crate::commands::library::maybe_auto_sync(ctx, &db).await?;
+    crate::library_sync::maybe_auto_sync(ctx, &db).await?;
     let asins = crate::commands::items::resolve_asins(
         &db,
         &marketplace,

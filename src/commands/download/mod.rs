@@ -609,7 +609,7 @@ async fn resolve_source(
         // The selection is DB-based, so honor the auto-sync policy like
         // `library list --missing` does — this is also what keeps the
         // archive filter (below) from working on a stale view (AUD-110).
-        crate::commands::library::maybe_auto_sync(ctx, &db).await?;
+        crate::library_sync::maybe_auto_sync(ctx, &db).await?;
         let kind_values: Vec<String> = kinds.iter().map(|kind| kind.kind().to_owned()).collect();
         let include_archived = matches.get_flag("include_archived");
         let asins = db
