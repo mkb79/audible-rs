@@ -277,12 +277,7 @@ pub(super) async fn download_pdf(
 /// the probe is now skipped.
 async fn library_pdf_flag(ctx: &Ctx, marketplace: &str, asin: &str) -> Option<bool> {
     let value = stored_doc(ctx, marketplace, asin).await?;
-    let flag = value
-        .get("is_pdf_url_available")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-        || value.get("pdf_url").is_some_and(|v| !v.is_null());
-    Some(flag)
+    crate::models::library::pdf_available(&value)
 }
 
 /// Downloads each requested cover size to `<base>.cover_<size>.jpg`. Every size

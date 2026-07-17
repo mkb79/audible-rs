@@ -196,9 +196,10 @@ fn episode_not_archived_clause(include_archived: bool) -> &'static str {
 }
 
 /// Whether a document advertises a companion PDF — the SQL twin of
-/// `commands::download::artifacts::library_pdf_flag`: `is_pdf_url_available`,
-/// with a `pdf_url`-presence fallback. `doc_expr` must name a document column
-/// in scope (e.g. `e.doc`).
+/// [`crate::models::library::pdf_available`] (the Rust source of truth):
+/// `is_pdf_url_available`, with a `pdf_url`-presence fallback. The two are
+/// kept in lockstep by a functional test below. `doc_expr` must name a
+/// document column in scope (e.g. `e.doc`).
 ///
 /// Verified against a real library (AUD-206): the flag and an actual `pdf_url`
 /// agree 100% (29 titles with both, 139 with neither), and **every** podcast
@@ -333,6 +334,43 @@ mod tests {
         }
         let db = Db::open(path, 5000).await.unwrap();
         db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+    }
+
+    /// The SQL predicate must classify exactly like
+    /// `models::library::pdf_available` — one truth, two homes, verified
+    /// functionally (the drift this guards against: `download info` once
+    /// dropped the `pdf_url` fallback and denied PDFs `download --kind pdf`
+    /// would fetch). The SQL side has no "unknown": absent fields gate as
+    /// `false`, i.e. `unwrap_or(false)` on the Rust side.
+    #[test]
+    fn pdf_sql_matches_rust_predicate() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let sql = format!("SELECT COALESCE({}, 0)", pdf_available_sql("?"));
+        let docs = [
+            serde_json::json!({"is_pdf_url_available": true}),
+            serde_json::json!({"is_pdf_url_available": false}),
+            serde_json::json!({"is_pdf_url_available": true, "pdf_url": null}),
+            serde_json::json!({"is_pdf_url_available": false, "pdf_url": "https://example.test/x.pdf"}),
+            serde_json::json!({"pdf_url": "https://example.test/x.pdf"}),
+            serde_json::json!({"pdf_url": null}),
+            serde_json::json!({"title": "carries neither field"}),
+        ];
+        for doc in docs {
+            let text = doc.to_string();
+            let sql_says: bool = conn
+                .query_row(&sql, rusqlite::params![text, text], |row| row.get(0))
+                .unwrap();
+            let rust_says = crate::models::library::pdf_available(&doc).unwrap_or(false);
+            assert_eq!(sql_says, rust_says, "SQL and Rust diverged on {text}");
+        }
+        // The tri-state contract: only a document with neither field is
+        // "unknown" (probe-worthy); a lone `pdf_url: null` means "no".
+        use crate::models::library::pdf_available;
+        assert_eq!(pdf_available(&serde_json::json!({"a": 1})), None);
+        assert_eq!(
+            pdf_available(&serde_json::json!({"pdf_url": null})),
+            Some(false)
+        );
     }
 
     #[test]

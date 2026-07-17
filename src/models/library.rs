@@ -113,6 +113,26 @@ pub fn item_kind(item: &Value) -> &'static str {
     }
 }
 
+/// Whether a document advertises a companion PDF: `is_pdf_url_available`,
+/// with a `pdf_url`-presence fallback (a JSON `null` counts as absent).
+/// `None` when the document carries neither field — the source cannot
+/// know (catalog products hold no ownership data), so callers may probe.
+///
+/// This is the one Rust source of truth for the predicate; the SQL twin
+/// lives in [`crate::db`] (`pdf_available_sql`) and the two are kept in
+/// lockstep by a functional test there. Every consumer (`download`'s
+/// pre-check, `download info`, the `--missing=pdf` gate) must answer the
+/// same way — `download info` once read only the flag and reported
+/// "no PDF" for titles `download --kind pdf` would happily fetch.
+pub fn pdf_available(doc: &Value) -> Option<bool> {
+    let flag = doc.get("is_pdf_url_available").and_then(Value::as_bool);
+    let url_present = doc.get("pdf_url").map(|url| !url.is_null());
+    match (flag, url_present) {
+        (None, None) => None,
+        (flag, url) => Some(flag.unwrap_or(false) || url.unwrap_or(false)),
+    }
+}
+
 /// Expands a series sequence into the volume numbers it covers:
 /// `"3"` → `[3.0]`, `"1-6"` → `[1.0 … 6.0]` (omnibus editions),
 /// empty/unparsable → `[]`.

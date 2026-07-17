@@ -152,8 +152,9 @@ struct AssetFacts {
     codecs: Vec<String>,
     /// `product_images` sizes, ascending.
     image_sizes: Vec<u32>,
-    /// `is_pdf_url_available` — `None` when the source cannot know
-    /// (catalog products carry no ownership data).
+    /// [`crate::models::library::pdf_available`] (flag with `pdf_url`
+    /// fallback) — `None` when the source cannot know (catalog products
+    /// carry no ownership data).
     pdf_available: Option<bool>,
     /// `customer_rights.is_consumable_offline` (library docs only).
     offline_right: Option<bool>,
@@ -188,7 +189,7 @@ fn facts(value: &Value) -> AssetFacts {
     AssetFacts {
         codecs,
         image_sizes,
-        pdf_available: value.get("is_pdf_url_available").and_then(Value::as_bool),
+        pdf_available: crate::models::library::pdf_available(value),
         offline_right: value
             .get("customer_rights")
             .and_then(|rights| rights.get("is_consumable_offline"))
