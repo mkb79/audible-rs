@@ -20,6 +20,23 @@ use crate::config::ctx::{Ctx, Selectors};
 use crate::session::rpc::{self, Auth, Backend};
 use crate::session::tokens::TokenStore;
 
+/// Constant-time equality of a presented token against the admin token
+/// (audit 2026-07-17, B3). A plain `==` short-circuits on the first
+/// differing byte — a timing side-channel on a network-reachable secret
+/// compare. Both sides are SHA-256'd (fixed 32-byte length, so no length
+/// leak either) and the digests folded with XOR: the work is independent
+/// of where — or whether — they differ.
+fn admin_token_matches(presented: &str, expected: &str) -> bool {
+    use sha2::{Digest as _, Sha256};
+    let a = Sha256::digest(presented.as_bytes());
+    let b = Sha256::digest(expected.as_bytes());
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Directory holding the agent's socket, PID and token files.
 fn agent_dir(ctx: &Ctx) -> PathBuf {
     super::runtime_dir(ctx).join("audible")
@@ -131,10 +148,14 @@ impl Backend for AgentBackend {
         true
     }
 
-    fn authenticate(&self, token: &str) -> Option<Auth> {
+    fn authenticate(&self, token: &str, trusted: bool) -> Option<Auth> {
         // The bootstrap admin token grants every scope, unbound (local
-        // CLI convenience). App tokens carry their own scopes + binding.
-        if token == self.admin_token {
+        // CLI convenience) — but **only over a trusted transport** (B3).
+        // Over the untrusted TCP listener it is refused, so a leaked
+        // `agent.token` cannot drive the data routes from the network;
+        // TCP callers must use a scoped app token. The compare is
+        // constant-time (a network-reachable secret compare).
+        if trusted && admin_token_matches(token, &self.admin_token) {
             return Some(Auth {
                 scopes: crate::plugins::VALID_SCOPES
                     .iter()
@@ -206,7 +227,9 @@ impl Backend for AgentBackend {
     }
 
     fn is_admin(&self, token: &str) -> bool {
-        token == self.admin_token
+        // Only reached on the trusted admin surface (`/v1/agent/*` is
+        // TCP-403'd upstream), but constant-time all the same (B3).
+        admin_token_matches(token, &self.admin_token)
     }
 
     async fn unlock(
@@ -583,6 +606,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn admin_token_matches_is_constant_time_correct() {
+        // Correctness of the constant-time compare (the timing property
+        // itself is not unit-testable): exact match only.
+        assert!(admin_token_matches("secret-token", "secret-token"));
+        assert!(!admin_token_matches("secret-token", "secret-toke"));
+        assert!(!admin_token_matches("secret-token", "secret-tokenX"));
+        assert!(!admin_token_matches("", "x"));
+    }
+
     #[tokio::test]
     async fn session_map_resolves_accounts_and_caches() {
         let tmp = tempfile::tempdir().unwrap();
@@ -688,25 +721,48 @@ mod tests {
         assert!(backend.job_status("nonexistent", None).await.is_none());
     }
 
+    /// The token authentication matrix, including B3: the admin token
+    /// authenticates data routes **only over a trusted transport** (the
+    /// local socket). Over the untrusted TCP listener it is refused — a
+    /// leaked `agent.token` cannot drive `/v1/api/request` etc. from the
+    /// network; a scoped app token authenticates over both transports.
     #[test]
-    fn authenticate_only_the_admin_token() {
+    fn authenticate_gates_the_admin_token_by_transport() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = test_ctx(tmp.path());
         let backend = backend(&ctx, Duration::from_secs(1));
-        assert!(backend.authenticate("wrong").is_none());
-        let auth = backend.authenticate("T").unwrap();
-        assert!(
-            auth.scopes.contains(&"api".to_owned()) && auth.scopes.contains(&"invoke".to_owned())
-        );
-        assert!(auth.account.is_none());
 
-        // An app token authenticates with its own scopes + binding.
+        // Trusted: the admin token grants every scope, unbound.
+        let admin = backend
+            .authenticate("T", true)
+            .expect("admin token authenticates over the trusted transport");
+        assert_eq!(admin.caller, "admin");
+        assert!(
+            admin.scopes.contains(&"api".to_owned()) && admin.scopes.contains(&"invoke".to_owned())
+        );
+        assert!(admin.account.is_none());
+
+        // Untrusted (TCP): the admin token is refused (B3), and a wrong
+        // token is refused on either transport.
+        assert!(
+            backend.authenticate("T", false).is_none(),
+            "the admin token must not authenticate over TCP"
+        );
+        assert!(backend.authenticate("wrong", true).is_none());
+        assert!(backend.authenticate("wrong", false).is_none());
+
+        // An app token authenticates with its own scopes + binding, over
+        // both transports (the intended TCP credential).
         let token = backend
             .tokens
             .create("web", vec!["api".into()], Some("b".into()), None)
             .unwrap();
-        let auth = backend.authenticate(&token).unwrap();
-        assert_eq!(auth.scopes, ["api"]);
-        assert_eq!(auth.account.as_deref(), Some("b"));
+        for trusted in [true, false] {
+            let auth = backend
+                .authenticate(&token, trusted)
+                .expect("app token authenticates on any transport");
+            assert_eq!(auth.scopes, ["api"]);
+            assert_eq!(auth.account.as_deref(), Some("b"));
+        }
     }
 }

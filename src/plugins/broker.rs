@@ -92,7 +92,9 @@ struct Ephemeral {
 
 #[async_trait::async_trait]
 impl Backend for Ephemeral {
-    fn authenticate(&self, token: &str) -> Option<Auth> {
+    fn authenticate(&self, token: &str, _trusted: bool) -> Option<Auth> {
+        // The ephemeral broker is UDS-only (always trusted); its single
+        // per-invocation token has no admin/network distinction.
         (token == self.token).then(|| Auth {
             scopes: self.scopes.clone(),
             account: None,

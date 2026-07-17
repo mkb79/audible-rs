@@ -186,7 +186,13 @@ pub trait Backend: Send + Sync + 'static {
     /// binding), or `None` when unauthenticated. Ephemeral: one token,
     /// the manifest scopes, no binding. Agent: admin token or app-token
     /// store.
-    fn authenticate(&self, token: &str) -> Option<Auth>;
+    ///
+    /// `trusted` is the transport: `true` over the local unix socket,
+    /// `false` over the opt-in TCP listener. The bootstrap **admin token
+    /// authenticates only over a trusted transport** (audit 2026-07-17,
+    /// B3) — over TCP only scoped app tokens are accepted, so a leaked
+    /// admin token is not a network-usable super-credential.
+    fn authenticate(&self, token: &str, trusted: bool) -> Option<Auth>;
 
     /// The unlocked context for a request's optional `account` selector.
     /// Ephemeral: always the invoking `Ctx` (ignores `account`). Agent:
@@ -444,7 +450,7 @@ async fn route(
 
     let Some(auth) = token
         .as_deref()
-        .and_then(|token| backend.authenticate(token))
+        .and_then(|token| backend.authenticate(token, trusted))
     else {
         let response = reply(
             StatusCode::UNAUTHORIZED,
@@ -1084,7 +1090,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Backend for TestBackend {
-        fn authenticate(&self, _token: &str) -> Option<Auth> {
+        fn authenticate(&self, _token: &str, _trusted: bool) -> Option<Auth> {
             None
         }
         fn allows_selectors(&self) -> bool {
@@ -1327,7 +1333,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Backend for AuditingBackend {
-        fn authenticate(&self, _token: &str) -> Option<Auth> {
+        fn authenticate(&self, _token: &str, _trusted: bool) -> Option<Auth> {
             None
         }
         async fn session(&self, _account: Option<&str>) -> Result<Arc<Ctx>> {
