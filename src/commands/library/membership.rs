@@ -112,7 +112,7 @@ pub(super) async fn add(
     // Authenticated eligibility (customer_rights) — refuse buy-only up
     // front instead of letting the PUT fail; plus the local library so an
     // already-held title is skipped rather than re-added.
-    let eligibility = catalog::eligibility(client, &marketplace, &asins).await?;
+    let eligibility = crate::catalog::eligibility(client, &marketplace, &asins).await?;
     let db = ctx.open_library_db().await?;
 
     let mut added = Vec::new();

@@ -438,7 +438,7 @@ async fn fetch_catalog_details(
     marketplace: &str,
     asins: Vec<String>,
 ) -> Result<Vec<serde_json::Value>> {
-    crate::commands::catalog::products_batched(
+    crate::catalog::products_batched(
         client,
         marketplace,
         &asins,

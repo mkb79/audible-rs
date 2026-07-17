@@ -204,7 +204,7 @@ async fn catalog_facts(
     asins: &[String],
     into: &mut BTreeMap<String, AssetFacts>,
 ) -> Result<()> {
-    let products = crate::commands::catalog::products_batched(
+    let products = crate::catalog::products_batched(
         client,
         marketplace,
         asins,

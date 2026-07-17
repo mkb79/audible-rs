@@ -26,9 +26,8 @@ use reqwest::Method;
 use serde_json::Value;
 
 use crate::api::client::Client;
-use crate::commands::catalog::{
-    CatalogDetails, catalog_details, format_runtime, resolve_catalog_titles,
-};
+use crate::catalog::{CatalogDetails, catalog_details};
+use crate::commands::catalog::{format_runtime, resolve_catalog_titles};
 use crate::config::ctx::Ctx;
 use crate::output::Output;
 

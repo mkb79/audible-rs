@@ -757,7 +757,7 @@ async fn reconcile_external(
     // says *why*, and supplies the name for the ones that get through. It never
     // decides — unreachable means refuse, not proceed.
     let docs = match ctx.client().await {
-        Ok(client) => crate::commands::catalog::documents(client, marketplace, &unknown).await,
+        Ok(client) => crate::catalog::documents(client, marketplace, &unknown).await,
         Err(error) => Err(error),
     };
     let docs = match docs {
@@ -783,7 +783,7 @@ async fn reconcile_external(
         let named = crate::models::library::build_full_title(doc)
             .map(|title| format!("{asin} ({title})"))
             .unwrap_or_else(|| asin.clone());
-        if crate::commands::catalog::is_consumable(doc) != Some(true) {
+        if crate::catalog::is_consumable(doc) != Some(true) {
             eprintln!(
                 "{named}: not in your library, and your subscription does not cover it — \
                  buying it puts it in your library"
