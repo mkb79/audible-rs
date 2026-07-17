@@ -18,6 +18,68 @@ const CATALOG_BATCH: usize = 50;
 /// Results requested per catalog title search.
 const CATALOG_SEARCH_RESULTS: u32 = 50;
 
+/// One batched `GET /1.0/catalog/products` sweep — the single home of the
+/// catalog batch protocol (audit 2026-07-17, D2). Its rules are server
+/// invariants and silent-failure traps, so nobody reimplements them:
+///
+/// - at most [`CATALOG_BATCH`] ASINs per request (51 → HTTP 400);
+/// - the `asins` param is **one comma-joined value** — repeated `asins=`
+///   params return 200 with a single product, no error;
+/// - an ASIN the catalog has never heard of is echoed back as a hollow
+///   product carrying **only** that ASIN (verified live 2026-07-17, with
+///   and without title-bearing response groups). Presence proves nothing;
+///   hollow echoes are dropped before any caller sees them.
+///
+/// Returns the real products; order across chunks is unspecified when
+/// `concurrency > 1` (callers key by ASIN). `image_sizes` is appended
+/// only when given.
+pub(crate) async fn products_batched(
+    client: &Client,
+    marketplace: &str,
+    asins: &[String],
+    response_groups: &str,
+    image_sizes: Option<&str>,
+    concurrency: usize,
+) -> Result<Vec<Value>> {
+    use futures::{StreamExt as _, TryStreamExt as _};
+    // Owned chunks: borrowing them from `asins` trips rustc's
+    // "Send is not general enough" limitation under buffer_unordered.
+    let chunks: Vec<Vec<String>> = asins
+        .chunks(CATALOG_BATCH)
+        .map(<[String]>::to_vec)
+        .collect();
+    let parts: Vec<Vec<Value>> = futures::stream::iter(chunks)
+        .map(|chunk| async move {
+            let mut request = client
+                .request(Method::GET, "/1.0/catalog/products")
+                .country_code(marketplace)
+                .query("asins", chunk.join(","))
+                .query("response_groups", response_groups);
+            if let Some(sizes) = image_sizes {
+                request = request.query("image_sizes", sizes);
+            }
+            let mut body: Value = request.send().await?.error_for_status()?.json().await?;
+            let products = match body.get_mut("products").map(Value::take) {
+                Some(Value::Array(products)) => products,
+                _ => Vec::new(),
+            };
+            Ok::<_, anyhow::Error>(products.into_iter().filter(is_real_product).collect())
+        })
+        .buffer_unordered(concurrency.max(1))
+        .try_collect()
+        .await?;
+    Ok(parts.into_iter().flatten().collect())
+}
+
+/// A real catalog product carries fields beyond its `asin`; a hollow echo
+/// (unknown ASIN, see [`products_batched`]) carries only the `asin` key.
+fn is_real_product(product: &Value) -> bool {
+    product.get("asin").and_then(Value::as_str).is_some()
+        && product
+            .as_object()
+            .is_some_and(|fields| fields.keys().any(|key| key != "asin"))
+}
+
 /// Catalog display data for one ASIN.
 pub(crate) struct CatalogDetails {
     pub title: String,
@@ -267,18 +329,19 @@ pub(crate) async fn catalog_details(
     asins: &[String],
 ) -> Result<BTreeMap<String, CatalogDetails>> {
     let mut details = BTreeMap::new();
-    for chunk in asins.chunks(CATALOG_BATCH) {
-        let body: Value = client
-            .request(Method::GET, "/1.0/catalog/products")
-            .country_code(marketplace)
-            .query("asins", chunk.join(","))
-            .query("response_groups", "product_desc,product_attrs,contributors")
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        parse_catalog_details(&body, &mut details);
+    let products = products_batched(
+        client,
+        marketplace,
+        asins,
+        "product_desc,product_attrs,contributors",
+        None,
+        1,
+    )
+    .await?;
+    for product in &products {
+        if let Some((asin, detail)) = parse_product(product) {
+            details.insert(asin, detail);
+        }
     }
     Ok(details)
 }
@@ -303,36 +366,31 @@ pub(crate) async fn documents(
     asins: &[String],
 ) -> Result<BTreeMap<String, Value>> {
     let mut docs = BTreeMap::new();
-    for chunk in asins.chunks(CATALOG_BATCH) {
-        let body: Value = client
-            .request(Method::GET, "/1.0/catalog/products")
-            .country_code(marketplace)
-            .query("asins", chunk.join(","))
-            .query(
-                "response_groups",
-                "product_desc,product_attrs,product_extended_attrs,customer_rights",
-            )
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        for product in body
-            .get("products")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let Some(asin) = product.get("asin").and_then(Value::as_str) else {
-                continue;
-            };
-            let titled = product
-                .get("title")
-                .and_then(Value::as_str)
-                .is_some_and(|title| !title.trim().is_empty());
-            if titled {
-                docs.insert(asin.to_owned(), product.clone());
-            }
+    let products = products_batched(
+        client,
+        marketplace,
+        asins,
+        "product_desc,product_attrs,product_extended_attrs,customer_rights",
+        None,
+        1,
+    )
+    .await?;
+    for product in products {
+        let Some(asin) = product
+            .get("asin")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        // On top of the protocol-level hollow-echo drop: the naming engine
+        // needs a title, so a title-less document is useless here.
+        let titled = product
+            .get("title")
+            .and_then(Value::as_str)
+            .is_some_and(|title| !title.trim().is_empty());
+        if titled {
+            docs.insert(asin, product);
         }
     }
     Ok(docs)
@@ -344,18 +402,6 @@ pub(crate) async fn documents(
 /// the field is the account's, so it is absent without one.
 pub(crate) fn is_consumable(doc: &Value) -> Option<bool> {
     doc.get("customer_rights")?.get("is_consumable")?.as_bool()
-}
-
-/// Extracts per-ASIN display details from a `/1.0/catalog/products` body.
-fn parse_catalog_details(body: &Value, details: &mut BTreeMap<String, CatalogDetails>) {
-    let Some(products) = body.get("products").and_then(Value::as_array) else {
-        return;
-    };
-    for product in products {
-        if let Some((asin, detail)) = parse_product(product) {
-            details.insert(asin, detail);
-        }
-    }
 }
 
 /// Subscription eligibility for one ASIN, from the **authenticated**
@@ -396,49 +442,41 @@ pub(crate) async fn eligibility(
     asins: &[String],
 ) -> Result<BTreeMap<String, Eligibility>> {
     let mut out = BTreeMap::new();
-    for chunk in asins.chunks(CATALOG_BATCH) {
-        let body: Value = client
-            .request(Method::GET, "/1.0/catalog/products")
-            .country_code(marketplace)
-            .query("asins", chunk.join(","))
-            .query("response_groups", "product_desc,customer_rights")
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        for product in body
-            .get("products")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let Some(asin) = product.get("asin").and_then(Value::as_str) else {
-                continue;
-            };
-            let (_, details) = match parse_product(product) {
-                Some(parsed) => parsed,
-                None => continue,
-            };
-            let rights = product.get("customer_rights");
-            let flag = |key: &str| {
-                rights
-                    .and_then(|rights| rights.get(key))
-                    .and_then(Value::as_bool)
-            };
-            out.insert(
-                asin.to_owned(),
-                Eligibility {
-                    full_title: details.full_title(),
-                    is_consumable: flag("is_consumable"),
-                    is_consumable_indefinitely: flag("is_consumable_indefinitely"),
-                    content_delivery_type: product
-                        .get("content_delivery_type")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                },
-            );
-        }
+    let products = products_batched(
+        client,
+        marketplace,
+        asins,
+        "product_desc,customer_rights",
+        None,
+        1,
+    )
+    .await?;
+    for product in &products {
+        let Some(asin) = product.get("asin").and_then(Value::as_str) else {
+            continue;
+        };
+        let (_, details) = match parse_product(product) {
+            Some(parsed) => parsed,
+            None => continue,
+        };
+        let rights = product.get("customer_rights");
+        let flag = |key: &str| {
+            rights
+                .and_then(|rights| rights.get(key))
+                .and_then(Value::as_bool)
+        };
+        out.insert(
+            asin.to_owned(),
+            Eligibility {
+                full_title: details.full_title(),
+                is_consumable: flag("is_consumable"),
+                is_consumable_indefinitely: flag("is_consumable_indefinitely"),
+                content_delivery_type: product
+                    .get("content_delivery_type")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            },
+        );
     }
     Ok(out)
 }
@@ -455,6 +493,23 @@ pub(crate) fn format_runtime(minutes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hollow-echo shape is a live-verified server behavior
+    /// (2026-07-17): an unknown ASIN comes back as `{"asin": "…"}` and
+    /// nothing else, in every response-group combination probed — while a
+    /// real product always carries more (even `relationships_v2`-only
+    /// responses add `sku`/`sku_lite`).
+    #[test]
+    fn hollow_echoes_are_not_real_products() {
+        assert!(!is_real_product(&serde_json::json!({"asin": "B0EXAMPLE1"})));
+        assert!(!is_real_product(&serde_json::json!({"title": "no asin"})));
+        assert!(is_real_product(
+            &serde_json::json!({"asin": "B0EXAMPLE1", "title": "Example"})
+        ));
+        assert!(is_real_product(
+            &serde_json::json!({"asin": "B0EXAMPLE1", "sku": "X", "sku_lite": "Y"})
+        ));
+    }
 
     #[test]
     fn borrowable_only_for_consumable_loans() {
@@ -482,14 +537,13 @@ mod tests {
 
     #[test]
     fn parses_catalog_details_with_authors() {
-        let body = serde_json::json!({"products": [
+        let product = serde_json::json!(
             {"asin": "B0A", "title": "Book One",
              "authors": [{"name": "Alice"}, {"name": "Bob"}],
-             "runtime_length_min": 754},
-        ]});
-        let mut details = BTreeMap::new();
-        parse_catalog_details(&body, &mut details);
-        let one = details.get("B0A").unwrap();
+             "runtime_length_min": 754}
+        );
+        let (asin, one) = parse_product(&product).unwrap();
+        assert_eq!(asin, "B0A");
         assert_eq!(one.title, "Book One");
         assert_eq!(one.authors, "Alice, Bob");
         assert_eq!(one.runtime_min, Some(754));

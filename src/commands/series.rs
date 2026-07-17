@@ -3,8 +3,6 @@
 
 use anyhow::{Result, bail};
 use clap::Arg;
-use futures::{StreamExt as _, TryStreamExt as _};
-use reqwest::Method;
 
 use crate::api::client::Client;
 use crate::config::ctx::Ctx;
@@ -12,6 +10,7 @@ use crate::db::Db;
 use crate::models::library as model;
 use crate::output::Output;
 
+use super::catalog;
 use super::library::maybe_auto_sync;
 
 /// `audible series`.
@@ -297,35 +296,22 @@ async fn fetch_series_children(
     marketplace: &str,
     series_asins: Vec<String>,
 ) -> Result<SeriesChildren> {
-    let chunks: Vec<Vec<String>> = series_asins
-        .chunks(50)
-        .map(|chunk| chunk.to_vec())
-        .collect();
-    let parts: Vec<SeriesChildren> = futures::stream::iter(chunks)
-        .map(|chunk| async move {
-            let joined = chunk.join(",");
-            let response = client
-                .request(Method::GET, "/1.0/catalog/products")
-                .country_code(marketplace)
-                .query("asins", &joined)
-                .query("response_groups", "relationships_v2")
-                .send()
-                .await?;
-            let body: serde_json::Value = response.error_for_status()?.json().await?;
-            let mut part = std::collections::BTreeMap::new();
-            if let Some(products) = body.get("products").and_then(serde_json::Value::as_array) {
-                for product in products {
-                    if let Some(asin) = product.get("asin").and_then(serde_json::Value::as_str) {
-                        part.insert(asin.to_owned(), model::extract_series_children(product));
-                    }
-                }
-            }
-            Ok::<_, anyhow::Error>(part)
-        })
-        .buffer_unordered(SERIES_CATALOG_CONCURRENCY)
-        .try_collect()
-        .await?;
-    Ok(parts.into_iter().flatten().collect())
+    let products = catalog::products_batched(
+        client,
+        marketplace,
+        &series_asins,
+        "relationships_v2",
+        None,
+        SERIES_CATALOG_CONCURRENCY,
+    )
+    .await?;
+    let mut children = SeriesChildren::new();
+    for product in &products {
+        if let Some(asin) = product.get("asin").and_then(serde_json::Value::as_str) {
+            children.insert(asin.to_owned(), model::extract_series_children(product));
+        }
+    }
+    Ok(children)
 }
 
 /// Title and release date for a set of catalog ASINs (batched, 50 per
@@ -335,45 +321,33 @@ async fn volume_details(
     marketplace: &str,
     asins: Vec<String>,
 ) -> Result<std::collections::BTreeMap<String, (String, Option<String>)>> {
-    let chunks: Vec<Vec<String>> = asins.chunks(50).map(|chunk| chunk.to_vec()).collect();
-    let parts: Vec<std::collections::BTreeMap<String, (String, Option<String>)>> =
-        futures::stream::iter(chunks)
-            .map(|chunk| async move {
-                let joined = chunk.join(",");
-                let response = client
-                    .request(Method::GET, "/1.0/catalog/products")
-                    .country_code(marketplace)
-                    .query("asins", &joined)
-                    .query("response_groups", "product_desc,product_attrs")
-                    .send()
-                    .await?;
-                let body: serde_json::Value = response.error_for_status()?.json().await?;
-                let mut part = std::collections::BTreeMap::new();
-                if let Some(products) = body.get("products").and_then(serde_json::Value::as_array) {
-                    for product in products {
-                        let Some(asin) = product.get("asin").and_then(serde_json::Value::as_str)
-                        else {
-                            continue;
-                        };
-                        let title = product
-                            .get("title")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned();
-                        let release_date = product
-                            .get("release_date")
-                            .or_else(|| product.get("publication_datetime"))
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_owned);
-                        part.insert(asin.to_owned(), (title, release_date));
-                    }
-                }
-                Ok::<_, anyhow::Error>(part)
-            })
-            .buffer_unordered(SERIES_CATALOG_CONCURRENCY)
-            .try_collect()
-            .await?;
-    Ok(parts.into_iter().flatten().collect())
+    let products = catalog::products_batched(
+        client,
+        marketplace,
+        &asins,
+        "product_desc,product_attrs",
+        None,
+        SERIES_CATALOG_CONCURRENCY,
+    )
+    .await?;
+    let mut details = std::collections::BTreeMap::new();
+    for product in &products {
+        let Some(asin) = product.get("asin").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let title = product
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let release_date = product
+            .get("release_date")
+            .or_else(|| product.get("publication_datetime"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        details.insert(asin.to_owned(), (title, release_date));
+    }
+    Ok(details)
 }
 
 async fn missing(ctx: &Ctx, needle: Option<String>, include_unreleased: bool) -> Result<()> {

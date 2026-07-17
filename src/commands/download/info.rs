@@ -209,24 +209,18 @@ async fn catalog_facts(
     asins: &[String],
     into: &mut BTreeMap<String, AssetFacts>,
 ) -> Result<()> {
-    for chunk in asins.chunks(50) {
-        let body: Value = client
-            .request(Method::GET, "/1.0/catalog/products")
-            .country_code(marketplace)
-            .query("asins", chunk.join(","))
-            .query("response_groups", "product_attrs,media")
-            .query("image_sizes", "252,408,500,558,900,1215")
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        if let Some(products) = body.get("products").and_then(Value::as_array) {
-            for product in products {
-                if let Some(asin) = product.get("asin").and_then(Value::as_str) {
-                    into.insert(asin.to_owned(), facts(product));
-                }
-            }
+    let products = crate::commands::catalog::products_batched(
+        client,
+        marketplace,
+        asins,
+        "product_attrs,media",
+        Some("252,408,500,558,900,1215"),
+        1,
+    )
+    .await?;
+    for product in &products {
+        if let Some(asin) = product.get("asin").and_then(Value::as_str) {
+            into.insert(asin.to_owned(), facts(product));
         }
     }
     Ok(())

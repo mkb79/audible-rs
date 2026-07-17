@@ -441,23 +441,15 @@ async fn fetch_catalog_details(
     marketplace: &str,
     asins: Vec<String>,
 ) -> Result<Vec<serde_json::Value>> {
-    let mut products = Vec::new();
-    for chunk in asins.chunks(50) {
-        let joined = chunk.join(",");
-        let response = client
-            .request(Method::GET, "/1.0/catalog/products")
-            .country_code(marketplace)
-            .query("asins", &joined)
-            .query("response_groups", CATALOG_RESPONSE_GROUPS)
-            .query("image_sizes", DEFAULT_IMAGE_SIZES)
-            .send()
-            .await?;
-        let body: serde_json::Value = response.error_for_status()?.json().await?;
-        if let Some(items) = body.get("products").and_then(serde_json::Value::as_array) {
-            products.extend(items.iter().cloned());
-        }
-    }
-    Ok(products)
+    crate::commands::catalog::products_batched(
+        client,
+        marketplace,
+        &asins,
+        CATALOG_RESPONSE_GROUPS,
+        Some(DEFAULT_IMAGE_SIZES),
+        1,
+    )
+    .await
 }
 
 /// `library sync` — also reused by `collections archive … --sync`
