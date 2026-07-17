@@ -9,24 +9,24 @@
 //! encodes our local sync position and therefore lives in the DB).
 //!
 //! Both nouns share one wiring, generic over the collection id, so
-//! favorites/user collections (AUD-109) become thin additions. Wire
-//! format is capture-proven against the official app (2026-07-06,
-//! `__WISHLIST` and `__ARCHIVE`): body-level `continuation_token`
-//! pagination on `GET …/items` (no `Continuation-Token` header — the
-//! library paginator does not apply), batched `POST …/items` with
-//! `{collection_id, asins, state_token}`, batched
-//! `DELETE …/items?asins=…&asins=…&state_token=…` (repeated params, like
-//! `/library`), each mutation response returning the next token.
+//! favorites/user collections (AUD-109) become thin additions. The
+//! shared wire calls (item listing, state-token fetch, batched DELETE)
+//! live in [`crate::collections`]; the capture-proven batched
+//! `POST …/items` with `{collection_id, asins, state_token}` stays with
+//! `add`'s command body below.
 
 use std::collections::{BTreeMap, HashSet};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
 use clap::{Arg, ArgAction};
 use reqwest::Method;
 use serde_json::Value;
 
-use crate::api::client::Client;
 use crate::catalog::{CatalogDetails, catalog_details};
+use crate::collections::{
+    ARCHIVE_ID, CollectionItem, WISHLIST_ID, collection_items, collection_meta,
+    delete_collection_items,
+};
 use crate::commands::catalog::{format_runtime, resolve_catalog_titles};
 use crate::config::ctx::Ctx;
 use crate::output::Output;
@@ -60,7 +60,7 @@ struct Noun {
 
 const WISHLIST: Noun = Noun {
     name: "wishlist",
-    collection_id: "__WISHLIST",
+    collection_id: WISHLIST_ID,
     phrase: "the wishlist",
     add_title_source: AddTitleSource::Catalog,
     sync_flag: false,
@@ -68,7 +68,7 @@ const WISHLIST: Noun = Noun {
 
 const ARCHIVE: Noun = Noun {
     name: "archive",
-    collection_id: "__ARCHIVE",
+    collection_id: ARCHIVE_ID,
     phrase: "the archive",
     add_title_source: AddTitleSource::Library,
     sync_flag: true,
@@ -479,149 +479,6 @@ fn archived_in_doc(doc: &str) -> Option<bool> {
         .as_bool()
 }
 
-/// One entry of a collection's item list.
-struct CollectionItem {
-    asin: String,
-    /// `addition_date` (ISO timestamp), if reported.
-    added: Option<String>,
-}
-
-/// Fetches every item of a collection, following the **body**
-/// `continuation_token` (this endpoint does not use the library's
-/// `Continuation-Token` header).
-async fn collection_items(
-    client: &Client,
-    marketplace: &str,
-    collection_id: &str,
-) -> Result<Vec<CollectionItem>> {
-    let mut items = Vec::new();
-    let mut continuation: Option<String> = None;
-    loop {
-        let mut request = client
-            .request(
-                Method::GET,
-                format!("/1.0/collections/{collection_id}/items"),
-            )
-            .country_code(marketplace)
-            .query("response_groups", "always-returned");
-        if let Some(token) = &continuation {
-            request = request.query("continuation_token", token);
-        }
-        let body: Value = request.send().await?.error_for_status()?.json().await?;
-        let (page, next) = parse_items_page(&body);
-        items.extend(page);
-        continuation = next;
-        if continuation.is_none() {
-            return Ok(items);
-        }
-    }
-}
-
-/// Splits an `…/items` response body into its items and the continuation
-/// token of the next page (if any).
-fn parse_items_page(body: &Value) -> (Vec<CollectionItem>, Option<String>) {
-    let mut items = Vec::new();
-    if let Some(list) = body.get("items").and_then(Value::as_array) {
-        for item in list {
-            let Some(asin) = item.get("asin").and_then(Value::as_str) else {
-                continue;
-            };
-            items.push(CollectionItem {
-                asin: asin.to_owned(),
-                added: item
-                    .get("addition_date")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            });
-        }
-    }
-    let next = body
-        .get("continuation_token")
-        .and_then(Value::as_str)
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned);
-    (items, next)
-}
-
-/// Collection metadata; carries the fresh state token every mutation
-/// needs (a server-state marker — deliberately never persisted).
-struct CollectionMeta {
-    state_token: String,
-}
-
-async fn collection_meta(
-    client: &Client,
-    marketplace: &str,
-    collection_id: &str,
-) -> Result<CollectionMeta> {
-    let body: Value = client
-        .request(Method::GET, format!("/1.0/collections/{collection_id}"))
-        .country_code(marketplace)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let state_token = body
-        .get("state_token")
-        .and_then(Value::as_str)
-        .context("the collection response carries no state_token")?
-        .to_owned();
-    Ok(CollectionMeta { state_token })
-}
-
-/// Removes `asins` from `__ARCHIVE` if present, returning the ASINs that
-/// were actually in the archive (and thus removed). Used by
-/// `library return` to clear a returned loan's archive membership so it
-/// disappears from `collections archive list`, not just the library
-/// (AUD-171). A no-op — no request — when none of the ASINs are archived.
-pub(crate) async fn remove_from_archive(
-    client: &Client,
-    marketplace: &str,
-    asins: &[String],
-) -> Result<Vec<String>> {
-    let archived: HashSet<String> = collection_items(client, marketplace, ARCHIVE.collection_id)
-        .await?
-        .into_iter()
-        .map(|item| item.asin)
-        .collect();
-    let targets: Vec<String> = asins
-        .iter()
-        .filter(|asin| archived.contains(*asin))
-        .cloned()
-        .collect();
-    if targets.is_empty() {
-        return Ok(targets);
-    }
-    delete_collection_items(client, marketplace, ARCHIVE.collection_id, &targets).await?;
-    Ok(targets)
-}
-
-/// The batched collection-item DELETE (audit 2026-07-17, D6): fetch the
-/// collection's `state_token` and issue `DELETE …/items` with repeated
-/// `asins=` params. One home for `collections … remove` and the archive
-/// removal used by `library add` (re-adding a title unarchives it).
-async fn delete_collection_items(
-    client: &Client,
-    marketplace: &str,
-    collection_id: &str,
-    asins: &[String],
-) -> Result<()> {
-    let meta = collection_meta(client, marketplace, collection_id).await?;
-    let mut request = client
-        .request(
-            Method::DELETE,
-            format!("/1.0/collections/{collection_id}/items"),
-        )
-        .country_code(marketplace)
-        .query("state_token", &meta.state_token);
-    for asin in asins {
-        request = request.query("asins", asin);
-    }
-    request.send().await?.error_for_status()?;
-    Ok(())
-}
-
 /// Resolves `remove` inputs to collection ASINs: explicit ASINs must be
 /// in the collection (else warn + skip), each `--title` query must match
 /// exactly one title (0 or >1 matches fail with the candidates listed).
@@ -715,30 +572,6 @@ mod tests {
             authors: String::new(),
             runtime_min: None,
         }
-    }
-
-    #[test]
-    fn parses_items_page_and_continuation() {
-        let body = serde_json::json!({
-            "continuation_token": "NEXT",
-            "items": [
-                {"asin": "B0A", "addition_date": "2026-06-19T09:20:50.749Z"},
-                {"asin": "B0B", "addition_date": null},
-                {"title": "no asin — skipped"},
-            ],
-        });
-        let (items, next) = parse_items_page(&body);
-        assert_eq!(next.as_deref(), Some("NEXT"));
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].asin, "B0A");
-        assert_eq!(items[0].added.as_deref(), Some("2026-06-19T09:20:50.749Z"));
-        assert_eq!(items[1].added, None);
-
-        // Both null and empty-string tokens end the pagination.
-        let done = serde_json::json!({"continuation_token": null, "items": []});
-        assert_eq!(parse_items_page(&done).1, None);
-        let empty = serde_json::json!({"continuation_token": "", "items": []});
-        assert_eq!(parse_items_page(&empty).1, None);
     }
 
     #[test]

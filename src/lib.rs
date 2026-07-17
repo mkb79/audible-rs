@@ -14,6 +14,7 @@ pub mod naming;
 
 pub mod activation;
 pub mod catalog;
+pub mod collections;
 pub mod commands;
 pub mod config;
 pub mod crypto;
