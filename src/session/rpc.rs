@@ -106,6 +106,30 @@ fn effective_account<'s>(
     }
 }
 
+/// The validated viewer account for the jobs GET routes (audit
+/// 2026-07-17, B6): the same fail-closed selector contract as every
+/// other route — a bound token with a foreign selector is 403, an
+/// unknown account/marketplace/settings selector a 400 — instead of the
+/// old unvalidated pass-through (unknown account → empty 200/404). An
+/// unbound, selector-less caller keeps the unscoped view.
+async fn job_viewer(
+    backend: &dyn Backend,
+    auth: &Auth,
+    selection: &Selection,
+) -> std::result::Result<Option<String>, Box<Response<BoxedBody>>> {
+    if effective_account(auth, selection)?.is_none() {
+        return Ok(None);
+    }
+    let ctx = select_session(backend, auth, selection).await?;
+    let name = ctx.account_name().map_err(|error| {
+        Box::new(reply(
+            StatusCode::BAD_REQUEST,
+            &json!({"error": format!("{error:#}")}),
+        ))
+    })?;
+    Ok(Some(name))
+}
+
 /// Resolves and validates the request's session (AUD-125, fail-closed):
 /// 403 when a bound token asks for another account, 400 for an unknown
 /// account, a marketplace outside the account's marketplaces, or an
@@ -518,20 +542,24 @@ async fn dispatch(
             if !has("invoke") {
                 return Ok(deny("invoke"));
             }
-            let viewer = match effective_account(auth, selection) {
+            let viewer = match job_viewer(backend, auth, selection).await {
                 Ok(viewer) => viewer,
                 Err(refusal) => return Ok(*refusal),
             };
-            Ok(reply(StatusCode::OK, &backend.list_jobs(viewer).await))
+            Ok(reply(
+                StatusCode::OK,
+                &backend.list_jobs(viewer.as_deref()).await,
+            ))
         }
         (&Method::GET, jobs_id) if jobs_id.starts_with("/v1/jobs/") => {
             if !has("invoke") {
                 return Ok(deny("invoke"));
             }
-            let viewer = match effective_account(auth, selection) {
+            let viewer = match job_viewer(backend, auth, selection).await {
                 Ok(viewer) => viewer,
                 Err(refusal) => return Ok(*refusal),
             };
+            let viewer = viewer.as_deref();
             let id = &jobs_id["/v1/jobs/".len()..];
             match backend.job_status(id, viewer).await {
                 Some(status) => Ok(reply(StatusCode::OK, &status)),
@@ -869,14 +897,22 @@ fn parse_invoke(
 ) -> std::result::Result<(Vec<String>, String), Box<Response<BoxedBody>>> {
     let bad =
         |message: String| Box::new(reply(StatusCode::BAD_REQUEST, &json!({ "error": message })));
-    let Some(argv) = body.get("argv").and_then(Value::as_array) else {
+    let Some(raw_argv) = body.get("argv").and_then(Value::as_array) else {
         return Err(bad("missing \"argv\" (array of strings)".to_owned()));
     };
-    let argv: Vec<String> = argv
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect();
+    // Fail-closed (B6): a non-string element is a 400, never silently
+    // dropped — `[42, "library"]` used to run `library`.
+    let mut argv: Vec<String> = Vec::with_capacity(raw_argv.len());
+    for value in raw_argv {
+        match value.as_str() {
+            Some(text) => argv.push(text.to_owned()),
+            None => {
+                return Err(bad(format!(
+                    "\"argv\" must be an array of strings (found {value})"
+                )));
+            }
+        }
+    }
     let Some(command_name) = argv.first() else {
         return Err(bad("\"argv\" must name a built-in command".to_owned()));
     };
@@ -1121,6 +1157,57 @@ mod tests {
             Selection::default()
         );
         assert_eq!(effective_selection(true, parsed.clone()), parsed);
+    }
+
+    /// B6: `argv` elements must all be strings — a non-string used to be
+    /// silently dropped, so `[42, "library"]` ran `library`.
+    #[test]
+    fn invoke_argv_rejects_non_strings() {
+        let builtins = vec!["library".to_owned()];
+        let refused = parse_invoke(&json!({"argv": [42, "library"]}), &builtins)
+            .expect_err("non-string argv element must refuse");
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let (argv, output) = parse_invoke(&json!({"argv": ["library", "list"]}), &builtins)
+            .expect("all-string argv parses");
+        assert_eq!(argv, ["library", "list"]);
+        assert_eq!(output, "json");
+    }
+
+    /// B6: the jobs GET routes validate their selector like every other
+    /// route — unknown account = 400, not an empty 200; bound mismatch =
+    /// 403; selector-less unbound callers keep the unscoped view.
+    #[tokio::test]
+    async fn job_viewer_fails_closed() {
+        let (backend, _tmp) = fixture_backend();
+        let refused = job_viewer(&backend, &auth(None), &select(Some("nope"), None, None))
+            .await
+            .expect_err("unknown account must refuse");
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+
+        let refused = job_viewer(
+            &backend,
+            &auth(Some("smoke")),
+            &select(Some("other"), None, None),
+        )
+        .await
+        .expect_err("bound mismatch must refuse");
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+
+        // Selector-less, unbound: unscoped view (None), no validation hit.
+        assert_eq!(
+            job_viewer(&backend, &auth(None), &select(None, None, None))
+                .await
+                .expect("unscoped view resolves"),
+            None
+        );
+        // A valid selector resolves to the account name.
+        assert_eq!(
+            job_viewer(&backend, &auth(None), &select(Some("smoke"), None, None))
+                .await
+                .expect("valid selector resolves")
+                .as_deref(),
+            Some("smoke")
+        );
     }
 
     /// AUD-125 fail-closed matrix: 403 for a bound token asking for
