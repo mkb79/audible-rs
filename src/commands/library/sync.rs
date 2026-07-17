@@ -65,7 +65,9 @@ pub(crate) async fn sync(
                 let options = options.clone();
                 let sem = sem.clone();
                 async move {
-                    let summary = sync_library(client, db_ref, &marketplace, options, &sem).await;
+                    let summary = sync_library(client, db_ref, &marketplace, options, &sem)
+                        .await
+                        .map_err(anyhow::Error::from);
                     (marketplace, summary)
                 }
             })

@@ -757,7 +757,9 @@ async fn reconcile_external(
     // says *why*, and supplies the name for the ones that get through. It never
     // decides — unreachable means refuse, not proceed.
     let docs = match ctx.client().await {
-        Ok(client) => crate::catalog::documents(client, marketplace, &unknown).await,
+        Ok(client) => crate::catalog::documents(client, marketplace, &unknown)
+            .await
+            .map_err(anyhow::Error::from),
         Err(error) => Err(error),
     };
     let docs = match docs {

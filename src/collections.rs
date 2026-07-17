@@ -11,11 +11,25 @@
 
 use std::collections::HashSet;
 
-use anyhow::{Context as _, Result};
 use reqwest::Method;
 use serde_json::Value;
 
-use crate::api::client::Client;
+use crate::api::client::{ApiError, Client};
+
+/// Errors of the collections wire calls.
+#[derive(Debug, thiserror::Error)]
+pub enum CollectionsError {
+    /// The API request failed.
+    #[error(transparent)]
+    Api(#[from] ApiError),
+    /// The HTTP layer failed (error status or body decoding).
+    #[error("collections request failed: {0}")]
+    Http(#[from] reqwest::Error),
+    /// A mutation needs the collection's fresh state token, but the
+    /// response carried none.
+    #[error("the collection response carries no state_token")]
+    MissingStateToken,
+}
 
 /// Server-side id of the permanent wishlist collection.
 pub const WISHLIST_ID: &str = "__WISHLIST";
@@ -38,7 +52,7 @@ pub async fn collection_items(
     client: &Client,
     marketplace: &str,
     collection_id: &str,
-) -> Result<Vec<CollectionItem>> {
+) -> Result<Vec<CollectionItem>, CollectionsError> {
     let mut items = Vec::new();
     let mut continuation: Option<String> = None;
     loop {
@@ -98,7 +112,7 @@ pub async fn collection_meta(
     client: &Client,
     marketplace: &str,
     collection_id: &str,
-) -> Result<CollectionMeta> {
+) -> Result<CollectionMeta, CollectionsError> {
     let body: Value = client
         .request(Method::GET, format!("/1.0/collections/{collection_id}"))
         .country_code(marketplace)
@@ -110,7 +124,7 @@ pub async fn collection_meta(
     let state_token = body
         .get("state_token")
         .and_then(Value::as_str)
-        .context("the collection response carries no state_token")?
+        .ok_or(CollectionsError::MissingStateToken)?
         .to_owned();
     Ok(CollectionMeta { state_token })
 }
@@ -124,7 +138,7 @@ pub async fn remove_from_archive(
     client: &Client,
     marketplace: &str,
     asins: &[String],
-) -> Result<Vec<String>> {
+) -> Result<Vec<String>, CollectionsError> {
     let archived: HashSet<String> = collection_items(client, marketplace, ARCHIVE_ID)
         .await?
         .into_iter()
@@ -151,7 +165,7 @@ pub async fn delete_collection_items(
     marketplace: &str,
     collection_id: &str,
     asins: &[String],
-) -> Result<()> {
+) -> Result<(), CollectionsError> {
     let meta = collection_meta(client, marketplace, collection_id).await?;
     let mut request = client
         .request(

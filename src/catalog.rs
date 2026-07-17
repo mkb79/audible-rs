@@ -7,11 +7,21 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
 use reqwest::Method;
 use serde_json::Value;
 
-use crate::api::client::Client;
+use crate::api::client::{ApiError, Client};
+
+/// Errors of the catalog domain calls.
+#[derive(Debug, thiserror::Error)]
+pub enum CatalogError {
+    /// The API request failed.
+    #[error(transparent)]
+    Api(#[from] ApiError),
+    /// The HTTP layer failed (error status or body decoding).
+    #[error("catalog request failed: {0}")]
+    Http(#[from] reqwest::Error),
+}
 
 /// ASINs per `/1.0/catalog/products` batch (server limit).
 const CATALOG_BATCH: usize = 50;
@@ -41,7 +51,7 @@ pub async fn products_batched(
     response_groups: &str,
     image_sizes: Option<&str>,
     concurrency: usize,
-) -> Result<Vec<Value>> {
+) -> Result<Vec<Value>, CatalogError> {
     use futures::{StreamExt as _, TryStreamExt as _};
     // Owned chunks: borrowing them from `asins` trips rustc's
     // "Send is not general enough" limitation under buffer_unordered.
@@ -64,7 +74,7 @@ pub async fn products_batched(
                 Some(Value::Array(products)) => products,
                 _ => Vec::new(),
             };
-            Ok::<_, anyhow::Error>(products.into_iter().filter(is_real_product).collect())
+            Ok::<_, CatalogError>(products.into_iter().filter(is_real_product).collect())
         })
         .buffer_unordered(concurrency.max(1))
         .try_collect()
@@ -145,7 +155,7 @@ pub async fn catalog_search(
     client: &Client,
     marketplace: &str,
     query: &str,
-) -> Result<Vec<CatalogHit>> {
+) -> Result<Vec<CatalogHit>, CatalogError> {
     let body: Value = client
         .request(Method::GET, "/1.0/catalog/products")
         .country_code(marketplace)
@@ -202,7 +212,7 @@ pub async fn catalog_details(
     client: &Client,
     marketplace: &str,
     asins: &[String],
-) -> Result<BTreeMap<String, CatalogDetails>> {
+) -> Result<BTreeMap<String, CatalogDetails>, CatalogError> {
     let mut details = BTreeMap::new();
     let products = products_batched(
         client,
@@ -239,7 +249,7 @@ pub async fn documents(
     client: &Client,
     marketplace: &str,
     asins: &[String],
-) -> Result<BTreeMap<String, Value>> {
+) -> Result<BTreeMap<String, Value>, CatalogError> {
     let mut docs = BTreeMap::new();
     let products = products_batched(
         client,
@@ -316,7 +326,7 @@ pub async fn eligibility(
     client: &Client,
     marketplace: &str,
     asins: &[String],
-) -> Result<BTreeMap<String, Eligibility>> {
+) -> Result<BTreeMap<String, Eligibility>, CatalogError> {
     let mut out = BTreeMap::new();
     let products = products_batched(
         client,

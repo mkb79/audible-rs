@@ -3,17 +3,37 @@
 //! the read commands. The `library sync` command body (summary printing and
 //! change listing) and the bounded reflection poller on top of it stay in
 //! `commands::library`.
+//!
+//! The engine calls carry typed [`SyncError`]s; [`maybe_auto_sync`] drives
+//! `Ctx` (the orchestration surface) and stays on `anyhow` like that tier.
 
-use anyhow::Result;
 use futures::{StreamExt as _, TryStreamExt as _};
 use reqwest::Method;
 use tokio::sync::Semaphore;
 
-use crate::api::client::Client;
+use crate::api::client::{ApiError, Client};
 use crate::api::paginator;
+use crate::catalog::CatalogError;
 use crate::config::ctx::Ctx;
-use crate::db::{self, Db, SyncLogEntry, UpsertItem};
+use crate::db::{self, Db, DbError, SyncLogEntry, UpsertItem};
 use crate::models::library as model;
+
+/// Errors of the sync engine.
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError {
+    /// The API request (or its pagination) failed.
+    #[error(transparent)]
+    Api(#[from] ApiError),
+    /// The HTTP layer failed (error status or body decoding).
+    #[error("library sync request failed: {0}")]
+    Http(#[from] reqwest::Error),
+    /// The database rejected a sync read or write.
+    #[error(transparent)]
+    Db(#[from] DbError),
+    /// A catalog fetch during episode resolution failed.
+    #[error(transparent)]
+    Catalog(#[from] CatalogError),
+}
 
 /// Response groups every sync request uses; pinned per database
 /// (reference branch default).
@@ -94,7 +114,7 @@ pub async fn sync_library(
     marketplace: &str,
     options: SyncOptions,
     sem: &Semaphore,
-) -> Result<SyncSummary> {
+) -> Result<SyncSummary, SyncError> {
     let settings = db
         .ensure_sync_state(marketplace.to_owned(), DEFAULT_RESPONSE_GROUPS.to_owned())
         .await?;
@@ -258,23 +278,24 @@ pub async fn sync_library(
         record: options.record_changes && !initial,
         mode,
     };
-    let episode_results: Vec<Result<(usize, usize)>> = futures::stream::iter(podcast_parents)
-        .map(|(parent_asin, announced)| async move {
-            let _permit = sem.acquire().await.expect("sync semaphore is never closed");
-            resolve_episodes(
-                client,
-                db,
-                marketplace,
-                response_groups,
-                page_size,
-                (&parent_asin, announced),
-                episode_recording,
-            )
-            .await
-        })
-        .buffer_unordered(SYNC_RESOLUTION_CONCURRENCY)
-        .collect()
-        .await;
+    let episode_results: Vec<Result<(usize, usize), SyncError>> =
+        futures::stream::iter(podcast_parents)
+            .map(|(parent_asin, announced)| async move {
+                let _permit = sem.acquire().await.expect("sync semaphore is never closed");
+                resolve_episodes(
+                    client,
+                    db,
+                    marketplace,
+                    response_groups,
+                    page_size,
+                    (&parent_asin, announced),
+                    episode_recording,
+                )
+                .await
+            })
+            .buffer_unordered(SYNC_RESOLUTION_CONCURRENCY)
+            .collect()
+            .await;
     for result in episode_results {
         match result {
             Ok((upserted, deleted)) => {
@@ -323,7 +344,7 @@ async fn resolve_episodes(
     // `episode_count` (bundled — they always travel together).
     (parent_asin, announced): (&str, Option<u64>),
     recording: db::ChangeRecording,
-) -> Result<(usize, usize)> {
+) -> Result<(usize, usize), SyncError> {
     tracing::debug!(parent_asin, "resolving podcast episodes");
 
     fn push(
@@ -428,7 +449,7 @@ async fn fetch_episode_asins(
     client: &Client,
     marketplace: &str,
     parent_asin: &str,
-) -> Result<Vec<String>> {
+) -> Result<Vec<String>, SyncError> {
     let response = client
         .request(Method::GET, format!("/1.0/catalog/products/{parent_asin}"))
         .country_code(marketplace)
@@ -463,8 +484,8 @@ async fn fetch_catalog_details(
     client: &Client,
     marketplace: &str,
     asins: Vec<String>,
-) -> Result<Vec<serde_json::Value>> {
-    crate::catalog::products_batched(
+) -> Result<Vec<serde_json::Value>, SyncError> {
+    Ok(crate::catalog::products_batched(
         client,
         marketplace,
         &asins,
@@ -472,7 +493,7 @@ async fn fetch_catalog_details(
         Some(DEFAULT_IMAGE_SIZES),
         1,
     )
-    .await
+    .await?)
 }
 
 /// The subset of `marketplaces` whose own last successful sync is older
@@ -509,7 +530,7 @@ fn is_stale(last_sync_utc: Option<&str>, max_age: std::time::Duration) -> bool {
 /// a stale (or never-synced) `us` answer from an empty view, and one stale
 /// marketplace only resyncs itself, not its fresh siblings. Skipped when
 /// another process holds the sync lock.
-pub(crate) async fn maybe_auto_sync(ctx: &Ctx, db: &Db) -> Result<()> {
+pub(crate) async fn maybe_auto_sync(ctx: &Ctx, db: &Db) -> anyhow::Result<()> {
     let config = ctx.db_config()?;
     if config.auto_sync == crate::config::schema::AutoSync::None {
         return Ok(());
