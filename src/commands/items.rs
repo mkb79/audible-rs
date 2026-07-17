@@ -377,8 +377,11 @@ enum AsinClass {
         title: String,
     },
     Episode,
-    /// A book, or an ASIN not (yet) in the library.
-    Other,
+    /// A book the library holds.
+    Book,
+    /// Not in the library at all: a typo, an ASIN from another marketplace, or
+    /// a title the account may download without having added it (AUD-197).
+    Unknown,
 }
 
 /// Classifies an explicit `--asin` against the local library.
@@ -392,7 +395,7 @@ async fn classify_asin(db: &crate::db::Db, marketplace: &str, asin: &str) -> Res
                     .unwrap_or_else(|| asin.to_owned()),
             },
             "episode" => AsinClass::Episode,
-            _ => AsinClass::Other,
+            _ => AsinClass::Book,
         });
     }
     if db
@@ -402,7 +405,41 @@ async fn classify_asin(db: &crate::db::Db, marketplace: &str, asin: &str) -> Res
     {
         return Ok(AsinClass::Episode);
     }
-    Ok(AsinClass::Other)
+    Ok(AsinClass::Unknown)
+}
+
+/// The requested ASINs the library does not hold, in order: neither an `items`
+/// row nor an `episodes` one for this marketplace.
+///
+/// This is the membership question, so a **returned** title counts as not held.
+/// That is deliberate: it is not in the library, and fetching it again is the
+/// same act as fetching any other title you never added. Naming asks a
+/// different question and does still know such a title — see
+/// [`Db::item_doc_including_deleted`](crate::db::Db::item_doc_including_deleted).
+///
+/// What a caller does with the answer is its own business; `download` refuses
+/// them unless told otherwise (AUD-197), while `--title` and `--missing` can
+/// only ever resolve to rows that exist and never need asking.
+pub(crate) async fn unknown_asins(
+    db: &crate::db::Db,
+    marketplace: &str,
+    asins: &[String],
+) -> Result<Vec<String>> {
+    let mut unknown = Vec::new();
+    for asin in asins {
+        let asin = asin.trim();
+        if asin.is_empty() {
+            continue;
+        }
+        if matches!(
+            classify_asin(db, marketplace, asin).await?,
+            AsinClass::Unknown
+        ) && !unknown.iter().any(|seen| seen == asin)
+        {
+            unknown.push(asin.to_owned());
+        }
+    }
+    Ok(unknown)
 }
 
 /// Resolves one explicit `--asin` under `download` mode: a podcast parent
@@ -440,7 +477,9 @@ async fn resolve_asin_download<F: FnMut(String)>(
         AsinClass::Episode if !include => {
             eprintln!("skipping podcast episode {asin} — --exclude-podcasts");
         }
-        AsinClass::Episode | AsinClass::Other => push(asin.to_owned()),
+        // An unknown ASIN passes through here; whether it may be downloaded at
+        // all is decided before resolution, on the raw request (AUD-197).
+        AsinClass::Episode | AsinClass::Book | AsinClass::Unknown => push(asin.to_owned()),
     }
     Ok(())
 }
@@ -538,6 +577,75 @@ mod tests {
     #[test]
     fn parse_title_cap_non_numeric_is_err() {
         assert!(parse_title_arg("jedi~x").is_err());
+    }
+
+    /// The gate behind `download --asin`: a typo must be caught before it
+    /// reaches a licenserequest, where a subscription would make it *succeed*
+    /// and hand over a title nobody asked for (AUD-197).
+    #[tokio::test]
+    async fn unknown_asins_names_what_the_library_does_not_hold() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        db.apply_page(
+            MP.into(),
+            vec![item("A1", "Jedi Quest"), item("P1", "Podcast")],
+            vec![],
+            default_log(),
+            None,
+        )
+        .await
+        .unwrap();
+        db.apply_episodes(
+            MP.into(),
+            "P1".into(),
+            vec![episode("E1", "Folge 1")],
+            crate::db::ChangeRecording {
+                record: false,
+                mode: "delta",
+            },
+        )
+        .await
+        .unwrap();
+
+        // A book, a podcast parent and an episode are all held — only the typo
+        // is named, and only once however often it was asked for.
+        let unknown = unknown_asins(
+            &db,
+            MP,
+            &[
+                "A1".into(),
+                "P1".into(),
+                "E1".into(),
+                "B0TYPO".into(),
+                " B0TYPO ".into(),
+                "B0OTHER".into(),
+                "  ".into(),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(unknown, vec!["B0TYPO", "B0OTHER"]);
+
+        // Nothing held → nothing to report, so the gate stays quiet.
+        assert!(unknown_asins(&db, MP, &[]).await.unwrap().is_empty());
+
+        // A returned title counts as not held: it is not in the library, and
+        // fetching it again is the same act as fetching one never added.
+        assert!(db.soft_delete_item(MP.into(), "A1".into()).await.unwrap());
+        assert_eq!(
+            unknown_asins(&db, MP, &["A1".into()]).await.unwrap(),
+            vec!["A1"]
+        );
+
+        // Returning a show soft-deletes its episodes with it, so they stop
+        // being held too — one return puts every episode behind the gate.
+        assert!(db.soft_delete_item(MP.into(), "P1".into()).await.unwrap());
+        assert_eq!(
+            unknown_asins(&db, MP, &["P1".into(), "E1".into()])
+                .await
+                .unwrap(),
+            vec!["P1", "E1"]
+        );
     }
 
     #[tokio::test]

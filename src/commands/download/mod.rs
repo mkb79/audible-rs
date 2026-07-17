@@ -93,6 +93,16 @@ impl super::Command for DownloadCommand {
             .mut_arg("include_podcasts", |a| a.help_heading(H_SELECTION))
             .mut_arg("exclude_podcasts", |a| a.help_heading(H_SELECTION));
         cmd.arg(
+                Arg::new("allow_external")
+                    .help_heading(H_SELECTION)
+                    .long("allow-external")
+                    .action(ArgAction::SetTrue)
+                    .help(
+                        "Allow --asin values that are not in your library \
+                         (needs a subscription that covers the title)",
+                    ),
+            )
+            .arg(
                 Arg::new("kind")
                     .help_heading(H_ARTIFACTS)
                     .long("kind")
@@ -621,6 +631,19 @@ async fn resolve_source(
         }
         return Ok(asins);
     }
+    // `--asin` is the only unchecked source: `--title` and `--missing` resolve
+    // against the database and can only ever name rows that exist. A mistyped
+    // ASIN, by contrast, does not fail — with a subscription that covers it, it
+    // downloads, and the user silently receives a title they never asked for.
+    // Checked on the raw request, before podcast expansion and before the first
+    // licenserequest, so nothing is fetched (AUD-197).
+    if !asins.is_empty() && !matches.get_flag("allow_external") {
+        let unknown = crate::commands::items::unknown_asins(&db, marketplace, &asins).await?;
+        if !unknown.is_empty() {
+            return Err(reject_unknown(ctx, marketplace, &unknown).await);
+        }
+    }
+
     let titles: Vec<String> = matches
         .get_many::<String>("title")
         .map(|values| values.cloned().collect())
@@ -684,6 +707,58 @@ fn parse_cover_sizes(sizes: &[String]) -> Result<Vec<String>> {
         bail!("--cover-size selected nothing");
     }
     Ok(out)
+}
+
+/// Refuses a run whose `--asin` names titles the library does not have, saying
+/// for each what is actually wrong (AUD-197).
+///
+/// The catalog is asked only to **sharpen** the message, never to decide: the
+/// gate is the local membership check, so a catalog that cannot be reached
+/// still refuses — it just says less. Its three answers are kept apart, because
+/// "we could not ask" is not "no such product", and neither is "you have not
+/// added it".
+async fn reject_unknown(ctx: &Ctx, marketplace: &str, unknown: &[String]) -> anyhow::Error {
+    let checked = match ctx.client().await {
+        Ok(client) => crate::commands::catalog::eligibility(client, marketplace, unknown)
+            .await
+            .map_err(|error| eprintln!("could not reach the catalog to say more: {error}"))
+            .ok(),
+        Err(error) => {
+            eprintln!("could not reach the catalog to say more: {error}");
+            None
+        }
+    };
+
+    for asin in unknown {
+        let named = |title: &str| format!("{asin} ({title})");
+        // The catalog does not drop an ASIN it has never heard of — it echoes
+        // it back as a hollow product, `asin` set and everything else null. So
+        // a missing title is what "no such product" looks like from here, and
+        // treating the echo as real would tell someone to go buy their typo.
+        let found = checked
+            .as_ref()
+            .map(|map| map.get(asin).filter(|entry| !entry.full_title.is_empty()));
+        match found {
+            None => eprintln!("{asin}: not in your library for {marketplace}"),
+            Some(None) => {
+                eprintln!("{asin}: not a product on {marketplace} — check the ASIN");
+            }
+            Some(Some(entry)) if entry.is_consumable == Some(true) => eprintln!(
+                "{}: not in your library — run `library sync` if you added it, \
+                 or pass --allow-external to download it anyway",
+                named(&entry.full_title)
+            ),
+            Some(Some(entry)) => eprintln!(
+                "{}: not in your library, and your subscription does not cover it — \
+                 buying it puts it in your library",
+                named(&entry.full_title)
+            ),
+        }
+    }
+    anyhow::anyhow!(
+        "{} requested ASIN(s) are not in your library",
+        unknown.len()
+    )
 }
 
 /// Whether this run decrypts: `--decrypt` overrides the settings bundle, and
