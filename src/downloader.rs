@@ -60,6 +60,20 @@ pub enum DownloadError {
     /// the parts individually instead of the audio stream.
     #[error("this title must be downloaded in parts, not as one file: {0}")]
     MultipartTitle(String),
+    /// The transfer ended below the expected byte count without a stream
+    /// error (e.g. the server closed early). The partial is kept — the
+    /// next run resumes from it.
+    #[error("transfer ended at {written} of {expected} bytes — the partial is kept for resume")]
+    ShortTransfer { written: u64, expected: u64 },
+    /// The transfer produced more bytes than expected: the remote file
+    /// differs from the expectation (e.g. a corrected release), so a
+    /// resumed partial would be head-of-old + tail-of-new. The partial is
+    /// discarded; the next run starts clean.
+    #[error(
+        "transfer produced {written} bytes but {expected} were expected — the remote \
+         file seems to have changed; the partial was discarded, retry to start clean"
+    )]
+    SizeMismatch { written: u64, expected: u64 },
 }
 
 /// Outcome of a resumable download.
@@ -78,8 +92,9 @@ pub enum DownloadOutcome {
 /// Progress is staged in a sibling `<dest>.part` file. If a partial
 /// exists, a `Range` request continues from its size (HTTP 206); a
 /// `200` means the server ignored the range, so the partial is
-/// restarted; `416` means the partial is already complete. On success
-/// the part file is renamed onto `dest`. Multi-GB transfers therefore
+/// restarted; a `416` discards the partial and restarts cleanly (see
+/// [`stream_to_file`] for the resume-validation rules). On success the
+/// part file is renamed onto `dest`. Multi-GB transfers therefore
 /// survive an abort and resume on the next run.
 ///
 /// With `progress` (a `MultiProgress` to attach to), a single-line progress
@@ -99,6 +114,116 @@ pub async fn download_to_file(
     expected_content_type: &[&str],
     ext_overrides: &[(&str, &str)],
 ) -> Result<(DownloadOutcome, PathBuf), DownloadError> {
+    stream_to_file(
+        dest,
+        expected_size,
+        force,
+        progress,
+        expected_content_type,
+        ext_overrides,
+        url,
+        // Auth flow required (a plain GET 403s); a Range header only when
+        // actually resuming.
+        |offset| async move {
+            let mut request = client.authed_get(url).await?;
+            if offset > 0 {
+                request = request.header(RANGE, format!("bytes={offset}-"));
+            }
+            Ok(request)
+        },
+    )
+    .await
+}
+
+/// Player User-Agent for the CENC content host (the Android app's media stack).
+pub const CENC_USER_AGENT: &str =
+    "com.audible.playersdk.player/3.79.0 (Linux;Android 11) AndroidXMedia3/1.3.0";
+
+/// A plain, **uncompressed** HTTP client (no auth) with the same connect/read
+/// timeouts as the API client (AUD-98). Used for the signed CloudFront URLs —
+/// the CENC content download and the MPD/text fetch — which 403 on the API
+/// client's `Accept-Encoding: gzip, br`. Without the timeouts a stalled
+/// connection (worst case a multi-GB CENC transfer) would hang forever.
+pub fn plain_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .connect_timeout(crate::api::client::CONNECT_TIMEOUT)
+        .read_timeout(crate::api::client::READ_TIMEOUT)
+        .build()
+}
+
+/// Downloads a signed CENC/DASH content URL to `dest`, with resume. Unlike
+/// [`download_to_file`] this uses a plain, **uncompressed** client with a player
+/// User-Agent and no auth: the signed CloudFront URL 403s on the API client's
+/// `Accept-Encoding: gzip, br` and requires a ranged request (`bytes=0-`).
+pub async fn download_cenc_to_file(
+    url: &str,
+    dest: &Path,
+    expected_size: Option<u64>,
+    force: bool,
+    progress: Option<&MultiProgress>,
+    expected_content_type: &[&str],
+) -> Result<(DownloadOutcome, PathBuf), DownloadError> {
+    stream_to_file(
+        dest,
+        expected_size,
+        force,
+        progress,
+        expected_content_type,
+        &[],
+        url,
+        // The CENC host requires a ranged request even from zero
+        // (`bytes=0-`) and 403s on the API client's Accept-Encoding, so
+        // this path uses the plain client with the player User-Agent.
+        |offset| async move {
+            Ok(plain_http_client()?
+                .get(url)
+                .header(reqwest::header::USER_AGENT, CENC_USER_AGENT)
+                .header(RANGE, format!("bytes={offset}-")))
+        },
+    )
+    .await
+}
+
+/// The one resumable transfer engine behind [`download_to_file`] and
+/// [`download_cenc_to_file`] (audit 2026-07-17, D1 — the resume logic had
+/// been patched into both copies once already). `build_request` turns a
+/// resume offset into a ready-to-send request; auth, User-Agent and
+/// whether a zero-offset `Range` is sent differ per caller, everything
+/// else is shared. It may be called twice: once for the resume attempt
+/// and once more when a `416` forces a clean restart.
+///
+/// Progress is staged in a sibling `<dest>.part`. A partial resumes via
+/// `Range` (206); a `200` means the server ignored the range and the
+/// partial restarts; a `416` no longer trusts the partial (see below).
+/// On success the part file is renamed onto the final destination.
+///
+/// Resume validation (audit 2026-07-17, A9 — the locally provable half;
+/// `If-Range`/version validation awaits wire confirmation):
+/// - a `416` proves only that the partial is at/past the remote EOF — a
+///   shrunk replacement file (PDF/cover re-issue) would otherwise strand
+///   truncated old bytes as "complete". The partial is discarded and the
+///   transfer restarts from zero.
+/// - after the transfer, the written byte count must equal
+///   `expected_size` (when known): short = kept partial + error, long =
+///   the remote file changed (a resumed partial would be head-of-old +
+///   tail-of-new) → partial discarded + error. Never a silent rename.
+#[allow(clippy::too_many_arguments)]
+async fn stream_to_file<Fut>(
+    dest: &Path,
+    expected_size: Option<u64>,
+    force: bool,
+    progress: Option<&MultiProgress>,
+    expected_content_type: &[&str],
+    ext_overrides: &[(&str, &str)],
+    url: &str,
+    build_request: impl Fn(u64) -> Fut,
+) -> Result<(DownloadOutcome, PathBuf), DownloadError>
+where
+    Fut: std::future::Future<Output = Result<reqwest::RequestBuilder, DownloadError>>,
+{
     // `force` re-downloads from scratch, ignoring an existing complete
     // file and any partial — used by `--force`/`--relicense`.
     if !force
@@ -121,9 +246,8 @@ pub async fn download_to_file(
         }
     };
     // Verify a resumable partial against the expected size before asking
-    // the server: an oversized partial is corrupt (restart from scratch —
-    // a Range request past EOF would 416 and get renamed as complete), a
-    // partial exactly at the expected size needs no request at all.
+    // the server: an oversized partial is corrupt (restart from scratch),
+    // a partial exactly at the expected size needs no request at all.
     if let Some(size) = expected_size {
         if offset > size {
             tracing::warn!(
@@ -140,20 +264,31 @@ pub async fn download_to_file(
         }
     }
 
-    let mut request = client.authed_get(url).await?;
-    if offset > 0 {
-        request = request.header(RANGE, format!("bytes={offset}-"));
+    let mut response = build_request(offset).await?.send().await?;
+    let mut status = response.status();
+
+    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        // A 416 only proves the partial is at/past the remote EOF, not
+        // that its bytes are the file's. With the expected size known
+        // this point is only reached on an inconsistency (a complete
+        // partial finishes above without a request); without one nothing
+        // can vouch for the partial at all — renaming it here stranded a
+        // shrunk replacement's truncated old bytes as "complete".
+        // Restart cleanly instead.
+        tracing::warn!(
+            partial = %part.display(),
+            partial_len = offset,
+            "server says the resume offset is past EOF — discarding the partial \
+             and restarting from scratch"
+        );
+        tokio::fs::remove_file(&part).await?;
+        offset = 0;
+        response = build_request(0).await?.send().await?;
+        status = response.status();
     }
-    let response = request.send().await?;
-    let status = response.status();
     let content_length = response.content_length();
 
     let mut append = offset > 0;
-    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
-        // Partial already covers the whole file.
-        tokio::fs::rename(&part, dest).await?;
-        return Ok((DownloadOutcome::Downloaded, dest.to_path_buf()));
-    }
     if status == reqwest::StatusCode::OK {
         // Server ignored the range: restart from scratch.
         append = false;
@@ -217,9 +352,11 @@ pub async fn download_to_file(
         .await?;
 
     let mut stream = response.bytes_stream();
+    let mut written = offset;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         file.write_all(&chunk).await?;
+        written += chunk.len() as u64;
         if let Some(bar) = &bar {
             bar.inc(chunk.len() as u64);
         }
@@ -229,150 +366,32 @@ pub async fn download_to_file(
     drop(file);
     if let Some(bar) = &bar {
         bar.finish_and_clear();
+    }
+
+    // A transfer that ends at the wrong byte count is never renamed into
+    // place as if it were the file.
+    if let Some(size) = expected_size
+        && written != size
+    {
+        if written > size {
+            // More data than expected: the remote file changed — an
+            // appended-to partial would be head-of-old + tail-of-new.
+            tokio::fs::remove_file(&part).await?;
+            return Err(DownloadError::SizeMismatch {
+                written,
+                expected: size,
+            });
+        }
+        // Short: the stream ended early without an error. Keep the
+        // partial — the next run resumes exactly there.
+        return Err(DownloadError::ShortTransfer {
+            written,
+            expected: size,
+        });
     }
 
     tokio::fs::rename(&part, &final_dest).await?;
     Ok((DownloadOutcome::Downloaded, final_dest))
-}
-
-/// Player User-Agent for the CENC content host (the Android app's media stack).
-pub const CENC_USER_AGENT: &str =
-    "com.audible.playersdk.player/3.79.0 (Linux;Android 11) AndroidXMedia3/1.3.0";
-
-/// A plain, **uncompressed** HTTP client (no auth) with the same connect/read
-/// timeouts as the API client (AUD-98). Used for the signed CloudFront URLs —
-/// the CENC content download and the MPD/text fetch — which 403 on the API
-/// client's `Accept-Encoding: gzip, br`. Without the timeouts a stalled
-/// connection (worst case a multi-GB CENC transfer) would hang forever.
-pub fn plain_http_client() -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
-        .connect_timeout(crate::api::client::CONNECT_TIMEOUT)
-        .read_timeout(crate::api::client::READ_TIMEOUT)
-        .build()
-}
-
-/// Downloads a signed CENC/DASH content URL to `dest`, with resume. Unlike
-/// [`download_to_file`] this uses a plain, **uncompressed** client with a player
-/// User-Agent and no auth: the signed CloudFront URL 403s on the API client's
-/// `Accept-Encoding: gzip, br` and requires a ranged request (`bytes=0-`).
-pub async fn download_cenc_to_file(
-    url: &str,
-    dest: &Path,
-    expected_size: Option<u64>,
-    force: bool,
-    progress: Option<&MultiProgress>,
-    expected_content_type: &[&str],
-) -> Result<(DownloadOutcome, PathBuf), DownloadError> {
-    if !force
-        && let Ok(meta) = tokio::fs::metadata(dest).await
-        && expected_size.is_some_and(|size| meta.len() == size)
-    {
-        return Ok((DownloadOutcome::AlreadyComplete, dest.to_path_buf()));
-    }
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    let part = part_path(dest);
-    let mut offset = if force {
-        0
-    } else {
-        tokio::fs::metadata(&part)
-            .await
-            .map(|meta| meta.len())
-            .unwrap_or(0)
-    };
-    // Same partial-size verification as download_to_file: oversized =
-    // corrupt (restart), exactly complete = finish without a request.
-    if let Some(size) = expected_size {
-        if offset > size {
-            tracing::warn!(
-                partial = %part.display(),
-                partial_len = offset,
-                expected = size,
-                "partial is larger than the expected file — restarting"
-            );
-            tokio::fs::remove_file(&part).await?;
-            offset = 0;
-        } else if offset == size && offset > 0 {
-            tokio::fs::rename(&part, dest).await?;
-            return Ok((DownloadOutcome::Downloaded, dest.to_path_buf()));
-        }
-    }
-
-    let response = plain_http_client()?
-        .get(url)
-        .header(reqwest::header::USER_AGENT, CENC_USER_AGENT)
-        .header(RANGE, format!("bytes={offset}-"))
-        .send()
-        .await?;
-    let status = response.status();
-    let content_length = response.content_length();
-
-    let mut append = offset > 0;
-    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
-        tokio::fs::rename(&part, dest).await?;
-        return Ok((DownloadOutcome::Downloaded, dest.to_path_buf()));
-    }
-    if status == reqwest::StatusCode::OK {
-        // Server ignored the range: restart from scratch.
-        append = false;
-        offset = 0;
-    } else if status != reqwest::StatusCode::PARTIAL_CONTENT && !status.is_success() {
-        return Err(DownloadError::Status(status));
-    }
-
-    // Verify the media content-type so a bogus 200 (an HTML/JSON error page, an
-    // expired URL) is not written as a broken file — parity with download_to_file.
-    let got_content_type = response
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    if !expected_content_type.is_empty()
-        && let Some(got) = &got_content_type
-        && !content_type_matches(got, expected_content_type)
-    {
-        return Err(content_type_error(response, got, expected_content_type).await);
-    }
-
-    let total = expected_size.or_else(|| content_length.map(|len| offset + len));
-    let bar = progress.map(|multi| {
-        let name = dest
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let bar = multi.add(progress_bar(total, &name));
-        bar.set_position(offset);
-        bar
-    });
-
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(append)
-        .truncate(!append)
-        .open(&part)
-        .await?;
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        file.write_all(&chunk).await?;
-        if let Some(bar) = &bar {
-            bar.inc(chunk.len() as u64);
-        }
-    }
-    file.flush().await?;
-    file.sync_all().await?;
-    drop(file);
-    if let Some(bar) = &bar {
-        bar.finish_and_clear();
-    }
-    tokio::fs::rename(&part, dest).await?;
-    Ok((DownloadOutcome::Downloaded, dest.to_path_buf()))
 }
 
 /// The extension to use for a response `Content-Type`, if an override matches

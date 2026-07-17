@@ -235,6 +235,128 @@ async fn cenc_rejects_wrong_content_type() {
     assert!(!dest.with_file_name("Book.cenc.part").exists());
 }
 
+/// A 416 no longer "completes" an unvalidated partial (audit A9): the
+/// partial is discarded and the file re-fetched from scratch — a shrunk
+/// replacement PDF/cover would otherwise strand truncated old bytes as
+/// the "complete" file.
+#[tokio::test]
+async fn a_416_discards_the_partial_and_restarts() {
+    let server = MockServer::start().await;
+    let fresh: &[u8] = b"SHRUNKFILE"; // 10 bytes — smaller than the stale partial
+    // The resume attempt (Range) answers 416; the clean retry answers 200.
+    Mock::given(method("GET"))
+        .and(path("/file"))
+        .and(header("range", "bytes=16-"))
+        .respond_with(ResponseTemplate::new(416))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/file"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(fresh))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("Book.pdf");
+    // A stale 16-byte partial of the old, larger file; size unknown (PDF).
+    std::fs::write(dest.with_file_name("Book.pdf.part"), b"OLDOLDOLDOLDOLD!").unwrap();
+
+    let client = make_client(&server);
+    let (outcome, _) = download_to_file(
+        &client,
+        &format!("{}/file", server.uri()),
+        &dest,
+        None,
+        false,
+        None,
+        &[],
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, DownloadOutcome::Downloaded);
+    assert_eq!(
+        std::fs::read(&dest).unwrap(),
+        fresh,
+        "the shrunk replacement is fetched whole — no stale bytes survive"
+    );
+    assert!(!dest.with_file_name("Book.pdf.part").exists());
+}
+
+/// A transfer that ends short of the expected size errors instead of
+/// renaming a truncated file into place (audit A9); the partial stays
+/// for the next resume.
+#[tokio::test]
+async fn a_short_transfer_keeps_the_partial_and_errors() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/file"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(&FULL[..12]))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("Book.aaxc");
+    let client = make_client(&server);
+    let err = download_to_file(
+        &client,
+        &format!("{}/file", server.uri()),
+        &dest,
+        Some(20),
+        false,
+        None,
+        &[],
+        &[],
+    )
+    .await
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("12 of 20 bytes"), "{msg}");
+    assert!(!dest.exists(), "no truncated file is renamed into place");
+    assert_eq!(
+        std::fs::read(dest.with_file_name("Book.aaxc.part")).unwrap(),
+        &FULL[..12],
+        "the partial survives for the next resume"
+    );
+}
+
+/// A transfer that produces more bytes than expected errors and discards
+/// the partial (audit A9): the remote file changed, so an appended-to
+/// partial would be head-of-old + tail-of-new.
+#[tokio::test]
+async fn an_oversized_transfer_discards_the_partial_and_errors() {
+    let server = MockServer::start().await;
+    let bigger: &[u8] = b"0123456789ABCDEFGHIJKLMNO"; // 25 bytes, expected 20
+    Mock::given(method("GET"))
+        .and(path("/file"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bigger))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("Book.aaxc");
+    let client = make_client(&server);
+    let err = download_to_file(
+        &client,
+        &format!("{}/file", server.uri()),
+        &dest,
+        Some(20),
+        false,
+        None,
+        &[],
+        &[],
+    )
+    .await
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("25 bytes") && msg.contains("20"), "{msg}");
+    assert!(!dest.exists());
+    assert!(
+        !dest.with_file_name("Book.aaxc.part").exists(),
+        "a mixed-content partial must not survive"
+    );
+}
+
 #[tokio::test]
 async fn accepts_matching_content_type() {
     let server = MockServer::start().await;
