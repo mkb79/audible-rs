@@ -130,6 +130,35 @@ async fn already_complete_file_is_not_refetched() {
     assert_eq!(outcome, DownloadOutcome::AlreadyComplete);
 }
 
+/// The already-complete pre-check also covers extension-corrected files
+/// (audit A16): an audio served as `audio/mpeg` landed as `X.mp3`, and
+/// probing only the planned `X.aaxc` re-transferred it on every
+/// record-less run.
+#[tokio::test]
+async fn an_extension_corrected_file_counts_as_complete() {
+    let server = MockServer::start().await;
+    // No mock mounted: any request would 404 and fail the download.
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("Book.aaxc");
+    std::fs::write(dir.path().join("Book.mp3"), FULL).unwrap();
+
+    let client = make_client(&server);
+    let (outcome, path) = download_to_file(
+        &client,
+        &format!("{}/file", server.uri()),
+        &dest,
+        Some(20),
+        false,
+        None,
+        &[],
+        &[("audio/mpeg", "mp3"), ("audio/mp4", "m4a")],
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, DownloadOutcome::AlreadyComplete);
+    assert!(path.ends_with("Book.mp3"), "{}", path.display());
+}
+
 #[tokio::test]
 async fn force_refetches_an_already_complete_file() {
     let server = MockServer::start().await;

@@ -195,6 +195,16 @@ fn episode_not_archived_clause(include_archived: bool) -> &'static str {
     }
 }
 
+/// Escapes `%`, `_` and the escape character itself in user text bound
+/// into a `LIKE '%' || ? || '%'` pattern — pair the pattern with
+/// `ESCAPE '\\'`. Without it a `--title 100%` filter matched every title
+/// starting with "100" instead of the literal percent sign.
+pub(crate) fn escape_like(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 /// Whether a document advertises a companion PDF — the SQL twin of
 /// [`crate::models::library::pdf_available`] (the Rust source of truth):
 /// `is_pdf_url_available`, with a `pdf_url`-presence fallback. The two are

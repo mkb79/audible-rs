@@ -225,12 +225,23 @@ where
     Fut: std::future::Future<Output = Result<reqwest::RequestBuilder, DownloadError>>,
 {
     // `force` re-downloads from scratch, ignoring an existing complete
-    // file and any partial — used by `--force`/`--relicense`.
-    if !force
-        && let Ok(meta) = tokio::fs::metadata(dest).await
-        && expected_size.is_some_and(|size| meta.len() == size)
-    {
-        return Ok((DownloadOutcome::AlreadyComplete, dest.to_path_buf()));
+    // file and any partial — used by `--force`/`--relicense`. The check
+    // covers the planned path plus every extension-corrected candidate:
+    // an audio served as `audio/mpeg` landed as `X.mp3`, and probing only
+    // the planned `X.aaxc` re-transferred it on every record-less run.
+    if !force && let Some(size) = expected_size {
+        let candidates = std::iter::once(dest.to_path_buf()).chain(
+            ext_overrides
+                .iter()
+                .map(|(_, ext)| dest.with_extension(ext)),
+        );
+        for candidate in candidates {
+            if let Ok(meta) = tokio::fs::metadata(&candidate).await
+                && meta.len() == size
+            {
+                return Ok((DownloadOutcome::AlreadyComplete, candidate));
+            }
+        }
     }
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;

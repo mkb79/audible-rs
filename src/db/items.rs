@@ -1193,7 +1193,7 @@ impl Db {
                             CAST(runtime_min AS TEXT), CAST(language AS TEXT), kind
                      FROM v_books
                      WHERE marketplace IN ({placeholders}) {}
-                       AND lower(full_title) LIKE '%' || lower(?) || '%'
+                       AND lower(full_title) LIKE '%' || lower(?) || '%' ESCAPE '\\'
                      ORDER BY full_title, marketplace
                      LIMIT ?",
                     super::kind_clause("kind", &item_kinds)
@@ -1204,7 +1204,8 @@ impl Db {
                 for marketplace in &marketplaces {
                     params.push(marketplace);
                 }
-                params.push(&query);
+                let like_query = super::escape_like(&query);
+                params.push(&like_query);
                 params.push(&limit);
                 let rows = statement
                     .query_map(params.as_slice(), book_row)?
@@ -1273,7 +1274,7 @@ impl Db {
                 return Ok(Vec::new());
             }
             let sql = format!(
-                "SELECT doc FROM items WHERE marketplace IN ({}) AND is_deleted = 0
+                "SELECT asin, doc FROM items WHERE marketplace IN ({}) AND is_deleted = 0
                  ORDER BY marketplace, asin",
                 in_placeholders(marketplaces.len())
             );
@@ -1283,10 +1284,24 @@ impl Db {
                 .map(|m| m as &dyn rusqlite::ToSql)
                 .collect();
             let docs = statement
-                .query_map(params.as_slice(), |row| row.get::<_, String>(0))?
+                .query_map(params.as_slice(), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
-                .map(|doc| serde_json::from_str(&doc).unwrap_or(serde_json::Value::Null))
+                .filter_map(|(asin, doc)| match serde_json::from_str(&doc) {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        // Name the damaged row instead of exporting a silent
+                        // `null` nobody can trace back to its item.
+                        tracing::warn!(
+                            asin,
+                            %error,
+                            "stored document is not valid JSON; skipping it in the export"
+                        );
+                        None
+                    }
+                })
                 .collect();
             Ok(docs)
         })
@@ -1372,20 +1387,26 @@ impl Db {
         asin: String,
     ) -> Result<bool, DbError> {
         self.call(move |conn| {
+            // One transaction: parent and episodes flip together, or not at
+            // all — a crash between the two updates left the parent hidden
+            // with its episodes still active until a delta sync touched the
+            // parent again (its `apply_page` sibling was already atomic).
+            let tx = conn.transaction()?;
             let now = crate::db::now_iso_utc();
-            let flipped = conn.execute(
+            let flipped = tx.execute(
                 "UPDATE items SET is_deleted = 1, deleted_utc = ?, updated_utc = ?
                  WHERE asin = ? AND marketplace = ? AND is_deleted = 0",
                 rusqlite::params![now, now, asin, marketplace],
             )?;
             if flipped > 0 {
                 // A soft-deleted parent takes its episodes with it.
-                conn.execute(
+                tx.execute(
                     "UPDATE episodes SET is_deleted = 1, deleted_utc = ?, updated_utc = ?
                      WHERE parent_asin = ? AND marketplace = ? AND is_deleted = 0",
                     rusqlite::params![now, now, asin, marketplace],
                 )?;
             }
+            tx.commit()?;
             Ok(flipped > 0)
         })
         .await
@@ -2857,6 +2878,49 @@ mod tests {
             .unwrap();
         assert_eq!(exact.len(), 1);
         assert_eq!(exact[0].asin, "SW1");
+    }
+
+    /// A16: `%`/`_` in a LIKE search are literal text, not wildcards —
+    /// "100%" must not match every title starting with "100".
+    #[tokio::test]
+    async fn like_search_treats_percent_and_underscore_literally() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        db.apply_page(
+            MP.into(),
+            vec![
+                item("PC1", "100% Motivation"),
+                item("YR1", "100 Jahre Einsamkeit"),
+            ],
+            vec![],
+            SyncLogEntry {
+                request_time_utc: now_iso_utc(),
+                response_time_utc: now_iso_utc(),
+                http_status: Some(200),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let results = db
+            .search(vec![MP.to_owned()], vec![], "100%".into(), 10, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "\"100%\" must match only the literal title"
+        );
+        assert_eq!(results[0].asin, "PC1");
+
+        // `_` is literal too ("100_" would otherwise match "100 J…").
+        let results = db
+            .search(vec![MP.to_owned()], vec![], "100_".into(), 10, false)
+            .await
+            .unwrap();
+        assert!(results.is_empty(), "\"100_\" matches nothing literally");
     }
 
     #[tokio::test]
