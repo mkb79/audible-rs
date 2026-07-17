@@ -576,17 +576,46 @@ impl Db {
         .await
     }
 
-    /// The full stored document of an active item, if present (used to
-    /// read `product_images` for covers without an extra API call).
+    /// The full stored document of an item **currently in the library**, if
+    /// present (used to read `product_images` for covers without an extra API
+    /// call). Callers asking whether a title is in the library want this one.
+    ///
+    /// Callers asking what we know about a *file* want
+    /// [`item_doc_including_deleted`](Self::item_doc_including_deleted).
     pub async fn item_doc(
         &self,
         asin: String,
         marketplace: String,
     ) -> Result<Option<String>, DbError> {
+        self.item_doc_scoped(asin, marketplace, false).await
+    }
+
+    /// Like [`item_doc`](Self::item_doc), but also returns a title that left
+    /// the library. A return or revoke only soft-deletes — the row and its doc
+    /// survive intact, as do the `downloads` rows and the files themselves.
+    ///
+    /// Naming needs this: the doc describes the file that was downloaded, not
+    /// whether the title is still yours. Hiding it strands the file with a bare
+    /// ASIN and makes `reorganize` skip it forever (AUD-216).
+    pub async fn item_doc_including_deleted(
+        &self,
+        asin: String,
+        marketplace: String,
+    ) -> Result<Option<String>, DbError> {
+        self.item_doc_scoped(asin, marketplace, true).await
+    }
+
+    async fn item_doc_scoped(
+        &self,
+        asin: String,
+        marketplace: String,
+        include_deleted: bool,
+    ) -> Result<Option<String>, DbError> {
         self.call(move |conn| {
             conn.query_row(
-                "SELECT doc FROM items WHERE asin = ? AND marketplace = ? AND is_deleted = 0",
-                rusqlite::params![asin, marketplace],
+                "SELECT doc FROM items
+                 WHERE asin = ? AND marketplace = ? AND (? OR is_deleted = 0)",
+                rusqlite::params![asin, marketplace, include_deleted],
                 |row| row.get(0),
             )
             .map(Some)
@@ -598,20 +627,41 @@ impl Db {
         .await
     }
 
-    /// The raw document and parent (podcast) ASIN of a podcast **episode**,
-    /// if present (AUD-100). The naming engine falls back to this when an ASIN
-    /// is not an `items` row, so downloaded episodes are named/reorganized like
-    /// books instead of by bare ASIN.
+    /// The raw document and parent (podcast) ASIN of a podcast **episode**
+    /// currently in the library, if present (AUD-100). The naming engine falls
+    /// back to this when an ASIN is not an `items` row, so downloaded episodes
+    /// are named/reorganized like books instead of by bare ASIN.
     pub async fn episode_doc(
         &self,
         asin: String,
         marketplace: String,
     ) -> Result<Option<(String, String)>, DbError> {
+        self.episode_doc_scoped(asin, marketplace, false).await
+    }
+
+    /// Like [`episode_doc`](Self::episode_doc), but also returns an episode
+    /// that left the library. A returned show soft-deletes its episodes with
+    /// it, so without this every episode of a returned podcast loses its name
+    /// at once (AUD-216).
+    pub async fn episode_doc_including_deleted(
+        &self,
+        asin: String,
+        marketplace: String,
+    ) -> Result<Option<(String, String)>, DbError> {
+        self.episode_doc_scoped(asin, marketplace, true).await
+    }
+
+    async fn episode_doc_scoped(
+        &self,
+        asin: String,
+        marketplace: String,
+        include_deleted: bool,
+    ) -> Result<Option<(String, String)>, DbError> {
         self.call(move |conn| {
             conn.query_row(
                 "SELECT doc, parent_asin FROM episodes
-                 WHERE asin = ? AND marketplace = ? AND is_deleted = 0",
-                rusqlite::params![asin, marketplace],
+                 WHERE asin = ? AND marketplace = ? AND (? OR is_deleted = 0)",
+                rusqlite::params![asin, marketplace, include_deleted],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map(Some)
@@ -1908,6 +1958,73 @@ mod tests {
         );
         assert!(
             db.episode_doc("X9".into(), MP.into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Returning a show soft-deletes it *and its episodes*, but the files stay
+    /// on disk. Membership must forget them; naming must not, or every episode
+    /// of a returned podcast loses its name at once (AUD-216).
+    #[tokio::test]
+    async fn a_returned_show_keeps_its_episodes_nameable() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        db.apply_page(
+            MP.into(),
+            vec![item("P1", "Podcast")],
+            vec![],
+            default_log(),
+            None,
+        )
+        .await
+        .unwrap();
+        db.apply_episodes(
+            MP.into(),
+            "P1".into(),
+            vec![episode("E1", "Folge 1")],
+            ChangeRecording {
+                record: false,
+                mode: "delta",
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(db.soft_delete_item(MP.into(), "P1".into()).await.unwrap());
+
+        // Membership: the show and its episode are gone from the library.
+        assert!(db.item_doc("P1".into(), MP.into()).await.unwrap().is_none());
+        assert!(
+            db.episode_doc("E1".into(), MP.into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Naming: both survive, because their files do.
+        let doc = db
+            .item_doc_including_deleted("P1".into(), MP.into())
+            .await
+            .unwrap()
+            .expect("the returned show keeps its doc");
+        let parsed: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        assert_eq!(parsed["title"], "Podcast");
+
+        let (doc, parent) = db
+            .episode_doc_including_deleted("E1".into(), MP.into())
+            .await
+            .unwrap()
+            .expect("the returned show's episode keeps its doc");
+        assert_eq!(parent, "P1");
+        let parsed: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        assert_eq!(parsed["title"], "Folge 1");
+
+        // An unknown ASIN stays unknown either way — this widens what counts as
+        // present, it does not invent rows.
+        assert!(
+            db.item_doc_including_deleted("X9".into(), MP.into())
                 .await
                 .unwrap()
                 .is_none()
