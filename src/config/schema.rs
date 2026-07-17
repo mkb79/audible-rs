@@ -439,15 +439,18 @@ fn default_idle_timeout() -> String {
 pub fn parse_duration(value: &str) -> Result<Duration, ConfigError> {
     let invalid =
         || ConfigError::Invalid(format!("invalid duration {value:?} (use 90s/30m/6h/1d)"));
-    let (number, unit) = value.split_at(value.len().saturating_sub(1));
-    let number: u64 = number.parse().map_err(|_| invalid())?;
-    let seconds = match unit {
-        "s" => number,
-        "m" => number * 60,
-        "h" => number * 3600,
-        "d" => number * 86_400,
+    // Split on the last character, not the last byte: a multibyte unit must
+    // yield the error below, not a char-boundary panic during config load.
+    let (unit_start, unit) = value.char_indices().next_back().ok_or_else(invalid)?;
+    let number: u64 = value[..unit_start].parse().map_err(|_| invalid())?;
+    let factor = match unit {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86_400,
         _ => return Err(invalid()),
     };
+    let seconds = number.checked_mul(factor).ok_or_else(invalid)?;
     Ok(Duration::from_secs(seconds))
 }
 

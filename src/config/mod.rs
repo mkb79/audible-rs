@@ -162,6 +162,12 @@ download_dir = "~/Audible/US"
         assert!(schema::parse_duration("6 hours").is_err());
         assert!(schema::parse_duration("h").is_err());
         assert!(schema::parse_duration("-5m").is_err());
+        // A multibyte unit must error, not panic on a char boundary.
+        assert!(schema::parse_duration("6ħ").is_err());
+        assert!(schema::parse_duration("6€").is_err());
+        assert!(schema::parse_duration("").is_err());
+        // Values whose seconds overflow u64 must error, not wrap.
+        assert!(schema::parse_duration(&format!("{}d", u64::MAX)).is_err());
 
         let config: Config =
             toml::from_str("version = 1\n[db]\nsync_max_age = \"soon\"\n").unwrap();
