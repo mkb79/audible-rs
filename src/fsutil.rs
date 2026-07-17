@@ -68,6 +68,9 @@ fn sync_parent_dir(path: &Path) {
     {
         let _ = dir.sync_all();
     }
+    // No directory fsync on non-unix targets; `path` is otherwise unused.
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// The cross-process write lock guarding a file's read-modify-write

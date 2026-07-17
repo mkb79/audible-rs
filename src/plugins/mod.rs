@@ -422,7 +422,7 @@ pub async fn invoke(
     };
     #[cfg(not(unix))]
     let envs: Vec<(String, String)> = {
-        let _ = ctx;
+        let _ = (ctx, builtins);
         if !manifest.scopes.is_empty() {
             anyhow::bail!(
                 "plugins that request broker scopes are not supported on Windows yet (see AUD-193)"
