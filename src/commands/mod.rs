@@ -17,6 +17,17 @@ pub mod db;
 pub mod download;
 pub(crate) mod hosts;
 pub mod items;
+
+/// Splits a comma-separated value into trimmed, non-empty items — the
+/// one CSV rule for option values (audit 2026-07-17, D6; two byte-equal
+/// copies lived in `setup` and `download`).
+pub(crate) fn split_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
 pub mod library;
 pub mod plugin;
 pub mod podcasts;

@@ -14,11 +14,19 @@ use crate::config::paths;
 /// Resolved download directory: the settings bundle's `download_dir`,
 /// else the platform data dir's `downloads` subfolder.
 pub(crate) fn download_dir(ctx: &Ctx) -> Result<PathBuf> {
-    let dir = ctx
-        .settings_view()?
+    Ok(download_dir_for(&ctx.settings_view()?))
+}
+
+/// The effective download directory of a resolved settings view: the
+/// configured `download_dir`, else `<data_dir>/downloads`, tilde-expanded.
+/// One rule (audit 2026-07-17, D6): the broker's `/v1/config/resolved`
+/// restated it and could have drifted into reporting a directory the
+/// downloads never use.
+pub(crate) fn download_dir_for(view: &crate::config::resolve::SettingsView) -> PathBuf {
+    let dir = view
         .download_dir(None, None)
         .unwrap_or_else(|| paths::data_dir().join("downloads"));
-    Ok(expand_tilde(&dir))
+    expand_tilde(&dir)
 }
 
 pub(crate) fn expand_tilde(path: &Path) -> PathBuf {

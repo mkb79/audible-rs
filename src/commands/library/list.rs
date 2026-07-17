@@ -99,12 +99,7 @@ pub(super) async fn list_missing(
     include_archived: bool,
 ) -> Result<()> {
     // Expand `all` and normalize to the canonical kind order, deduped.
-    let all = kinds.iter().any(|kind| kind == "all");
-    let kinds: Vec<String> = crate::db::DOWNLOAD_KINDS
-        .iter()
-        .filter(|kind| all || kinds.iter().any(|k| k == *kind))
-        .map(|kind| (*kind).to_owned())
-        .collect();
+    let kinds = crate::db::normalize_download_kinds(&kinds);
 
     let db = ctx.open_library_db().await?;
     maybe_auto_sync(ctx, &db).await?;

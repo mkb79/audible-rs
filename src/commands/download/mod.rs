@@ -836,19 +836,10 @@ fn resolve_decrypt(audio_selected: bool, decrypt: bool, configured: bool) -> Res
     Ok(audio_selected && (decrypt || configured))
 }
 
-/// Splits a CLI CSV value (`--cover-size 500,900`) into trimmed items.
-fn split_csv(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 /// Resolves the cover size(s): `--cover-size` (CSV) else the settings bundle.
 fn resolve_cover_sizes(ctx: &Ctx, matches: &clap::ArgMatches) -> Vec<String> {
     if let Some(value) = matches.get_one::<String>("cover_size") {
-        return split_csv(value);
+        return crate::commands::split_csv(value);
     }
     ctx.settings_view()
         .map(|view| view.cover_size(None, None))
@@ -859,7 +850,7 @@ fn resolve_cover_sizes(ctx: &Ctx, matches: &clap::ArgMatches) -> Vec<String> {
 /// settings bundle.
 fn resolve_chapter_types(ctx: &Ctx, matches: &clap::ArgMatches) -> Vec<String> {
     if let Some(value) = matches.get_one::<String>("chapter_type") {
-        return split_csv(value);
+        return crate::commands::split_csv(value);
     }
     ctx.settings_view()
         .map(|view| view.chapter_type(None, None))

@@ -1010,11 +1010,7 @@ async fn config_resolved(
         "account": ctx.account_name()?,
         "settings": settings_name,
         "marketplaces": ctx.marketplaces()?,
-        "download_dir": crate::naming::expand_tilde(
-            &view
-                .download_dir(None, None)
-                .unwrap_or_else(|| crate::config::paths::data_dir().join("downloads")),
-        ),
+        "download_dir": crate::naming::download_dir_for(&view),
         "filename_mode": format!("{:?}", view.filename_mode(None, None)).to_lowercase(),
         "filename_template": view.filename_template(),
         "filename_max_length": view.filename_max_length(None, None),

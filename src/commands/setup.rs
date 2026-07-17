@@ -83,15 +83,6 @@ fn chapter_default(stored: Option<&[String]>) -> String {
     }
 }
 
-/// Splits a comma-separated answer into trimmed, non-empty items.
-fn split_csv(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 /// The first item that is not a cover size, with the reason — or `None` when
 /// all are fine. The answer is a **list**, so each item is checked on its own:
 /// `500,900` is two sizes, not one unparsable number. The rule itself is the
@@ -150,7 +141,7 @@ fn setup(ctx: &Ctx) -> Result<()> {
                 .map(|v| v.join(","))
                 .unwrap_or_else(|| "500".to_owned()),
         )?;
-        let sizes = split_csv(&value);
+        let sizes = crate::commands::split_csv(&value);
         if sizes.is_empty() {
             eprintln!("pick at least one size");
         } else if let Some(reason) = invalid_cover_size(&sizes) {
@@ -278,8 +269,8 @@ fn setup(ctx: &Ctx) -> Result<()> {
         None
     };
 
-    let cover_sizes = split_csv(&cover_size);
-    let chapter_types = split_csv(&chapter_type);
+    let cover_sizes = crate::commands::split_csv(&cover_size);
+    let chapter_types = crate::commands::split_csv(&chapter_type);
     let bool_str = |value: bool| if value { "true" } else { "false" };
     let decrypt_value = bool_str(decrypt);
     let include_podcasts_value = bool_str(include_podcasts);
@@ -491,7 +482,7 @@ change_retention_days = 90
     /// `--cover-size` flag and `settings set` all support.)
     #[test]
     fn cover_sizes_accept_a_comma_separated_list() {
-        let sizes = |value: &str| split_csv(value);
+        let sizes = |value: &str| crate::commands::split_csv(value);
 
         assert!(invalid_cover_size(&sizes("500")).is_none());
         assert!(invalid_cover_size(&sizes("500,900")).is_none());

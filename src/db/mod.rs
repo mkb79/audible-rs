@@ -27,6 +27,7 @@ pub use annotations::{AnnotationDoc, AnnotationStatus};
 pub use changes::{ChangeFilter, ChangeRecord, ChangeRecording};
 pub use downloads::{
     DOWNLOAD_KINDS, DOWNLOAD_VARIANTS, DownloadEntry, DownloadRecord, LicenseGrant, ReorgDownload,
+    normalize_download_kinds,
 };
 pub use episodes::{EpisodeHit, EpisodeRow, MissingEpisodeRow, PodcastRow, UpsertEpisode};
 pub use items::{

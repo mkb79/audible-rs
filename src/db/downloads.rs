@@ -86,6 +86,18 @@ pub const DOWNLOAD_KINDS: [&str; 4] = ["audio", "chapter", "pdf", "cover"];
 /// artifacts always use `original`.
 pub const DOWNLOAD_VARIANTS: [&str; 3] = ["original", "decrypted", "reencoded"];
 
+/// Expands `all` and normalizes requested download kinds to the canonical
+/// order, deduped — the one `--missing` kinds rule (audit 2026-07-17, D6;
+/// `library list` and the episodes listing each carried a copy).
+pub fn normalize_download_kinds(requested: &[String]) -> Vec<String> {
+    let all = requested.iter().any(|kind| kind == "all");
+    DOWNLOAD_KINDS
+        .iter()
+        .filter(|kind| all || requested.iter().any(|k| k == *kind))
+        .map(|kind| (*kind).to_owned())
+        .collect()
+}
+
 impl Db {
     /// ASINs other than `asin` that already own a download record whose
     /// path starts with `prefix` (the rendered `<dir>/<base>.` stem) — the
