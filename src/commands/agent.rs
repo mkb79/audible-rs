@@ -124,7 +124,7 @@ impl super::Command for AgentCommand {
         use crate::commands::hosts;
         match matches.subcommand() {
             Some(("start", start)) => start_agent(ctx, start.get_flag("foreground")).await,
-            Some(("run", _)) => agent::serve(ctx).await,
+            Some(("run", _)) => agent::serve(ctx, super::plugin::builtin_names()).await,
             Some(("stop", _)) => stop_agent(ctx),
             Some(("status", _)) => status(ctx).await,
             Some(("audit", audit)) => show_audit(
@@ -170,7 +170,7 @@ async fn start_agent(ctx: &Ctx, foreground: bool) -> Result<()> {
         bail!("the agent is already running");
     }
     if foreground {
-        return agent::serve(ctx).await;
+        return agent::serve(ctx, super::plugin::builtin_names()).await;
     }
 
     let exe = std::env::current_exe().context("could not resolve the own binary")?;

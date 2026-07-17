@@ -72,6 +72,9 @@ struct AgentBackend {
     config_dir: PathBuf,
     admin_token: String,
     invoke_exe: PathBuf,
+    /// Built-in command names for `/v1/invoke`/`/v1/jobs`, from the
+    /// composition root (`agent start` in the commands layer).
+    builtins: Vec<String>,
     idle_timeout: Duration,
     sessions: RwLock<HashMap<String, Session>>,
     /// Persisted app tokens (AUD-117); reloaded from disk on change.
@@ -141,6 +144,10 @@ impl Backend for AgentBackend {
 
     fn invoke_exe(&self) -> PathBuf {
         self.invoke_exe.clone()
+    }
+
+    fn builtin_names(&self) -> &[String] {
+        &self.builtins
     }
 
     /// The agent's own allowlist, `[session] allowed_hosts` (AUD-124) —
@@ -347,7 +354,7 @@ impl AgentBackend {
 /// socket, writes the PID and token files, serves `/v1`, and cleans up.
 /// This is the daemon body (`agent run`); `agent start` self-execs it
 /// detached.
-pub async fn serve(ctx: &Ctx) -> Result<()> {
+pub async fn serve(ctx: &Ctx, builtins: Vec<String>) -> Result<()> {
     let dir = agent_dir(ctx);
     super::create_private_dir(&dir)?;
 
@@ -373,6 +380,7 @@ pub async fn serve(ctx: &Ctx) -> Result<()> {
         config_dir: ctx.config_dir().to_owned(),
         admin_token,
         invoke_exe: std::env::current_exe().context("could not resolve the own binary")?,
+        builtins,
         idle_timeout,
         sessions: RwLock::new(HashMap::new()),
         tokens: TokenStore::new(ctx.config_dir()),
@@ -507,6 +515,7 @@ mod tests {
             config_dir: ctx.config_dir().to_owned(),
             admin_token: "T".into(),
             invoke_exe: PathBuf::from("/bin/true"),
+            builtins: vec!["library".to_owned()],
             idle_timeout: idle,
             sessions: RwLock::new(HashMap::new()),
             tokens: TokenStore::new(ctx.config_dir()),

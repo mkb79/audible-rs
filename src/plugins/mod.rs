@@ -389,6 +389,7 @@ async fn describe_with_timeout(
 pub async fn invoke(
     ctx: &Arc<Ctx>,
     plugin: &Discovered,
+    builtins: &[String],
     args: &[std::ffi::OsString],
 ) -> Result<i32> {
     let manifest = match describe(plugin).await {
@@ -407,7 +408,7 @@ pub async fn invoke(
         let broker = if manifest.scopes.is_empty() {
             None
         } else {
-            Some(broker::Broker::start(Arc::clone(ctx), manifest.scopes).await?)
+            Some(broker::Broker::start(Arc::clone(ctx), manifest.scopes, builtins.to_vec()).await?)
         };
         let mut envs: Vec<(String, String)> = Vec::new();
         if let Some(broker) = &broker {
@@ -518,7 +519,7 @@ pub async fn run_external(
     let Some(plugin) = plugins.iter().find(|plugin| plugin.name == name) else {
         return Ok(None);
     };
-    invoke(ctx, plugin, args).await.map(Some)
+    invoke(ctx, plugin, builtins, args).await.map(Some)
 }
 
 // Plugin tests exercise Unix-only mechanics (executable bit, symlinks, the
@@ -800,7 +801,7 @@ mod tests {
         let ctx = test_ctx(tmp.path());
         demo_plugin(tmp.path(), "seven", "", 7);
         let plugins = discover_in(tmp.path(), &[], None);
-        let code = invoke(&ctx, &plugins[0], &["--flag".into(), "value".into()])
+        let code = invoke(&ctx, &plugins[0], &[], &["--flag".into(), "value".into()])
             .await
             .unwrap();
         assert_eq!(code, 7);
@@ -809,7 +810,7 @@ mod tests {
         write_plugin(tmp.path(), "audible-dead", "#!/bin/sh\n", false);
         let plugins = discover_in(tmp.path(), &[], None);
         let dead = plugins.iter().find(|p| p.name == "dead").unwrap();
-        let error = invoke(&ctx, dead, &[]).await.unwrap_err().to_string();
+        let error = invoke(&ctx, dead, &[], &[]).await.unwrap_err().to_string();
         assert!(error.contains("not executable"), "{error}");
     }
 
@@ -842,7 +843,10 @@ mod tests {
         );
         let plugins = discover_in(tmp.path(), &[], None);
         let by_name = |name: &str| plugins.iter().find(|p| p.name == name).unwrap();
-        assert_eq!(invoke(&ctx, by_name("scoped"), &[]).await.unwrap(), 0);
-        assert_eq!(invoke(&ctx, by_name("unscoped"), &[]).await.unwrap(), 0);
+        assert_eq!(invoke(&ctx, by_name("scoped"), &[], &[]).await.unwrap(), 0);
+        assert_eq!(
+            invoke(&ctx, by_name("unscoped"), &[], &[]).await.unwrap(),
+            0
+        );
     }
 }

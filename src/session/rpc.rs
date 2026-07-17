@@ -181,6 +181,12 @@ pub trait Backend: Send + Sync + 'static {
     /// The binary `/v1/invoke` self-execs (the running CLI).
     fn invoke_exe(&self) -> PathBuf;
 
+    /// Names of the built-in commands `/v1/invoke`/`/v1/jobs` may
+    /// self-exec. Supplied by the composition root (which owns the CLI
+    /// registry) — the shared router itself must never reach upward into
+    /// the commands layer (audit 2026-07-17, E1).
+    fn builtin_names(&self) -> &[String];
+
     /// External hosts this lifetime may reach (AUD-124): the ephemeral
     /// broker reads `[plugins] allowed_hosts`, the agent `[session]
     /// allowed_hosts` (fresh from disk, AUD-121). Default: none —
@@ -690,7 +696,7 @@ async fn api_request(
             Some(marketplace) => marketplace,
             None => ctx.marketplace_single()?,
         };
-        let normalized = crate::commands::api::normalize_api_path(&path);
+        let normalized = crate::api::normalize_api_path(&path);
         client
             .request(method, normalized)
             .country_code(&marketplace)
@@ -831,7 +837,7 @@ async fn start_job(
     auth: &Auth,
     selection: &Selection,
 ) -> Result<Response<BoxedBody>> {
-    let (argv, output) = match parse_invoke(&body) {
+    let (argv, output) = match parse_invoke(&body, backend.builtin_names()) {
         Ok(parts) => parts,
         Err(bad) => return Ok(*bad),
     };
@@ -855,9 +861,11 @@ async fn start_job(
 
 /// Parses + validates an invoke/job body into `(argv, output)`, or a
 /// ready 400 response. Shared by `/v1/invoke` and `/v1/jobs`. Selectors
-/// come from headers, never the body (AUD-125).
+/// come from headers, never the body (AUD-125). `builtins` comes from the
+/// backend ([`Backend::builtin_names`]).
 fn parse_invoke(
     body: &Value,
+    builtins: &[String],
 ) -> std::result::Result<(Vec<String>, String), Box<Response<BoxedBody>>> {
     let bad =
         |message: String| Box::new(reply(StatusCode::BAD_REQUEST, &json!({ "error": message })));
@@ -872,10 +880,7 @@ fn parse_invoke(
     let Some(command_name) = argv.first() else {
         return Err(bad("\"argv\" must name a built-in command".to_owned()));
     };
-    if !crate::commands::plugin::builtin_names()
-        .iter()
-        .any(|builtin| builtin == command_name)
-    {
+    if !builtins.iter().any(|builtin| builtin == command_name) {
         return Err(bad(format!(
             "{command_name:?} is not a built-in command (plugins cannot invoke plugins)"
         )));
@@ -894,7 +899,7 @@ async fn build_invoke(
     auth: &Auth,
     selection: &Selection,
 ) -> std::result::Result<tokio::process::Command, Box<Response<BoxedBody>>> {
-    let (argv, output) = parse_invoke(body)?;
+    let (argv, output) = parse_invoke(body, backend.builtin_names())?;
     let ctx = select_session(backend, auth, selection).await?;
     let mut child = tokio::process::Command::new(backend.invoke_exe());
     child.args(invoke_argv(
@@ -1035,6 +1040,10 @@ fn reply(status: StatusCode, payload: &Value) -> Response<BoxedBody> {
 mod tests {
     use super::*;
 
+    /// Built-ins the test backends expose to `/v1/invoke` (the trait
+    /// returns a slice, so the list needs a stable home).
+    static TEST_BUILTINS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
     /// A selectable backend over a two-account fixture config (no auth
     /// material — `select_session` never touches `client()`).
     struct TestBackend {
@@ -1060,6 +1069,9 @@ mod tests {
         }
         fn invoke_exe(&self) -> PathBuf {
             PathBuf::from("/bin/false")
+        }
+        fn builtin_names(&self) -> &[String] {
+            TEST_BUILTINS.get_or_init(|| vec!["library".to_owned()])
         }
     }
 
@@ -1240,6 +1252,9 @@ mod tests {
         }
         fn invoke_exe(&self) -> PathBuf {
             PathBuf::from("/bin/false")
+        }
+        fn builtin_names(&self) -> &[String] {
+            TEST_BUILTINS.get_or_init(|| vec!["library".to_owned()])
         }
         fn is_admin(&self, token: &str) -> bool {
             token == "admintok"
