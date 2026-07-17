@@ -98,7 +98,7 @@ impl Db {
                               AND i.is_deleted = 0
                  WHERE s.marketplace IN ({})
                    AND (s.series_asin = ?
-                        OR lower(s.series_title) LIKE '%' || lower(?) || '%')
+                        OR lower(s.series_title) LIKE '%' || lower(?) || '%' ESCAPE '\\')
                  ORDER BY s.series_title, s.marketplace,
                           CAST(s.sequence AS REAL), s.sequence, i.full_title",
                 in_placeholders(marketplaces.len())
@@ -108,8 +108,9 @@ impl Db {
             for marketplace in &marketplaces {
                 params.push(marketplace);
             }
+            let like_needle = super::escape_like(&needle);
             params.push(&needle);
-            params.push(&needle);
+            params.push(&like_needle);
             let rows = statement
                 .query_map(params.as_slice(), |row| {
                     Ok(SeriesItemRow {

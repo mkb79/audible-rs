@@ -99,3 +99,58 @@ pub(crate) fn prompt_required(label: &str) -> Result<String> {
         }
     }
 }
+
+/// The shared many-candidates `--title` picker (audit 2026-07-17, C4 —
+/// the library and catalog resolvers carried drifted copies). On a TTY:
+/// a multi-select over `labels` (space toggles, `a` all, enter confirms)
+/// that reports a one-line "selected N of M" summary instead of
+/// dialoguer's echo; returns the chosen indices (empty = nothing
+/// selected, already reported). Off a TTY: an error listing at most 20
+/// candidates plus `hint` — a single podcast show can expand to hundreds
+/// of rows, so the dump is always capped.
+///
+/// `prompt_label`/`noun` word the two surfaces ("Matches"/"titles",
+/// "Catalog matches"/"catalog titles").
+pub(crate) fn pick_many(
+    prompt_label: &str,
+    noun: &str,
+    query: &str,
+    labels: &[String],
+    hint: &str,
+) -> Result<Vec<usize>> {
+    if !console::Term::stderr().is_term() {
+        const MAX_LISTED: usize = 20;
+        let mut listing: Vec<String> = labels
+            .iter()
+            .take(MAX_LISTED)
+            .map(|label| format!("  {label}"))
+            .collect();
+        if labels.len() > MAX_LISTED {
+            listing.push(format!("  … and {} more", labels.len() - MAX_LISTED));
+        }
+        bail!(
+            "{} {noun} match {query:?}{hint}:\n{}",
+            labels.len(),
+            listing.join("\n"),
+        );
+    }
+    // `report(false)`: the default echoes the whole chosen list back as
+    // one long line — we clear the picker and print a concise summary.
+    let selection = dialoguer::MultiSelect::with_theme(&dialoguer::theme::ColorfulTheme::default())
+        .with_prompt(format!(
+            "{prompt_label} for {query:?} — space toggles · a all · enter confirms"
+        ))
+        .items(labels)
+        .report(false)
+        .interact_on(&console::Term::stderr())?;
+    if selection.is_empty() {
+        eprintln!("no titles selected for {query:?}");
+    } else {
+        eprintln!(
+            "selected {} of {} for {query:?}",
+            selection.len(),
+            labels.len()
+        );
+    }
+    Ok(selection)
+}

@@ -2,7 +2,7 @@
 //! grants; fresh `licenserequest`s; persistence; and the `--license-only`
 //! report.
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 
 use crate::config::ctx::Ctx;
 use crate::models::content::DownloadLicense;
@@ -118,26 +118,32 @@ pub(super) async fn acquire_license(
         request_kind::Grant::Adrm
     };
     let kind = request_kind::resolved(grant, false, quality);
-    persist_license(ctx, marketplace, &license, &kind, no_db_write).await;
+    persist_license(ctx, marketplace, &license, &kind, no_db_write).await?;
 
     Ok(license)
 }
 
 /// Stores a granted license in the database for later re-use. A no-op
-/// under `--no-db-write`.
+/// under `--no-db-write`. A failed store is an error, not a warning:
+/// the grant's one lasting use is regenerating the key sidecar, and a
+/// run that silently drops it would report success while losing that.
 pub(super) async fn persist_license(
     ctx: &Ctx,
     marketplace: &str,
     license: &DownloadLicense,
     request_kind: &str,
     no_db_write: bool,
-) {
+) -> Result<()> {
     if no_db_write {
-        return;
+        return Ok(());
     }
-    let Ok(db) = ctx.open_library_db().await else {
-        return;
+    let context = || {
+        format!(
+            "{}: the license was granted, but storing it in the database failed",
+            license.asin
+        )
     };
+    let db = ctx.open_library_db().await.with_context(context)?;
     let grant = crate::db::LicenseGrant {
         asin: license.asin.clone(),
         content_format: license.content_format.clone().unwrap_or_default(),
@@ -145,9 +151,9 @@ pub(super) async fn persist_license(
         valid_until: license.expiration_date.clone(),
         doc: license.raw.to_string(),
     };
-    if let Err(error) = db.upsert_license(marketplace.to_owned(), grant).await {
-        tracing::warn!(%error, "could not store the license in the database");
-    }
+    db.upsert_license(marketplace.to_owned(), grant)
+        .await
+        .with_context(context)
 }
 
 /// `--license-only`: print the grant without downloading; also probes

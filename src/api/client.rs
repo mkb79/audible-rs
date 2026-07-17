@@ -59,6 +59,13 @@ pub enum AuthMode {
     Cookies,
 }
 
+impl AuthMode {
+    /// The mode labels in canonical order — one home (audit 2026-07-17,
+    /// D6): the interactive `api` picker and its round-trip test each had
+    /// their own copy of this list.
+    pub const LABELS: [&'static str; 4] = ["auto", "signing", "token", "cookies"];
+}
+
 impl FromStr for AuthMode {
     type Err = String;
 
@@ -136,6 +143,12 @@ pub enum ApiError {
         /// — quote it when reporting the failure to Amazon (AUD-29).
         request_id: String,
     },
+    /// An annotation response was 2xx but its non-empty body was not
+    /// parseable JSON (a proxy/HTML error page, a transient fault). A
+    /// failure — never "no annotations", which would be recorded and
+    /// skip the item's real bookmarks forever.
+    #[error("annotation response for {0:?} was 2xx but not parseable JSON")]
+    AnnotationResponse(String),
     /// A metadata request returned no chapter information.
     #[error("metadata request for {0:?} returned no chapter_info")]
     ChapterInfo(String),

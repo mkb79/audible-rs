@@ -192,20 +192,14 @@ fn hash_token(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
-/// `2026-07-06T12:34:56Z` (second precision).
+/// `2026-07-06T12:34:56Z` (second precision; one home: [`crate::timefmt`]).
 fn iso(time: time::OffsetDateTime) -> String {
-    let format =
-        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
-    time.format(format).expect("iso format is valid")
+    crate::timefmt::format_iso(time).expect("iso format is valid")
 }
 
 /// Parses an ISO-8601 UTC timestamp back (second precision).
 fn parse_iso(text: &str) -> Option<time::OffsetDateTime> {
-    let format =
-        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
-    time::PrimitiveDateTime::parse(text, format)
-        .ok()
-        .map(|dt| dt.assume_utc())
+    crate::timefmt::parse_iso(text)
 }
 
 #[cfg(test)]

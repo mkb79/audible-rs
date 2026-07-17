@@ -124,7 +124,7 @@ impl super::Command for AgentCommand {
         use crate::commands::hosts;
         match matches.subcommand() {
             Some(("start", start)) => start_agent(ctx, start.get_flag("foreground")).await,
-            Some(("run", _)) => agent::serve(ctx).await,
+            Some(("run", _)) => agent::serve(ctx, super::plugin::builtin_names()).await,
             Some(("stop", _)) => stop_agent(ctx),
             Some(("status", _)) => status(ctx).await,
             Some(("audit", audit)) => show_audit(
@@ -170,7 +170,7 @@ async fn start_agent(ctx: &Ctx, foreground: bool) -> Result<()> {
         bail!("the agent is already running");
     }
     if foreground {
-        return agent::serve(ctx).await;
+        return agent::serve(ctx, super::plugin::builtin_names()).await;
     }
 
     let exe = std::env::current_exe().context("could not resolve the own binary")?;
@@ -259,10 +259,7 @@ fn show_audit(ctx: &Ctx, tail: Option<usize>, caller: Option<&str>) -> Result<()
 /// `agent token create` — mint an app token, store its hash, print it once.
 fn token_create(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()> {
     let store = crate::session::tokens::TokenStore::new(ctx.config_dir());
-    let scopes: Vec<String> = args
-        .get_many::<String>("scopes")
-        .map(|v| v.cloned().collect())
-        .unwrap_or_default();
+    let scopes: Vec<String> = crate::commands::strings(args, "scopes");
     let account = args.get_one::<String>("account").cloned();
     let ttl = args
         .get_one::<String>("ttl")

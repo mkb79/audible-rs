@@ -220,7 +220,7 @@ pub(super) async fn reorganize(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()>
             // moment it enters the library. Without one, nothing can re-derive
             // a name, so the file keeps the one it was given and only follows
             // the download directory.
-            let paths = match template_context(ctx, marketplace, &entry.asin).await {
+            let paths = match template_context(ctx, marketplace, &entry.asin).await? {
                 Some(values) => planned_paths(
                     &entry.asin,
                     &entry.kind,
@@ -268,7 +268,7 @@ pub(super) async fn reorganize(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()>
             });
         }
         for (asin, path) in db.reorg_annotations(marketplace.clone()).await? {
-            let Some(values) = template_context(ctx, marketplace, &asin).await else {
+            let Some(values) = template_context(ctx, marketplace, &asin).await? else {
                 skipped += 1;
                 continue;
             };
@@ -280,7 +280,10 @@ pub(super) async fn reorganize(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()>
                 &values,
             )?;
             let old = PathBuf::from(&path);
-            let new = join_relative(&target_dir, &format!("{base}.annot"));
+            let new = join_relative(
+                &target_dir,
+                &format!("{base}{}", artifact_suffix("annotation", "", "annot")),
+            );
             if old == new {
                 continue;
             }
@@ -358,8 +361,19 @@ pub(super) async fn reorganize(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()>
             failed += 1;
             continue;
         }
-        if let Some((old_sidecar, new_sidecar)) = &m.sidecar {
-            let _ = relocate(old_sidecar, new_sidecar, copy).await; // best-effort
+        // The file moved; any defect from here still counts the item as
+        // failed, but the database must keep tracking the moved file.
+        let mut item_ok = true;
+        if let Some((old_sidecar, new_sidecar)) = &m.sidecar
+            && let Err(error) = relocate_sidecar(old_sidecar, new_sidecar, copy).await
+        {
+            eprintln!(
+                "{verb_past} {} but its key sidecar did not follow: {error} — \
+                 the audio cannot be decrypted without it (sidecar left at {})",
+                m.new.display(),
+                old_sidecar.display()
+            );
+            item_ok = false;
         }
         let update = match &m.update {
             ReorgUpdate::Download {
@@ -390,11 +404,17 @@ pub(super) async fn reorganize(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()>
         };
         if let Err(error) = update {
             eprintln!(
-                "warning: {verb_past} {} but could not update the database: {error}",
+                "{verb_past} {} but could not update the database: {error} — \
+                 its record still names the old path",
                 m.new.display()
             );
+            item_ok = false;
         }
-        done += 1;
+        if item_ok {
+            done += 1;
+        } else {
+            failed += 1;
+        }
     }
     if !copy {
         cleanup_empty_dirs(&planned, &current_dir).await;
@@ -407,7 +427,24 @@ pub(super) async fn reorganize(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()>
             String::new()
         }
     );
+    // Exit-code honesty: a partly-failed reorganize must not report success
+    // (its siblings `download`/`library sync` bail the same way).
+    if failed > 0 {
+        anyhow::bail!("{failed} of {} file(s) did not fully {verb}", planned.len());
+    }
     Ok(())
+}
+
+/// Relocates a key sidecar when it exists on disk. A sidecar may
+/// legitimately be absent (it is regenerable from the stored license, and
+/// `db downloads check` reports that state on its own) — only an existing
+/// sidecar that fails to move is an error.
+async fn relocate_sidecar(old: &Path, new: &Path, copy: bool) -> Result<()> {
+    match tokio::fs::try_exists(old).await {
+        Ok(true) => relocate(old, new, copy).await,
+        Ok(false) => Ok(()),
+        Err(error) => anyhow::bail!("could not probe {}: {error}", old.display()),
+    }
 }
 
 /// Persists the collected naming changes to the config (validated write path);
@@ -648,6 +685,25 @@ mod tests {
         assert!(relocate(&copied, &moved, false).await.is_err());
         assert!(relocate(&copied, &moved, true).await.is_err());
         assert_eq!(std::fs::read(&moved).unwrap(), b"other");
+    }
+
+    #[tokio::test]
+    async fn a_missing_sidecar_is_fine_a_stuck_one_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Absent on disk (regenerable from the stored license): no error —
+        // otherwise every voucher-less move would now fail the run.
+        let gone = dir.path().join("book.voucher");
+        let target = dir.path().join("moved/book.voucher");
+        relocate_sidecar(&gone, &target, false).await.unwrap();
+
+        // Present but its move fails (target exists as a different file):
+        // that is a counted error — a stranded key sidecar means the audio
+        // cannot be decrypted after the move.
+        std::fs::write(&gone, b"key").unwrap();
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"other").unwrap();
+        assert!(relocate_sidecar(&gone, &target, false).await.is_err());
     }
 
     // Proves the migration (AUD-199): a file recorded with the OLD slug — the

@@ -17,6 +17,28 @@ pub mod db;
 pub mod download;
 pub(crate) mod hosts;
 pub mod items;
+
+/// Splits a comma-separated value into trimmed, non-empty items — the
+/// one CSV rule for option values (audit 2026-07-17, D6; two byte-equal
+/// copies lived in `setup` and `download`).
+pub(crate) fn split_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Collects a repeatable/multi-value string option into an owned `Vec`,
+/// empty when the option is absent — the one `get_many→cloned` shape
+/// (audit 2026-07-17, D6; it lived inline and as local closures across a
+/// dozen commands).
+pub(crate) fn strings(matches: &clap::ArgMatches, key: &str) -> Vec<String> {
+    matches
+        .get_many::<String>(key)
+        .map(|values| values.cloned().collect())
+        .unwrap_or_default()
+}
 pub mod library;
 pub mod plugin;
 pub mod podcasts;
@@ -257,10 +279,7 @@ pub(crate) fn kind_arg(default: &'static str) -> clap::Arg {
 /// The selected `--kind` values as a filter list — empty means no filter
 /// (`all`, the default).
 pub(crate) fn kind_filter(matches: &clap::ArgMatches) -> Vec<String> {
-    let mut kinds: Vec<String> = matches
-        .get_many::<String>("kind")
-        .map(|values| values.cloned().collect())
-        .unwrap_or_default();
+    let mut kinds: Vec<String> = strings(matches, "kind");
     if kinds.iter().any(|kind| kind == "all") {
         return Vec::new();
     }

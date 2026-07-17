@@ -52,14 +52,23 @@ impl Ctx {
         let config_file = config_dir.join(paths::CONFIG_FILE_NAME);
         let config = Config::load(&config_file)
             .with_context(|| format!("could not load {}", config_file.display()))?;
-        Ok(Self {
+        Ok(Self::with_config(config_dir, config, selectors))
+    }
+
+    /// Creates the context from an **already-loaded** config — the
+    /// agent's mtime-cached one (audit 2026-07-17, E4: the daemon
+    /// re-read and re-parsed `config.toml` on every `/v1` request and
+    /// gained no freshness by it). The config must come from
+    /// [`Config::load`], which validated it.
+    pub fn with_config(config_dir: PathBuf, config: Config, selectors: Selectors) -> Self {
+        Self {
             config,
             config_dir,
             selectors,
             output: OutputFormat::default(),
             client: OnceCell::new(),
             db: OnceCell::new(),
-        })
+        }
     }
 
     /// Sets the rendering format (global `--output` flag).
@@ -231,6 +240,15 @@ impl Ctx {
             Ok(auth) => Ok(auth),
             Err(error) if prompt_allowed && password_required(&error) => {
                 let term = console::Term::stderr();
+                // Headless callers (the agent's session map) cannot answer
+                // a prompt — fail with the actionable state instead of a
+                // cryptic read error (audit 2026-07-17, E5).
+                if !term.is_term() {
+                    anyhow::bail!(
+                        "account {account_name:?} is locked (password_source = prompt) — \
+                         unlock it with `audible account unlock -a {account_name}`"
+                    );
+                }
                 term.write_str(&format!("Password for account {account_name:?}: "))?;
                 let password = SecretString::from(term.read_secure_line()?);
                 Authenticator::load_file(&auth_path, Some(password))

@@ -362,6 +362,13 @@ impl super::Command for DownloadCommand {
         )
         .await?;
         if asins.is_empty() {
+            // D7: an explicitly named selection that resolves to nothing
+            // is an error; an empty --missing sweep is a legitimate no-op.
+            if matches.get_many::<String>("asin").is_some()
+                || matches.get_many::<String>("title").is_some()
+            {
+                crate::commands::items::require_nonempty(&asins, "items")?;
+            }
             eprintln!("no items to download");
             return Ok(());
         }
@@ -593,10 +600,7 @@ async fn resolve_source(
     audio_request_kinds: Vec<String>,
     include_podcasts: bool,
 ) -> Result<(Vec<String>, ExternalDocs)> {
-    let asins: Vec<String> = matches
-        .get_many::<String>("asin")
-        .map(|values| values.cloned().collect())
-        .unwrap_or_default();
+    let asins: Vec<String> = crate::commands::strings(matches, "asin");
 
     // Scope the database handle so it is dropped before the download
     // helpers open their own connections.
@@ -658,10 +662,7 @@ async fn resolve_source(
         .await?
     };
 
-    let titles: Vec<String> = matches
-        .get_many::<String>("title")
-        .map(|values| values.cloned().collect())
-        .unwrap_or_default();
+    let titles: Vec<String> = crate::commands::strings(matches, "title");
     let resolved = crate::commands::items::resolve_asins(
         &db,
         marketplace,
@@ -836,19 +837,10 @@ fn resolve_decrypt(audio_selected: bool, decrypt: bool, configured: bool) -> Res
     Ok(audio_selected && (decrypt || configured))
 }
 
-/// Splits a CLI CSV value (`--cover-size 500,900`) into trimmed items.
-fn split_csv(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 /// Resolves the cover size(s): `--cover-size` (CSV) else the settings bundle.
 fn resolve_cover_sizes(ctx: &Ctx, matches: &clap::ArgMatches) -> Vec<String> {
     if let Some(value) = matches.get_one::<String>("cover_size") {
-        return split_csv(value);
+        return crate::commands::split_csv(value);
     }
     ctx.settings_view()
         .map(|view| view.cover_size(None, None))
@@ -859,7 +851,7 @@ fn resolve_cover_sizes(ctx: &Ctx, matches: &clap::ArgMatches) -> Vec<String> {
 /// settings bundle.
 fn resolve_chapter_types(ctx: &Ctx, matches: &clap::ArgMatches) -> Vec<String> {
     if let Some(value) = matches.get_one::<String>("chapter_type") {
-        return split_csv(value);
+        return crate::commands::split_csv(value);
     }
     ctx.settings_view()
         .map(|view| view.chapter_type(None, None))
@@ -983,6 +975,29 @@ fn parse_kinds(list: &str) -> Result<BTreeSet<Artifact>> {
 /// the URL's expiry mid-transfer.
 const LICENSE_URL_EXPIRY_MARGIN_SECS: i64 = 300;
 
+/// Writes a secret-bearing sidecar (`.voucher` key/iv, `.wvkey` content key)
+/// owner-only from the first byte, like the auth file — never through the
+/// umask, which would leave the decryption key world-readable on a
+/// multi-user host.
+#[cfg(unix)]
+pub(super) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+pub(super) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -993,6 +1008,22 @@ mod tests {
             parse_kinds("all").unwrap(),
             Artifact::ALL.into_iter().collect::<BTreeSet<_>>()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_creates_owner_only_files() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.voucher");
+        write_private(&path, b"{\"key\":\"k\",\"iv\":\"i\"}").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "key sidecar must never be world-readable");
+        // Overwriting an existing (say, pre-fix 0644) sidecar tightens it.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, b"{}").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "rewrite must restore owner-only permissions");
     }
 
     #[test]

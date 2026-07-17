@@ -86,26 +86,8 @@ pub(super) fn write_wvkey(path: &Path, key: &ContentKey) -> Result<()> {
         "key": hex::encode(&*key.key),
     })
     .to_string();
-    write_private(path, json.as_bytes()).with_context(|| format!("writing {}", path.display()))
-}
-
-#[cfg(unix)]
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(bytes)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, bytes)
+    super::write_private(path, json.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// The full Widevine audio path for one title: license → MPD → content key
@@ -154,7 +136,13 @@ pub(super) async fn download_audio_widevine(
         WidevineGrant::Widevine(license) => license,
         WidevineGrant::Mpeg(mpeg) => {
             eprintln!("{asin}: no Widevine asset — downloading the plain MP3");
-            let dest = join_relative(dir, &format!("{base}.{}.mp3", mpeg.content_format));
+            let dest = join_relative(
+                dir,
+                &format!(
+                    "{base}{}",
+                    crate::naming::artifact_suffix("audio", &mpeg.content_format, "mp3")
+                ),
+            );
             let (_, dest) = download_cenc_to_file(
                 &mpeg.offline_url,
                 &dest,
@@ -162,6 +150,9 @@ pub(super) async fn download_audio_widevine(
                 force,
                 mp,
                 &["audio/mpeg"],
+                // The Mpeg fallback grant carries no content_reference
+                // version; its size guard covers a re-issue.
+                None,
             )
             .await?;
             let size = std::fs::metadata(&dest).ok().map(|meta| meta.len());
@@ -179,7 +170,7 @@ pub(super) async fn download_audio_widevine(
                 size,
                 no_db_write,
             )
-            .await;
+            .await?;
             // A Mpeg fallback (podcast / asset-less title) has no companion PDF.
             return Ok((
                 vec![("audio".to_string(), dest.display().to_string())],
@@ -197,8 +188,17 @@ pub(super) async fn download_audio_widevine(
         super::request_kind::resolved(super::request_kind::Grant::Widevine, xhe, quality);
 
     // 2. content key (+ `.wvkey` sidecar next to the encrypted file).
-    let enc_path = join_relative(dir, &format!("{base}.{format}.cenc"));
-    let wvkey_path = enc_path.with_extension("wvkey");
+    let enc_path = join_relative(
+        dir,
+        &format!(
+            "{base}{}",
+            crate::naming::artifact_suffix("audio", &format, "cenc")
+        ),
+    );
+    // The key-sidecar location comes from the shared extension map
+    // (AUD-99) — the same rule reorganize/orphans/remove follow.
+    let wvkey_path =
+        crate::naming::sidecar_path(&enc_path).expect("a .cenc path always has a key-sidecar twin");
     let key = match read_wvkey(&wvkey_path) {
         Some(key) => key,
         None => {
@@ -217,6 +217,8 @@ pub(super) async fn download_audio_widevine(
         force,
         mp,
         &["audio/mp4", "video/mp4"],
+        // Gate a resumed CENC partial on the grant's content version (A9).
+        license.version_tag().as_deref(),
     )
     .await?;
     if matches!(outcome, DownloadOutcome::AlreadyComplete) {
@@ -236,21 +238,24 @@ pub(super) async fn download_audio_widevine(
         enc_size,
         no_db_write,
     )
-    .await;
+    .await?;
     let mut written = vec![("audio".to_string(), enc_dest.display().to_string())];
 
     // 4. optional lossless decrypt (only with --decrypt).
     if let Some(tool) = decrypt {
         if !force
             && !no_db_write
-            && super::decrypt::decrypted_recorded(ctx, marketplace, asin, &format).await
+            && super::decrypt::decrypted_recorded(ctx, marketplace, asin, &format).await?
         {
             eprintln!("{asin}: skipping decrypt — {format} already decrypted (use --force)");
             return Ok((written, pdf_url));
         }
         let out = join_relative(
             dir,
-            &format!("{base}.{format}.{}", decrypted_ext(&stream.codec)),
+            &format!(
+                "{base}{}",
+                crate::naming::artifact_suffix("audio", &format, decrypted_ext(&stream.codec))
+            ),
         );
         let kid = hex::encode(key.kid);
         let key_hex = hex::encode(&*key.key);
@@ -272,14 +277,14 @@ pub(super) async fn download_audio_widevine(
             out_size,
             no_db_write,
         )
-        .await;
+        .await?;
 
         // `--remove-source` drops the encrypted CENC (+ key) and its record.
         if !keep_source {
             let _ = tokio::fs::remove_file(&enc_dest).await;
             let _ = tokio::fs::remove_file(&wvkey_path).await;
             super::decrypt::drop_original_record(ctx, marketplace, asin, &format, no_db_write)
-                .await;
+                .await?;
             written.clear();
         }
         written.push(("audio".into(), out.display().to_string()));

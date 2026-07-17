@@ -58,7 +58,10 @@ pub struct SyncSummary {
 /// Syncs the library into the database: full (status=Active) without a
 /// state token, delta (status=Active,Revoked plus `state_token`) with
 /// one. Each page is applied atomically together with its audit-log
-/// row; the freshest state token wins.
+/// row; the state token is persisted only after **every** page applied
+/// (verified live, audit A16: the server sends it on the *first* page —
+/// a pre-pagination snapshot marker — so persisting it per page let an
+/// aborted run advance the token past never-applied items).
 pub async fn sync_library(
     client: &Client,
     db: &Db,
@@ -116,6 +119,9 @@ pub async fn sync_library(
     };
     // Podcast parents touched in this run: (asin, announced episode count).
     let mut podcast_parents: Vec<(String, Option<u64>)> = Vec::new();
+    // The freshest token any page delivered — persisted only after the
+    // whole stream applied (A16).
+    let mut response_token: Option<String> = None;
 
     while let Some(page) = {
         let request_time = db::now_iso_utc();
@@ -155,17 +161,11 @@ pub async fn sync_library(
                     sequence: entry.sequence,
                 })
                 .collect();
+            let (title, subtitle) = model::title_subtitle(&item);
             upserts.push(UpsertItem {
                 asin: asin.to_owned(),
-                title: item
-                    .get("title")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                subtitle: item
-                    .get("subtitle")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
+                title,
+                subtitle,
                 full_title,
                 doc: item.to_string(),
                 series,
@@ -192,7 +192,9 @@ pub async fn sync_library(
                 upserts,
                 deletes,
                 log,
-                page.state_token.clone(),
+                // Never per page (A16) — the token advances below, once
+                // the whole stream has been applied.
+                None,
                 recording,
             )
             .await?;
@@ -203,10 +205,20 @@ pub async fn sync_library(
             removed = outcome.removed.len(),
             "library page applied"
         );
-        if page.state_token.is_some() {
-            summary.state_token = page.state_token;
+        if let Some(token) = page.state_token {
+            response_token = Some(token.clone());
+            summary.state_token = Some(token);
         }
         summary.changes.extend(outcome);
+    }
+
+    // Every page applied — only now may the token advance (A16, verified
+    // live: the server sends it on the FIRST page, so an abort between
+    // pages must leave the stored token untouched or the next delta
+    // would silently skip the never-applied remainder).
+    if let Some(token) = &response_token {
+        db.persist_state_token(marketplace.to_owned(), token.clone())
+            .await?;
     }
 
     // Resolve podcasts concurrently, bounded by the shared semaphore (each
@@ -305,19 +317,13 @@ async fn resolve_episodes(
             tracing::warn!(asin, "skipping episode without title");
             return;
         };
+        let (title, subtitle) = model::title_subtitle(&item);
         episodes.insert(
             asin.to_owned(),
             crate::db::UpsertEpisode {
                 asin: asin.to_owned(),
-                title: item
-                    .get("title")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                subtitle: item
-                    .get("subtitle")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
+                title,
+                subtitle,
                 full_title,
                 doc: item.to_string(),
             },
@@ -404,23 +410,14 @@ async fn fetch_episode_asins(
         .send()
         .await?;
     let body: serde_json::Value = response.error_for_status()?.json().await?;
-    let Some(relationships) = body
-        .get("product")
-        .and_then(|product| product.get("relationships"))
-        .and_then(serde_json::Value::as_array)
-    else {
+    let Some(product) = body.get("product") else {
         return Ok(Vec::new());
     };
-    Ok(relationships
-        .iter()
+    Ok(model::child_relationships(product)
         .filter(|rel| {
-            rel.get("relationship_to_product")
+            rel.get("relationship_type")
                 .and_then(serde_json::Value::as_str)
-                == Some("child")
-                && rel
-                    .get("relationship_type")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("episode")
+                == Some("episode")
         })
         .filter_map(|rel| {
             rel.get("asin")
@@ -441,23 +438,15 @@ async fn fetch_catalog_details(
     marketplace: &str,
     asins: Vec<String>,
 ) -> Result<Vec<serde_json::Value>> {
-    let mut products = Vec::new();
-    for chunk in asins.chunks(50) {
-        let joined = chunk.join(",");
-        let response = client
-            .request(Method::GET, "/1.0/catalog/products")
-            .country_code(marketplace)
-            .query("asins", &joined)
-            .query("response_groups", CATALOG_RESPONSE_GROUPS)
-            .query("image_sizes", DEFAULT_IMAGE_SIZES)
-            .send()
-            .await?;
-        let body: serde_json::Value = response.error_for_status()?.json().await?;
-        if let Some(items) = body.get("products").and_then(serde_json::Value::as_array) {
-            products.extend(items.iter().cloned());
-        }
-    }
-    Ok(products)
+    crate::commands::catalog::products_batched(
+        client,
+        marketplace,
+        &asins,
+        CATALOG_RESPONSE_GROUPS,
+        Some(DEFAULT_IMAGE_SIZES),
+        1,
+    )
+    .await
 }
 
 /// `library sync` — also reused by `collections archive … --sync`
@@ -581,22 +570,91 @@ pub(crate) async fn sync(
     Ok(())
 }
 
+/// The subset of `marketplaces` whose own last successful sync is older
+/// than `max_age` (never synced = stale). Judged per marketplace so a
+/// fresh sibling can neither mask nor trigger another marketplace's sync.
+fn stale_marketplaces(
+    marketplaces: Vec<String>,
+    last_syncs: &std::collections::HashMap<String, String>,
+    max_age: std::time::Duration,
+) -> Vec<String> {
+    marketplaces
+        .into_iter()
+        .filter(|mp| is_stale(last_syncs.get(mp).map(String::as_str), max_age))
+        .collect()
+}
+
 /// Whether the last sync is older than `sync_max_age` (no sync = stale).
 fn is_stale(last_sync_utc: Option<&str>, max_age: std::time::Duration) -> bool {
     let Some(last) = last_sync_utc else {
         return true;
     };
-    let format =
-        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
-    let Ok(parsed) = time::PrimitiveDateTime::parse(last, format) else {
+    // The stored timestamp is `now_iso_utc` output — the same one home
+    // (`timefmt`) parses it back, so writer and reader cannot drift.
+    let Some(parsed) = crate::timefmt::parse_iso(last) else {
         return true;
     };
-    let age = time::OffsetDateTime::now_utc() - parsed.assume_utc();
+    let age = time::OffsetDateTime::now_utc() - parsed;
     age > max_age
 }
 
+/// Delays before each bounded reflection attempt: the server indexes
+/// membership/archive mutations asynchronously (within seconds).
+const REFLECT_ATTEMPT_DELAYS: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(10),
+];
+
+/// Runs bounded delta syncs until `reflected` accepts every item's stored
+/// doc (audit 2026-07-17, D4 — the membership and archive pollers were
+/// two copies of this loop). Each attempt waits first (the server indexes
+/// mutations asynchronously), then delta-syncs, then checks the predicate
+/// over each item's stored doc (`None` = no doc). `what` words the final
+/// warning. Without `--sync`, prints the standard hint and returns.
+pub(crate) async fn poll_until_reflected(
+    ctx: &Ctx,
+    sync_requested: bool,
+    marketplace: &str,
+    asins: &[String],
+    what: &str,
+    reflected: impl Fn(Option<&str>) -> bool,
+) -> Result<()> {
+    if !sync_requested {
+        eprintln!("note: run `audible library sync` to reflect the change in the local library");
+        return Ok(());
+    }
+    let db = ctx.open_library_db().await?;
+    for (attempt, delay) in REFLECT_ATTEMPT_DELAYS.iter().enumerate() {
+        if attempt > 0 {
+            eprintln!("change not in the library view yet; retrying the sync…");
+        }
+        tokio::time::sleep(*delay).await;
+        sync(ctx, false, false, false).await?;
+        let mut all_reflected = true;
+        for asin in asins {
+            let doc = db.item_doc(asin.clone(), marketplace.to_owned()).await?;
+            if !reflected(doc.as_deref()) {
+                all_reflected = false;
+                break;
+            }
+        }
+        if all_reflected {
+            return Ok(());
+        }
+    }
+    eprintln!(
+        "warning: {what} has not reached the library view yet — \
+         run `audible library sync` again in a moment"
+    );
+    Ok(())
+}
+
 /// Runs a delta sync before a read when `auto_sync = delta` and the
-/// data is older than `sync_max_age` (archived architecture §8). Skipped when
+/// data is older than `sync_max_age` (archived architecture §8). Staleness
+/// is judged **per selected marketplace**: a fresh `de` sync must not let
+/// a stale (or never-synced) `us` answer from an empty view, and one stale
+/// marketplace only resyncs itself, not its fresh siblings. Skipped when
 /// another process holds the sync lock.
 pub(crate) async fn maybe_auto_sync(ctx: &Ctx, db: &Db) -> Result<()> {
     let config = ctx.db_config()?;
@@ -604,7 +662,12 @@ pub(crate) async fn maybe_auto_sync(ctx: &Ctx, db: &Db) -> Result<()> {
         return Ok(());
     }
     let max_age = crate::config::schema::parse_duration(&config.sync_max_age)?;
-    if !is_stale(db.last_sync_utc().await?.as_deref(), max_age) {
+    let marketplaces = ctx.marketplaces()?;
+    let last_syncs = db
+        .last_sync_utc_by_marketplace(marketplaces.clone())
+        .await?;
+    let stale = stale_marketplaces(marketplaces, &last_syncs, max_age);
+    if stale.is_empty() {
         return Ok(());
     }
 
@@ -619,10 +682,13 @@ pub(crate) async fn maybe_auto_sync(ctx: &Ctx, db: &Db) -> Result<()> {
         return Ok(());
     };
 
-    tracing::info!("library data is stale; running auto-sync");
+    tracing::info!(
+        "library data is stale for {}; running auto-sync",
+        stale.join(",")
+    );
     let client = ctx.client().await?;
     let sem = Semaphore::new(SYNC_RESOLUTION_CONCURRENCY);
-    for marketplace in ctx.marketplaces()? {
+    for marketplace in stale {
         let options = SyncOptions {
             full: false,
             page_size: config.page_size.clamp(10, 1000),
@@ -654,5 +720,31 @@ mod tests {
             Some("2020-01-01T00:00:00Z"),
             Duration::from_secs(3600)
         ));
+    }
+
+    #[test]
+    fn staleness_is_judged_per_marketplace() {
+        let hour = Duration::from_secs(3600);
+        let now = db::now_iso_utc();
+        let mut last = std::collections::HashMap::new();
+        last.insert("de".to_owned(), now.clone());
+
+        // A fresh de must not hide a never-synced us — and only us syncs.
+        assert_eq!(
+            stale_marketplaces(vec!["de".into(), "us".into()], &last, hour),
+            vec!["us".to_owned()]
+        );
+        // Both fresh: nothing to do.
+        last.insert("us".to_owned(), now);
+        assert!(stale_marketplaces(vec!["de".into(), "us".into()], &last, hour).is_empty());
+        // One goes stale: only that one resyncs, not its fresh sibling.
+        last.insert("de".to_owned(), "2020-01-01T00:00:00Z".to_owned());
+        assert_eq!(
+            stale_marketplaces(vec!["de".into(), "us".into()], &last, hour),
+            vec!["de".to_owned()]
+        );
+        // Only the *selected* set matters: a stale de outside the
+        // selection triggers nothing.
+        assert!(stale_marketplaces(vec!["us".into()], &last, hour).is_empty());
     }
 }

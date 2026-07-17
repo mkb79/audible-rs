@@ -22,10 +22,52 @@ pub fn build_full_title(item: &Value) -> Option<String> {
     if title.is_empty() {
         return None;
     }
-    match item.get("subtitle").and_then(Value::as_str).map(str::trim) {
-        Some(subtitle) if !subtitle.is_empty() => Some(format!("{title}: {subtitle}")),
-        _ => Some(title.to_owned()),
+    Some(join_title_subtitle(
+        title,
+        item.get("subtitle").and_then(Value::as_str),
+    ))
+}
+
+/// The display-title rule (audit 2026-07-17, D6): `Title: Subtitle` when a
+/// non-empty subtitle is present, else the title alone. One home for the
+/// library-doc path ([`build_full_title`]) and the catalog struct
+/// (`CatalogDetails::full_title`), which each spelled it out.
+pub fn join_title_subtitle(title: &str, subtitle: Option<&str>) -> String {
+    match subtitle.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(subtitle) => format!("{title}: {subtitle}"),
+        None => title.to_owned(),
     }
+}
+
+/// The `(title, subtitle)` a DB upsert stores from a doc — one home for
+/// the item and episode upsert paths in `library sync`, which extracted
+/// the same two fields the same way (audit 2026-07-17, D6). `title` falls
+/// back to the empty string; `subtitle` stays `None` when absent.
+pub fn title_subtitle(item: &Value) -> (String, Option<String>) {
+    let title = item
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let subtitle = item
+        .get("subtitle")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    (title, subtitle)
+}
+
+/// The **child** relationships of a catalog product (`relationship_to_
+/// product == "child"`), for callers to filter by `relationship_type`
+/// and project — one home for the series-child and episode-child walks
+/// (audit 2026-07-17, D6), which shared this skeleton and differed only
+/// in the type predicate and what they extracted.
+pub fn child_relationships(product: &Value) -> impl Iterator<Item = &Value> {
+    product
+        .get("relationships")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|rel| rel.get("relationship_to_product").and_then(Value::as_str) == Some("child"))
 }
 
 /// Whether an item should be soft-deleted: `status == "Revoked"`, with
@@ -113,6 +155,26 @@ pub fn item_kind(item: &Value) -> &'static str {
     }
 }
 
+/// Whether a document advertises a companion PDF: `is_pdf_url_available`,
+/// with a `pdf_url`-presence fallback (a JSON `null` counts as absent).
+/// `None` when the document carries neither field — the source cannot
+/// know (catalog products hold no ownership data), so callers may probe.
+///
+/// This is the one Rust source of truth for the predicate; the SQL twin
+/// lives in [`crate::db`] (`pdf_available_sql`) and the two are kept in
+/// lockstep by a functional test there. Every consumer (`download`'s
+/// pre-check, `download info`, the `--missing=pdf` gate) must answer the
+/// same way — `download info` once read only the flag and reported
+/// "no PDF" for titles `download --kind pdf` would happily fetch.
+pub fn pdf_available(doc: &Value) -> Option<bool> {
+    let flag = doc.get("is_pdf_url_available").and_then(Value::as_bool);
+    let url_present = doc.get("pdf_url").map(|url| !url.is_null());
+    match (flag, url_present) {
+        (None, None) => None,
+        (flag, url) => Some(flag.unwrap_or(false) || url.unwrap_or(false)),
+    }
+}
+
 /// Expands a series sequence into the volume numbers it covers:
 /// `"3"` → `[3.0]`, `"1-6"` → `[1.0 … 6.0]` (omnibus editions),
 /// empty/unparsable → `[]`.
@@ -133,32 +195,24 @@ pub fn sequence_numbers(sequence: &str) -> Vec<f64> {
 /// omnibus editions) — `sort` is only the display order and offset by
 /// such editions, so it must NOT be used as the volume number.
 pub fn extract_series_children(product: &Value) -> Vec<(Option<String>, String)> {
-    product
-        .get("relationships")
-        .and_then(Value::as_array)
-        .map(|relationships| {
-            relationships
-                .iter()
-                .filter(|rel| {
-                    rel.get("relationship_to_product").and_then(Value::as_str) == Some("child")
-                        && matches!(
-                            rel.get("relationship_type").and_then(Value::as_str),
-                            None | Some("series")
-                        )
-                })
-                .filter_map(|rel| {
-                    let asin = rel.get("asin")?.as_str()?.to_owned();
-                    let sequence = rel
-                        .get("sequence")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned);
-                    Some((sequence, asin))
-                })
-                .collect()
+    child_relationships(product)
+        .filter(|rel| {
+            matches!(
+                rel.get("relationship_type").and_then(Value::as_str),
+                None | Some("series")
+            )
         })
-        .unwrap_or_default()
+        .filter_map(|rel| {
+            let asin = rel.get("asin")?.as_str()?.to_owned();
+            let sequence = rel
+                .get("sequence")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            Some((sequence, asin))
+        })
+        .collect()
 }
 
 /// Collects removed/revoked ASINs from the payload's various shapes.

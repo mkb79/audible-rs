@@ -301,6 +301,16 @@ pub fn edit_file(
     path: &Path,
     edit: impl FnOnce(&str) -> Result<String, ConfigError>,
 ) -> Result<(), ConfigError> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // The cross-process lock spans the whole read-modify-write: the CLI
+    // and the agent may edit concurrently (`config set` vs `allow-host`),
+    // and without it one side's edit silently vanished (audit B5). The
+    // write itself fsyncs via a unique temp file — no zero-length config
+    // on power loss, no shared temp inode between writers.
+    let mut lock = crate::fsutil::write_lock(path)?;
+    let _guard = lock.write()?;
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -309,12 +319,7 @@ pub fn edit_file(
         Err(error) => return Err(error.into()),
     };
     let updated = edit(&content)?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, &updated)?;
-    std::fs::rename(&tmp, path)?;
+    crate::fsutil::persist_atomically(path, updated.as_bytes(), None)?;
     Ok(())
 }
 

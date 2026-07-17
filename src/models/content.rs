@@ -87,11 +87,7 @@ impl DownloadLicense {
                     .and_then(|r| r.get("content_size_in_bytes"))
                     .and_then(Value::as_u64)
             }),
-            pdf_url: metadata
-                .and_then(|m| m.get("pdf_url"))
-                .or_else(|| license.get("pdf_url"))
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            pdf_url: pdf_url_from_license(license, metadata),
             has_voucher: license.get("license_response").is_some(),
             voucher_raw: str_at(license, &["license_response"]),
             denial_message: license
@@ -108,6 +104,22 @@ impl DownloadLicense {
     /// Whether the license was granted with a usable download URL.
     pub fn is_granted(&self) -> bool {
         self.status_code == "Granted" && self.offline_url.is_some()
+    }
+
+    /// The content-version identity for resume validation (A9):
+    /// `acr:version:file_version`. `None` when the license carries none of
+    /// them (nothing to gate on). A corrected re-release changes acr and
+    /// version, so a stale partial's marker no longer matches.
+    pub fn version_tag(&self) -> Option<String> {
+        if self.acr.is_none() && self.version.is_none() && self.file_version.is_none() {
+            return None;
+        }
+        Some(format!(
+            "{}:{}:{}",
+            self.acr.as_deref().unwrap_or(""),
+            self.version.as_deref().unwrap_or(""),
+            self.file_version.as_deref().unwrap_or("")
+        ))
     }
 
     /// Decrypts the aaxc voucher to obtain the file's `key`/`iv`.
@@ -158,6 +170,19 @@ impl DownloadLicense {
             raw,
         })
     }
+}
+
+/// The companion-PDF URL of a licenserequest response (audit 2026-07-17,
+/// D6): `content_metadata.pdf_url`, else the `content_license` top-level
+/// `pdf_url`. One home for the aaxc [`DownloadLicense::from_response`] and
+/// the Widevine grant parser, which each walked it. `license` is the
+/// `content_license` object; `metadata` is its `content_metadata`.
+pub fn pdf_url_from_license(license: &Value, metadata: Option<&Value>) -> Option<String> {
+    metadata
+        .and_then(|m| m.get("pdf_url"))
+        .or_else(|| license.get("pdf_url"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 /// A decrypted aaxc voucher: the content `key`/`iv` (hex) plus the full

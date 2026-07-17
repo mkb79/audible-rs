@@ -500,34 +500,10 @@ fn request_file_from_parts(
     })
 }
 
-/// Normalizes an API path: a version-less path gets the `/1.0` prefix; an
-/// explicit version segment (`1.0`, `2.0`, …) is left untouched. The query
-/// string is preserved.
-/// `pub(crate)`: the plugin broker (AUD-69) normalizes `api.request`
-/// paths with exactly the CLI's rule.
-pub(crate) fn normalize_api_path(path: &str) -> String {
-    let (path_part, query) = match path.split_once('?') {
-        Some((p, q)) => (p, Some(q)),
-        None => (path, None),
-    };
-    let trimmed = path_part.trim_start_matches('/');
-    let first_segment = trimmed.split('/').next().unwrap_or("");
-    // A version looks like "1.0": only digits and dots, and at least one dot
-    // (so a resource named "123" is not mistaken for a version).
-    let is_version = first_segment.contains('.')
-        && first_segment
-            .chars()
-            .all(|c| c.is_ascii_digit() || c == '.');
-    let normalized = if is_version {
-        format!("/{trimmed}")
-    } else {
-        format!("/1.0/{trimmed}")
-    };
-    match query {
-        Some(q) => format!("{normalized}?{q}"),
-        None => normalized,
-    }
-}
+// The path-normalization rule lives in the API layer
+// (`crate::api::normalize_api_path`) — shared with the broker's
+// `/v1/api/request`, which must not depend on the commands layer.
+use crate::api::normalize_api_path;
 
 fn path_without_query(path: &str) -> &str {
     path.split_once('?').map_or(path, |(p, _)| p)
@@ -777,7 +753,7 @@ async fn run_interactive(ctx: &Ctx, args: ApiArgs) -> Result<()> {
         .interact_on(&term)?;
     let normalized = normalize_api_path(&raw_path);
 
-    let auth_modes = ["auto", "signing", "token", "cookies"];
+    let auth_modes = AuthMode::LABELS;
     let auth_idx = dialoguer::Select::with_theme(&theme)
         .with_prompt("Auth mode")
         .items(auth_modes)
@@ -951,32 +927,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_adds_default_version() {
-        assert_eq!(normalize_api_path("/library"), "/1.0/library");
-        assert_eq!(normalize_api_path("/wishlist"), "/1.0/wishlist");
-        // Missing leading slash is tolerated.
-        assert_eq!(normalize_api_path("library"), "/1.0/library");
-    }
-
-    #[test]
-    fn normalize_keeps_explicit_version() {
-        assert_eq!(normalize_api_path("/1.0/library"), "/1.0/library");
-        assert_eq!(normalize_api_path("/2.0/foo"), "/2.0/foo");
-    }
-
-    #[test]
-    fn normalize_preserves_query() {
-        assert_eq!(
-            normalize_api_path("/library?num_results=5"),
-            "/1.0/library?num_results=5"
-        );
-        assert_eq!(
-            normalize_api_path("/1.0/library?a=b&c=d"),
-            "/1.0/library?a=b&c=d"
-        );
-    }
-
-    #[test]
     fn header_accepts_normal() {
         let (name, value) = parse_header("Accept: application/json").unwrap();
         assert_eq!(name, "Accept");
@@ -1094,7 +1044,7 @@ mod tests {
 
     #[test]
     fn auth_mode_str_round_trips() {
-        for label in ["auto", "signing", "token", "cookies"] {
+        for label in AuthMode::LABELS {
             let mode: AuthMode = label.parse().unwrap();
             assert_eq!(auth_mode_str(mode), label);
         }

@@ -20,6 +20,23 @@ use crate::config::ctx::{Ctx, Selectors};
 use crate::session::rpc::{self, Auth, Backend};
 use crate::session::tokens::TokenStore;
 
+/// Constant-time equality of a presented token against the admin token
+/// (audit 2026-07-17, B3). A plain `==` short-circuits on the first
+/// differing byte — a timing side-channel on a network-reachable secret
+/// compare. Both sides are SHA-256'd (fixed 32-byte length, so no length
+/// leak either) and the digests folded with XOR: the work is independent
+/// of where — or whether — they differ.
+fn admin_token_matches(presented: &str, expected: &str) -> bool {
+    use sha2::{Digest as _, Sha256};
+    let a = Sha256::digest(presented.as_bytes());
+    let b = Sha256::digest(expected.as_bytes());
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Directory holding the agent's socket, PID and token files.
 fn agent_dir(ctx: &Ctx) -> PathBuf {
     super::runtime_dir(ctx).join("audible")
@@ -41,9 +58,40 @@ pub fn token_path(ctx: &Ctx) -> PathBuf {
 }
 
 /// One unlocked account session and its last-use instant (idle eviction).
+/// `last_used` is atomic (millis since the backend's epoch) so the hot
+/// read path can bump it without a write lock — eviction must measure
+/// idleness, not session age (audit 2026-07-17, A10: a backend polling
+/// every 30 s was still evicted at `idle_timeout` after creation, and a
+/// `prompt`-source account could then never re-unlock headless).
 struct Session {
     ctx: Arc<Ctx>,
-    last_used: Instant,
+    last_used_ms: std::sync::atomic::AtomicU64,
+}
+
+impl Session {
+    fn new(ctx: Arc<Ctx>, epoch: Instant) -> Self {
+        let session = Session {
+            ctx,
+            last_used_ms: std::sync::atomic::AtomicU64::new(0),
+        };
+        session.touch(epoch);
+        session
+    }
+
+    /// Marks the session as used now.
+    fn touch(&self, epoch: Instant) {
+        self.last_used_ms.store(
+            epoch.elapsed().as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// How long ago the session was last used.
+    fn idle_for(&self, epoch: Instant) -> Duration {
+        let last =
+            Duration::from_millis(self.last_used_ms.load(std::sync::atomic::Ordering::Relaxed));
+        epoch.elapsed().saturating_sub(last)
+    }
 }
 
 /// State of an async job (AUD-119).
@@ -70,8 +118,18 @@ type Jobs = Arc<RwLock<HashMap<String, JobEntry>>>;
 /// every per-account `Ctx` is built from.
 struct AgentBackend {
     config_dir: PathBuf,
+    /// The parsed config, cached against `config.toml`'s mtime (E4): the
+    /// probe Ctx used to re-read and re-parse the file on every `/v1`
+    /// request. `allowed_hosts` deliberately keeps its own fresh load —
+    /// that one is fail-closed security state (AUD-121).
+    config_cache: std::sync::Mutex<Option<(std::time::SystemTime, crate::config::schema::Config)>>,
+    /// Base instant for the sessions' atomic last-use stamps.
+    epoch: Instant,
     admin_token: String,
     invoke_exe: PathBuf,
+    /// Built-in command names for `/v1/invoke`/`/v1/jobs`, from the
+    /// composition root (`agent start` in the commands layer).
+    builtins: Vec<String>,
     idle_timeout: Duration,
     sessions: RwLock<HashMap<String, Session>>,
     /// Persisted app tokens (AUD-117); reloaded from disk on change.
@@ -90,10 +148,14 @@ impl Backend for AgentBackend {
         true
     }
 
-    fn authenticate(&self, token: &str) -> Option<Auth> {
+    fn authenticate(&self, token: &str, trusted: bool) -> Option<Auth> {
         // The bootstrap admin token grants every scope, unbound (local
-        // CLI convenience). App tokens carry their own scopes + binding.
-        if token == self.admin_token {
+        // CLI convenience) — but **only over a trusted transport** (B3).
+        // Over the untrusted TCP listener it is refused, so a leaked
+        // `agent.token` cannot drive the data routes from the network;
+        // TCP callers must use a scoped app token. The compare is
+        // constant-time (a network-reachable secret compare).
+        if trusted && admin_token_matches(token, &self.admin_token) {
             return Some(Auth {
                 scopes: crate::plugins::VALID_SCOPES
                     .iter()
@@ -120,27 +182,29 @@ impl Backend for AgentBackend {
         let name = probe.account_name()?;
 
         if let Some(session) = self.sessions.read().await.get(&name) {
+            // Every use keeps the session alive — this fast path is the
+            // agent's normal serving path, so skipping the bump here
+            // evicted sessions that were in active use (A10).
+            session.touch(self.epoch);
             return Ok(Arc::clone(&session.ctx));
         }
         let mut sessions = self.sessions.write().await;
         // Re-check: another task may have inserted it meanwhile.
         if let Some(session) = sessions.get_mut(&name) {
-            session.last_used = Instant::now();
+            session.touch(self.epoch);
             return Ok(Arc::clone(&session.ctx));
         }
         let ctx = Arc::new(self.build_ctx(Some(&name))?);
-        sessions.insert(
-            name,
-            Session {
-                ctx: Arc::clone(&ctx),
-                last_used: Instant::now(),
-            },
-        );
+        sessions.insert(name, Session::new(Arc::clone(&ctx), self.epoch));
         Ok(ctx)
     }
 
     fn invoke_exe(&self) -> PathBuf {
         self.invoke_exe.clone()
+    }
+
+    fn builtin_names(&self) -> &[String] {
+        &self.builtins
     }
 
     /// The agent's own allowlist, `[session] allowed_hosts` (AUD-124) —
@@ -163,7 +227,9 @@ impl Backend for AgentBackend {
     }
 
     fn is_admin(&self, token: &str) -> bool {
-        token == self.admin_token
+        // Only reached on the trusted admin surface (`/v1/agent/*` is
+        // TCP-403'd upstream), but constant-time all the same (B3).
+        admin_token_matches(token, &self.admin_token)
     }
 
     async fn unlock(
@@ -176,13 +242,10 @@ impl Backend for AgentBackend {
         let ctx = self.build_ctx(account)?;
         let name = ctx.account_name()?;
         ctx.unlock_with_password(password).await?;
-        self.sessions.write().await.insert(
-            name.clone(),
-            Session {
-                ctx: Arc::new(ctx),
-                last_used: Instant::now(),
-            },
-        );
+        self.sessions
+            .write()
+            .await
+            .insert(name.clone(), Session::new(Arc::new(ctx), self.epoch));
         Ok(name)
     }
 
@@ -320,21 +383,43 @@ impl AgentBackend {
     /// client cell is unset — unlock happens lazily on first `client()`
     /// via the account's `password_source`.
     fn build_ctx(&self, account: Option<&str>) -> Result<Ctx> {
-        Ctx::with_dir(
+        Ok(Ctx::with_config(
             self.config_dir.clone(),
+            self.cached_config()?,
             Selectors {
                 account: account.map(str::to_owned),
                 ..Default::default()
             },
-        )
+        ))
+    }
+
+    /// The parsed config, reloaded only when `config.toml`'s mtime
+    /// changed on disk (the TokenStore pattern). A missing mtime (exotic
+    /// filesystem) falls back to loading every time.
+    fn cached_config(&self) -> Result<crate::config::schema::Config> {
+        let path = self.config_dir.join("config.toml");
+        let mtime = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        let mut cache = self.config_cache.lock().expect("config cache lock");
+        if let (Some(mtime), Some((cached_mtime, config))) = (mtime, cache.as_ref())
+            && mtime == *cached_mtime
+        {
+            return Ok(config.clone());
+        }
+        let config = crate::config::schema::Config::load(&path)
+            .with_context(|| format!("could not load {}", path.display()))?;
+        if let Some(mtime) = mtime {
+            *cache = Some((mtime, config.clone()));
+        }
+        Ok(config)
     }
 
     /// Drops sessions idle longer than the timeout.
     async fn evict_idle(&self) {
-        let now = Instant::now();
         let mut sessions = self.sessions.write().await;
         sessions.retain(|name, session| {
-            let keep = now.duration_since(session.last_used) < self.idle_timeout;
+            let keep = session.idle_for(self.epoch) < self.idle_timeout;
             if !keep {
                 tracing::info!(account = name, "evicting idle session");
             }
@@ -347,7 +432,7 @@ impl AgentBackend {
 /// socket, writes the PID and token files, serves `/v1`, and cleans up.
 /// This is the daemon body (`agent run`); `agent start` self-execs it
 /// detached.
-pub async fn serve(ctx: &Ctx) -> Result<()> {
+pub async fn serve(ctx: &Ctx, builtins: Vec<String>) -> Result<()> {
     let dir = agent_dir(ctx);
     super::create_private_dir(&dir)?;
 
@@ -371,8 +456,11 @@ pub async fn serve(ctx: &Ctx) -> Result<()> {
         .unwrap_or_else(|_| Duration::from_secs(900));
     let backend = Arc::new(AgentBackend {
         config_dir: ctx.config_dir().to_owned(),
+        config_cache: std::sync::Mutex::new(None),
+        epoch: Instant::now(),
         admin_token,
         invoke_exe: std::env::current_exe().context("could not resolve the own binary")?,
+        builtins,
         idle_timeout,
         sessions: RwLock::new(HashMap::new()),
         tokens: TokenStore::new(ctx.config_dir()),
@@ -505,14 +593,27 @@ mod tests {
     fn backend(ctx: &Ctx, idle: Duration) -> AgentBackend {
         AgentBackend {
             config_dir: ctx.config_dir().to_owned(),
+            config_cache: std::sync::Mutex::new(None),
+            epoch: Instant::now(),
             admin_token: "T".into(),
             invoke_exe: PathBuf::from("/bin/true"),
+            builtins: vec!["library".to_owned()],
             idle_timeout: idle,
             sessions: RwLock::new(HashMap::new()),
             tokens: TokenStore::new(ctx.config_dir()),
             audit: crate::session::audit::AuditLog::new(ctx.config_dir()),
             jobs: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    #[test]
+    fn admin_token_matches_is_constant_time_correct() {
+        // Correctness of the constant-time compare (the timing property
+        // itself is not unit-testable): exact match only.
+        assert!(admin_token_matches("secret-token", "secret-token"));
+        assert!(!admin_token_matches("secret-token", "secret-toke"));
+        assert!(!admin_token_matches("secret-token", "secret-tokenX"));
+        assert!(!admin_token_matches("", "x"));
     }
 
     #[tokio::test]
@@ -541,6 +642,35 @@ mod tests {
         backend.session(Some("a")).await.unwrap();
         assert_eq!(backend.sessions.read().await.len(), 1);
         tokio::time::sleep(Duration::from_millis(40)).await;
+        backend.evict_idle().await;
+        assert_eq!(backend.sessions.read().await.len(), 0);
+    }
+
+    /// A10: eviction measures idleness, not age. A session that is used
+    /// continuously (the read fast path — the agent's normal serving
+    /// path) must survive past `idle_timeout`; before the fix it was
+    /// evicted at `idle_timeout` after creation regardless of use.
+    #[tokio::test]
+    async fn actively_used_sessions_survive_eviction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let backend = backend(&ctx, Duration::from_millis(60));
+        backend.session(Some("a")).await.unwrap();
+
+        // Keep using the session well past the idle timeout.
+        for _ in 0..6 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            backend.session(Some("a")).await.unwrap();
+            backend.evict_idle().await;
+            assert_eq!(
+                backend.sessions.read().await.len(),
+                1,
+                "an in-use session must never be evicted"
+            );
+        }
+
+        // Once genuinely idle, it still goes.
+        tokio::time::sleep(Duration::from_millis(80)).await;
         backend.evict_idle().await;
         assert_eq!(backend.sessions.read().await.len(), 0);
     }
@@ -591,25 +721,48 @@ mod tests {
         assert!(backend.job_status("nonexistent", None).await.is_none());
     }
 
+    /// The token authentication matrix, including B3: the admin token
+    /// authenticates data routes **only over a trusted transport** (the
+    /// local socket). Over the untrusted TCP listener it is refused — a
+    /// leaked `agent.token` cannot drive `/v1/api/request` etc. from the
+    /// network; a scoped app token authenticates over both transports.
     #[test]
-    fn authenticate_only_the_admin_token() {
+    fn authenticate_gates_the_admin_token_by_transport() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = test_ctx(tmp.path());
         let backend = backend(&ctx, Duration::from_secs(1));
-        assert!(backend.authenticate("wrong").is_none());
-        let auth = backend.authenticate("T").unwrap();
-        assert!(
-            auth.scopes.contains(&"api".to_owned()) && auth.scopes.contains(&"invoke".to_owned())
-        );
-        assert!(auth.account.is_none());
 
-        // An app token authenticates with its own scopes + binding.
+        // Trusted: the admin token grants every scope, unbound.
+        let admin = backend
+            .authenticate("T", true)
+            .expect("admin token authenticates over the trusted transport");
+        assert_eq!(admin.caller, "admin");
+        assert!(
+            admin.scopes.contains(&"api".to_owned()) && admin.scopes.contains(&"invoke".to_owned())
+        );
+        assert!(admin.account.is_none());
+
+        // Untrusted (TCP): the admin token is refused (B3), and a wrong
+        // token is refused on either transport.
+        assert!(
+            backend.authenticate("T", false).is_none(),
+            "the admin token must not authenticate over TCP"
+        );
+        assert!(backend.authenticate("wrong", true).is_none());
+        assert!(backend.authenticate("wrong", false).is_none());
+
+        // An app token authenticates with its own scopes + binding, over
+        // both transports (the intended TCP credential).
         let token = backend
             .tokens
             .create("web", vec!["api".into()], Some("b".into()), None)
             .unwrap();
-        let auth = backend.authenticate(&token).unwrap();
-        assert_eq!(auth.scopes, ["api"]);
-        assert_eq!(auth.account.as_deref(), Some("b"));
+        for trusted in [true, false] {
+            let auth = backend
+                .authenticate(&token, trusted)
+                .expect("app token authenticates on any transport");
+            assert_eq!(auth.scopes, ["api"]);
+            assert_eq!(auth.account.as_deref(), Some("b"));
+        }
     }
 }

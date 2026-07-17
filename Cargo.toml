@@ -92,6 +92,9 @@ rand = "0.10"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 # Session agent (M5): SIGTERM to the daemon PID, detached process group.
 libc = "0.2"
+# Unpredictable 0700 temp dirs for `plugin add <https://…>` (AUD-220/B4):
+# a fixed name in world-writable /tmp was a pre-own/TOCTOU target.
+tempfile = "3"
 
 # Global allocator (AUD-140): mimalloc neutralizes musl's slower default
 # malloc for the static Linux release binaries, and modestly speeds up the
@@ -110,7 +113,6 @@ protox = "0.9"
 
 [dev-dependencies]
 insta = "1.47"
-tempfile = "3"
 wiremock = "0.6"
 
 # Argon2id with production parameters (64 MiB) is unusably slow in

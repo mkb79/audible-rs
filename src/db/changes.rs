@@ -184,11 +184,9 @@ impl Db {
             if retention_days == 0 {
                 return Ok(0);
             }
-            let format =
-                time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
-            let cutoff = (time::OffsetDateTime::now_utc()
-                - time::Duration::days(i64::from(retention_days)))
-            .format(format)
+            let cutoff = crate::timefmt::format_iso(
+                time::OffsetDateTime::now_utc() - time::Duration::days(i64::from(retention_days)),
+            )
             .expect("formatting a UTC timestamp with a const format never fails");
             let deleted = conn.execute(
                 "DELETE FROM change_log WHERE recorded_utc < ?",

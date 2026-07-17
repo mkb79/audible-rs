@@ -104,7 +104,7 @@ impl super::Command for LibraryCommand {
                             .require_equals(true)
                             .value_delimiter(',')
                             .default_missing_value("audio")
-                            .value_parser(["audio", "chapter", "pdf", "cover", "annotation", "all"])
+                            .value_parser(["audio", "chapter", "pdf", "cover", "all"])
                             .conflicts_with("remote")
                             .help_heading("Selection")
                             .help(
@@ -187,7 +187,7 @@ impl super::Command for LibraryCommand {
                             .require_equals(true)
                             .value_delimiter(',')
                             .default_missing_value("audio")
-                            .value_parser(["audio", "chapter", "pdf", "cover", "annotation", "all"])
+                            .value_parser(["audio", "chapter", "pdf", "cover", "all"])
                             .help(
                                 "Only episodes lacking a download record of these kinds \
                                  (no value: audio; `all` covers every kind)",
@@ -289,11 +289,8 @@ impl super::Command for LibraryCommand {
                 clap::Command::new("add")
                     .about("Add subscription (AYCL/Plus) titles, podcasts or episodes to your library")
                     .arg(
-                        Arg::new("asin")
-                            .long("asin")
-                            .action(ArgAction::Append)
-                            .value_name("ASIN")
-                            .help("ASIN to add (repeatable)"),
+                        super::items::asin_arg()
+                            .help("ASIN(s) to add — comma-separated or repeated"),
                     )
                     .arg(
                         Arg::new("title")
@@ -329,11 +326,8 @@ impl super::Command for LibraryCommand {
                 clap::Command::new("remove")
                     .about("Remove titles, podcasts or episodes from your library (returns loans, unfollows podcasts)")
                     .arg(
-                        Arg::new("asin")
-                            .long("asin")
-                            .action(ArgAction::Append)
-                            .value_name("ASIN")
-                            .help("ASIN to remove (repeatable)"),
+                        super::items::asin_arg()
+                            .help("ASIN(s) to remove — comma-separated or repeated"),
                     )
                     .arg(
                         Arg::new("title")
@@ -357,11 +351,7 @@ impl super::Command for LibraryCommand {
     }
 
     async fn run(&self, ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
-        let strings = |m: &clap::ArgMatches, id: &str| -> Vec<String> {
-            m.get_many::<String>(id)
-                .map(|v| v.cloned().collect())
-                .unwrap_or_default()
-        };
+        use crate::commands::strings;
         let limit = |m: &clap::ArgMatches| match *m.get_one::<u32>("limit").expect("default") {
             0 => u32::MAX,
             n => n,
@@ -459,7 +449,29 @@ mod membership;
 mod sync;
 
 pub use sync::{SyncOptions, SyncSummary, sync_library};
-pub(crate) use sync::{maybe_auto_sync, sync};
+pub(crate) use sync::{maybe_auto_sync, poll_until_reflected, sync};
 
 use changes::{changes, changes_prune};
 use list::{export, list, list_borrowed, list_missing, list_remote, search};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shared `--asin` contract (AUD-220/C3): `--asin A,B` splits into
+    /// two ASINs in `library add`/`remove`, exactly like everywhere else —
+    /// it used to reach the API as one literal ASIN "A,B" here.
+    #[test]
+    fn add_and_remove_split_comma_separated_asins() {
+        use crate::commands::Command as _;
+        for verb in ["add", "remove"] {
+            let matches = LibraryCommand
+                .clap()
+                .try_get_matches_from(["library", verb, "--asin", "B0A,B0B"])
+                .unwrap();
+            let (_, sub) = matches.subcommand().unwrap();
+            let asins: Vec<&String> = sub.get_many::<String>("asin").unwrap().collect();
+            assert_eq!(asins, ["B0A", "B0B"], "{verb} must split comma ASINs");
+        }
+    }
+}

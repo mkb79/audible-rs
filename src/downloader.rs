@@ -60,6 +60,20 @@ pub enum DownloadError {
     /// the parts individually instead of the audio stream.
     #[error("this title must be downloaded in parts, not as one file: {0}")]
     MultipartTitle(String),
+    /// The transfer ended below the expected byte count without a stream
+    /// error (e.g. the server closed early). The partial is kept — the
+    /// next run resumes from it.
+    #[error("transfer ended at {written} of {expected} bytes — the partial is kept for resume")]
+    ShortTransfer { written: u64, expected: u64 },
+    /// The transfer produced more bytes than expected: the remote file
+    /// differs from the expectation (e.g. a corrected release), so a
+    /// resumed partial would be head-of-old + tail-of-new. The partial is
+    /// discarded; the next run starts clean.
+    #[error(
+        "transfer produced {written} bytes but {expected} were expected — the remote \
+         file seems to have changed; the partial was discarded, retry to start clean"
+    )]
+    SizeMismatch { written: u64, expected: u64 },
 }
 
 /// Outcome of a resumable download.
@@ -78,8 +92,9 @@ pub enum DownloadOutcome {
 /// Progress is staged in a sibling `<dest>.part` file. If a partial
 /// exists, a `Range` request continues from its size (HTTP 206); a
 /// `200` means the server ignored the range, so the partial is
-/// restarted; `416` means the partial is already complete. On success
-/// the part file is renamed onto `dest`. Multi-GB transfers therefore
+/// restarted; a `416` discards the partial and restarts cleanly (see
+/// [`stream_to_file`] for the resume-validation rules). On success the
+/// part file is renamed onto `dest`. Multi-GB transfers therefore
 /// survive an abort and resume on the next run.
 ///
 /// With `progress` (a `MultiProgress` to attach to), a single-line progress
@@ -98,20 +113,158 @@ pub async fn download_to_file(
     progress: Option<&MultiProgress>,
     expected_content_type: &[&str],
     ext_overrides: &[(&str, &str)],
+    version_tag: Option<&str>,
 ) -> Result<(DownloadOutcome, PathBuf), DownloadError> {
+    stream_to_file(
+        dest,
+        expected_size,
+        force,
+        progress,
+        expected_content_type,
+        ext_overrides,
+        url,
+        version_tag,
+        // Auth flow required (a plain GET 403s); a Range header only when
+        // actually resuming.
+        |offset| async move {
+            let mut request = client.authed_get(url).await?;
+            if offset > 0 {
+                request = request.header(RANGE, format!("bytes={offset}-"));
+            }
+            Ok(request)
+        },
+    )
+    .await
+}
+
+/// Player User-Agent for the CENC content host (the Android app's media stack).
+pub const CENC_USER_AGENT: &str =
+    "com.audible.playersdk.player/3.79.0 (Linux;Android 11) AndroidXMedia3/1.3.0";
+
+/// A plain, **uncompressed** HTTP client (no auth) with the same connect/read
+/// timeouts as the API client (AUD-98). Used for the signed CloudFront URLs —
+/// the CENC content download and the MPD/text fetch — which 403 on the API
+/// client's `Accept-Encoding: gzip, br`. Without the timeouts a stalled
+/// connection (worst case a multi-GB CENC transfer) would hang forever.
+pub fn plain_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .connect_timeout(crate::api::client::CONNECT_TIMEOUT)
+        .read_timeout(crate::api::client::READ_TIMEOUT)
+        .build()
+}
+
+/// Downloads a signed CENC/DASH content URL to `dest`, with resume. Unlike
+/// [`download_to_file`] this uses a plain, **uncompressed** client with a player
+/// User-Agent and no auth: the signed CloudFront URL 403s on the API client's
+/// `Accept-Encoding: gzip, br` and requires a ranged request (`bytes=0-`).
+pub async fn download_cenc_to_file(
+    url: &str,
+    dest: &Path,
+    expected_size: Option<u64>,
+    force: bool,
+    progress: Option<&MultiProgress>,
+    expected_content_type: &[&str],
+    version_tag: Option<&str>,
+) -> Result<(DownloadOutcome, PathBuf), DownloadError> {
+    stream_to_file(
+        dest,
+        expected_size,
+        force,
+        progress,
+        expected_content_type,
+        &[],
+        url,
+        version_tag,
+        // The CENC host requires a ranged request even from zero
+        // (`bytes=0-`) and 403s on the API client's Accept-Encoding, so
+        // this path uses the plain client with the player User-Agent.
+        |offset| async move {
+            Ok(plain_http_client()?
+                .get(url)
+                .header(reqwest::header::USER_AGENT, CENC_USER_AGENT)
+                .header(RANGE, format!("bytes={offset}-")))
+        },
+    )
+    .await
+}
+
+/// The one resumable transfer engine behind [`download_to_file`] and
+/// [`download_cenc_to_file`] (audit 2026-07-17, D1 — the resume logic had
+/// been patched into both copies once already). `build_request` turns a
+/// resume offset into a ready-to-send request; auth, User-Agent and
+/// whether a zero-offset `Range` is sent differ per caller, everything
+/// else is shared. It may be called twice: once for the resume attempt
+/// and once more when a `416` forces a clean restart.
+///
+/// Progress is staged in a sibling `<dest>.part`. A partial resumes via
+/// `Range` (206); a `200` means the server ignored the range and the
+/// partial restarts; a `416` no longer trusts the partial (see below).
+/// On success the part file is renamed onto the final destination.
+///
+/// Resume validation (audit 2026-07-17, A9). The CDN gives no HTTP
+/// validator on content responses — no `ETag`, no `Last-Modified`,
+/// `x-amz-version-id: null` (confirmed against live captures) — so
+/// `If-Range` is impossible; the version identity comes from the license
+/// instead, via `version_tag` (`acr:version:file_version`, which the
+/// signed URL also encodes in its path). The three guards:
+/// - **version marker**: a resumable `.part` is trusted only when its
+///   sibling `<part>.ver` matches `version_tag`. A corrected re-release
+///   (new acr/version, even at the *same* byte length — the one case the
+///   size check below cannot catch) mismatches, so the partial is
+///   discarded and the transfer restarts clean.
+/// - **416**: proves only that the partial is at/past the remote EOF — a
+///   shrunk replacement file (PDF/cover re-issue, `expected_size`
+///   unknown) would otherwise strand truncated old bytes as "complete".
+///   The partial is discarded and the transfer restarts from zero.
+/// - **post-transfer byte count** must equal `expected_size` (when
+///   known): short = kept partial + error, long = the remote file
+///   changed → partial discarded + error. Never a silent rename.
+///
+/// `version_tag` is `None` for artifacts with no license version (covers,
+/// PDFs, chapters): those keep only the 416 + size guards.
+#[allow(clippy::too_many_arguments)]
+async fn stream_to_file<Fut>(
+    dest: &Path,
+    expected_size: Option<u64>,
+    force: bool,
+    progress: Option<&MultiProgress>,
+    expected_content_type: &[&str],
+    ext_overrides: &[(&str, &str)],
+    url: &str,
+    version_tag: Option<&str>,
+    build_request: impl Fn(u64) -> Fut,
+) -> Result<(DownloadOutcome, PathBuf), DownloadError>
+where
+    Fut: std::future::Future<Output = Result<reqwest::RequestBuilder, DownloadError>>,
+{
     // `force` re-downloads from scratch, ignoring an existing complete
-    // file and any partial — used by `--force`/`--relicense`.
-    if !force
-        && let Ok(meta) = tokio::fs::metadata(dest).await
-        && expected_size.is_some_and(|size| meta.len() == size)
-    {
-        return Ok((DownloadOutcome::AlreadyComplete, dest.to_path_buf()));
+    // file and any partial — used by `--force`/`--relicense`. The check
+    // covers the planned path plus every extension-corrected candidate:
+    // an audio served as `audio/mpeg` landed as `X.mp3`, and probing only
+    // the planned `X.aaxc` re-transferred it on every record-less run.
+    if !force && let Some(size) = expected_size {
+        let candidates = std::iter::once(dest.to_path_buf()).chain(
+            ext_overrides
+                .iter()
+                .map(|(_, ext)| dest.with_extension(ext)),
+        );
+        for candidate in candidates {
+            if let Ok(meta) = tokio::fs::metadata(&candidate).await
+                && meta.len() == size
+            {
+                return Ok((DownloadOutcome::AlreadyComplete, candidate));
+            }
+        }
     }
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
 
     let part = part_path(dest);
+    let marker = version_marker_path(&part);
     let mut offset = if force {
         0
     } else {
@@ -120,10 +273,29 @@ pub async fn download_to_file(
             Err(_) => 0,
         }
     };
+    // Version-gate a resumable partial (A9): trust it only when its
+    // `<part>.ver` marker matches the license version we are about to
+    // download with. A corrected re-release mismatches (or a
+    // marker-less partial from before this check exists) → discard and
+    // restart clean, so no head-of-old + tail-of-new can survive.
+    if offset > 0
+        && let Some(tag) = version_tag
+    {
+        let recorded = tokio::fs::read_to_string(&marker).await.ok();
+        if recorded.as_deref() != Some(tag) {
+            tracing::warn!(
+                partial = %part.display(),
+                "the partial belongs to a different content version — discarding and \
+                 restarting from scratch"
+            );
+            tokio::fs::remove_file(&part).await?;
+            let _ = tokio::fs::remove_file(&marker).await;
+            offset = 0;
+        }
+    }
     // Verify a resumable partial against the expected size before asking
-    // the server: an oversized partial is corrupt (restart from scratch —
-    // a Range request past EOF would 416 and get renamed as complete), a
-    // partial exactly at the expected size needs no request at all.
+    // the server: an oversized partial is corrupt (restart from scratch),
+    // a partial exactly at the expected size needs no request at all.
     if let Some(size) = expected_size {
         if offset > size {
             tracing::warn!(
@@ -136,24 +308,36 @@ pub async fn download_to_file(
             offset = 0;
         } else if offset == size && offset > 0 {
             tokio::fs::rename(&part, dest).await?;
+            let _ = tokio::fs::remove_file(&marker).await;
             return Ok((DownloadOutcome::Downloaded, dest.to_path_buf()));
         }
     }
 
-    let mut request = client.authed_get(url).await?;
-    if offset > 0 {
-        request = request.header(RANGE, format!("bytes={offset}-"));
+    let mut response = build_request(offset).await?.send().await?;
+    let mut status = response.status();
+
+    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        // A 416 only proves the partial is at/past the remote EOF, not
+        // that its bytes are the file's. With the expected size known
+        // this point is only reached on an inconsistency (a complete
+        // partial finishes above without a request); without one nothing
+        // can vouch for the partial at all — renaming it here stranded a
+        // shrunk replacement's truncated old bytes as "complete".
+        // Restart cleanly instead.
+        tracing::warn!(
+            partial = %part.display(),
+            partial_len = offset,
+            "server says the resume offset is past EOF — discarding the partial \
+             and restarting from scratch"
+        );
+        tokio::fs::remove_file(&part).await?;
+        offset = 0;
+        response = build_request(0).await?.send().await?;
+        status = response.status();
     }
-    let response = request.send().await?;
-    let status = response.status();
     let content_length = response.content_length();
 
     let mut append = offset > 0;
-    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
-        // Partial already covers the whole file.
-        tokio::fs::rename(&part, dest).await?;
-        return Ok((DownloadOutcome::Downloaded, dest.to_path_buf()));
-    }
     if status == reqwest::StatusCode::OK {
         // Server ignored the range: restart from scratch.
         append = false;
@@ -216,10 +400,20 @@ pub async fn download_to_file(
         .open(&part)
         .await?;
 
+    // Stamp the partial's content version so a later resume can trust
+    // (or reject) it. Written for a fresh start and a validated resume
+    // alike; best-effort — a missing marker just forces a clean restart
+    // next time, never a wrong resume.
+    if let Some(tag) = version_tag {
+        let _ = tokio::fs::write(&marker, tag).await;
+    }
+
     let mut stream = response.bytes_stream();
+    let mut written = offset;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         file.write_all(&chunk).await?;
+        written += chunk.len() as u64;
         if let Some(bar) = &bar {
             bar.inc(chunk.len() as u64);
         }
@@ -229,150 +423,43 @@ pub async fn download_to_file(
     drop(file);
     if let Some(bar) = &bar {
         bar.finish_and_clear();
+    }
+
+    // A transfer that ends at the wrong byte count is never renamed into
+    // place as if it were the file.
+    if let Some(size) = expected_size
+        && written != size
+    {
+        if written > size {
+            // More data than expected: the remote file changed — an
+            // appended-to partial would be head-of-old + tail-of-new.
+            tokio::fs::remove_file(&part).await?;
+            let _ = tokio::fs::remove_file(&marker).await;
+            return Err(DownloadError::SizeMismatch {
+                written,
+                expected: size,
+            });
+        }
+        // Short: the stream ended early without an error. Keep the
+        // partial (and its version marker) — the next run resumes there.
+        return Err(DownloadError::ShortTransfer {
+            written,
+            expected: size,
+        });
     }
 
     tokio::fs::rename(&part, &final_dest).await?;
+    // The completed file needs no version marker.
+    let _ = tokio::fs::remove_file(&marker).await;
     Ok((DownloadOutcome::Downloaded, final_dest))
 }
 
-/// Player User-Agent for the CENC content host (the Android app's media stack).
-pub const CENC_USER_AGENT: &str =
-    "com.audible.playersdk.player/3.79.0 (Linux;Android 11) AndroidXMedia3/1.3.0";
-
-/// A plain, **uncompressed** HTTP client (no auth) with the same connect/read
-/// timeouts as the API client (AUD-98). Used for the signed CloudFront URLs —
-/// the CENC content download and the MPD/text fetch — which 403 on the API
-/// client's `Accept-Encoding: gzip, br`. Without the timeouts a stalled
-/// connection (worst case a multi-GB CENC transfer) would hang forever.
-pub fn plain_http_client() -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
-        .connect_timeout(crate::api::client::CONNECT_TIMEOUT)
-        .read_timeout(crate::api::client::READ_TIMEOUT)
-        .build()
-}
-
-/// Downloads a signed CENC/DASH content URL to `dest`, with resume. Unlike
-/// [`download_to_file`] this uses a plain, **uncompressed** client with a player
-/// User-Agent and no auth: the signed CloudFront URL 403s on the API client's
-/// `Accept-Encoding: gzip, br` and requires a ranged request (`bytes=0-`).
-pub async fn download_cenc_to_file(
-    url: &str,
-    dest: &Path,
-    expected_size: Option<u64>,
-    force: bool,
-    progress: Option<&MultiProgress>,
-    expected_content_type: &[&str],
-) -> Result<(DownloadOutcome, PathBuf), DownloadError> {
-    if !force
-        && let Ok(meta) = tokio::fs::metadata(dest).await
-        && expected_size.is_some_and(|size| meta.len() == size)
-    {
-        return Ok((DownloadOutcome::AlreadyComplete, dest.to_path_buf()));
-    }
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    let part = part_path(dest);
-    let mut offset = if force {
-        0
-    } else {
-        tokio::fs::metadata(&part)
-            .await
-            .map(|meta| meta.len())
-            .unwrap_or(0)
-    };
-    // Same partial-size verification as download_to_file: oversized =
-    // corrupt (restart), exactly complete = finish without a request.
-    if let Some(size) = expected_size {
-        if offset > size {
-            tracing::warn!(
-                partial = %part.display(),
-                partial_len = offset,
-                expected = size,
-                "partial is larger than the expected file — restarting"
-            );
-            tokio::fs::remove_file(&part).await?;
-            offset = 0;
-        } else if offset == size && offset > 0 {
-            tokio::fs::rename(&part, dest).await?;
-            return Ok((DownloadOutcome::Downloaded, dest.to_path_buf()));
-        }
-    }
-
-    let response = plain_http_client()?
-        .get(url)
-        .header(reqwest::header::USER_AGENT, CENC_USER_AGENT)
-        .header(RANGE, format!("bytes={offset}-"))
-        .send()
-        .await?;
-    let status = response.status();
-    let content_length = response.content_length();
-
-    let mut append = offset > 0;
-    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
-        tokio::fs::rename(&part, dest).await?;
-        return Ok((DownloadOutcome::Downloaded, dest.to_path_buf()));
-    }
-    if status == reqwest::StatusCode::OK {
-        // Server ignored the range: restart from scratch.
-        append = false;
-        offset = 0;
-    } else if status != reqwest::StatusCode::PARTIAL_CONTENT && !status.is_success() {
-        return Err(DownloadError::Status(status));
-    }
-
-    // Verify the media content-type so a bogus 200 (an HTML/JSON error page, an
-    // expired URL) is not written as a broken file — parity with download_to_file.
-    let got_content_type = response
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    if !expected_content_type.is_empty()
-        && let Some(got) = &got_content_type
-        && !content_type_matches(got, expected_content_type)
-    {
-        return Err(content_type_error(response, got, expected_content_type).await);
-    }
-
-    let total = expected_size.or_else(|| content_length.map(|len| offset + len));
-    let bar = progress.map(|multi| {
-        let name = dest
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let bar = multi.add(progress_bar(total, &name));
-        bar.set_position(offset);
-        bar
-    });
-
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(append)
-        .truncate(!append)
-        .open(&part)
-        .await?;
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        file.write_all(&chunk).await?;
-        if let Some(bar) = &bar {
-            bar.inc(chunk.len() as u64);
-        }
-    }
-    file.flush().await?;
-    file.sync_all().await?;
-    drop(file);
-    if let Some(bar) = &bar {
-        bar.finish_and_clear();
-    }
-    tokio::fs::rename(&part, dest).await?;
-    Ok((DownloadOutcome::Downloaded, dest.to_path_buf()))
+/// The sibling marker of a `.part` that records the content version it was
+/// written for (A9). Kept next to the partial and removed on completion.
+fn version_marker_path(part: &Path) -> PathBuf {
+    let mut name = part.file_name().unwrap_or_default().to_os_string();
+    name.push(".ver");
+    part.with_file_name(name)
 }
 
 /// The extension to use for a response `Content-Type`, if an override matches
@@ -550,16 +637,35 @@ mod tests {
     fn decode_annotations_treats_no_annotations_as_none() {
         use reqwest::StatusCode;
         // 404: the title has no annotations.
-        assert!(decode_annotations(StatusCode::NOT_FOUND, b"").is_none());
-        assert!(decode_annotations(StatusCode::NOT_FOUND, b"Not Found").is_none());
+        assert!(matches!(
+            decode_annotations(StatusCode::NOT_FOUND, b""),
+            AnnotationBody::None
+        ));
+        assert!(matches!(
+            decode_annotations(StatusCode::NOT_FOUND, b"Not Found"),
+            AnnotationBody::None
+        ));
         // Empty / whitespace body on a 2xx.
-        assert!(decode_annotations(StatusCode::OK, b"").is_none());
-        assert!(decode_annotations(StatusCode::OK, b"  \n ").is_none());
-        // Non-JSON body is best-effort "none", never a crash.
-        assert!(decode_annotations(StatusCode::OK, b"<html>nope</html>").is_none());
+        assert!(matches!(
+            decode_annotations(StatusCode::OK, b""),
+            AnnotationBody::None
+        ));
+        assert!(matches!(
+            decode_annotations(StatusCode::OK, b"  \n "),
+            AnnotationBody::None
+        ));
+        // A non-empty non-JSON 2xx is a FAILURE, not "none" — recording it
+        // as none would permanently skip the item's real bookmarks (A14).
+        assert!(matches!(
+            decode_annotations(StatusCode::OK, b"<html>nope</html>"),
+            AnnotationBody::Unparseable
+        ));
         // Valid JSON is the annotation payload.
-        let payload = decode_annotations(StatusCode::OK, br#"{"md5":"x","payload":{}}"#)
-            .expect("valid JSON decodes");
+        let AnnotationBody::Payload(payload) =
+            decode_annotations(StatusCode::OK, br#"{"md5":"x","payload":{}}"#)
+        else {
+            panic!("valid JSON decodes");
+        };
         assert_eq!(payload["md5"], "x");
     }
 
@@ -588,6 +694,13 @@ mod tests {
                     Some("https://cds.example/companion.pdf")
                 );
                 assert_eq!(license.content_size, Some(123));
+                // A9: the CENC resume gate depends on this being populated
+                // from content_reference (acr:version). The version is the
+                // same identifier that appears in the signed CENC URL path
+                // (verified live), so a re-release changes it.
+                assert_eq!(license.acr.as_deref(), Some("CR!ABC"));
+                assert_eq!(license.version.as_deref(), Some("42"));
+                assert_eq!(license.version_tag().as_deref(), Some("CR!ABC:42"));
             }
             WidevineGrant::Mpeg(_) => panic!("expected a Widevine grant"),
         }
@@ -815,6 +928,56 @@ impl Quality {
     }
 }
 
+/// Sends one `/1.0/content/{asin}/<endpoint>` POST and decodes the shared
+/// licenserequest protocol (audit 2026-07-17, D5 — this lived three
+/// times). The body is read as text first: a rejected request answers
+/// with a small JSON error (`error_code`/`message`) surfaced verbatim as
+/// [`ApiError::LicenseRejected`] together with the echoed request id;
+/// a success body must parse as JSON or is [`ApiError::LicenseResponse`].
+/// `app_headers` adds the app-parity block (X-ADP-*, device type/idiom)
+/// both licenserequest flavors send; `drmlicense` sends none.
+async fn send_licenserequest(
+    client: &Client,
+    country_code: &str,
+    asin: &str,
+    endpoint: &str,
+    body: serde_json::Value,
+    app_headers: bool,
+) -> Result<serde_json::Value, ApiError> {
+    let mut request = client
+        .request(Method::POST, format!("/1.0/content/{asin}/{endpoint}"))
+        .country_code(country_code)
+        // Auto = signing when the account has signing material
+        // (refresh-free, the endpoint accepts it), the access token
+        // otherwise.
+        .auth(AuthMode::Auto);
+    if app_headers {
+        // X-Device-Type-Id from the registered device (falls back to the
+        // iOS app type only if the auth file predates the typed device).
+        let device_type = client.device_type().unwrap_or(DEFAULT_DEVICE_TYPE);
+        request = request
+            .header("X-ADP-Transport", "WIFI")
+            .header("X-ADP-LTO", "120")
+            .header("X-Device-Type-Id", device_type)
+            .header("device_idiom", "phone");
+    }
+    let response = request.body(body).send().await?;
+    let status = response.status();
+    let request_id = echoed_request_id(&response);
+    let text = response.text().await?;
+    if !status.is_success() {
+        let (error_code, message) = parse_license_error(&text);
+        return Err(ApiError::LicenseRejected {
+            asin: asin.to_owned(),
+            status,
+            error_code,
+            message,
+            request_id: request_id.unwrap_or_else(|| "-".into()),
+        });
+    }
+    serde_json::from_str(&text).map_err(|_| ApiError::LicenseResponse(asin.to_owned()))
+}
+
 /// Requests a download license for `asin` via the Adrm path.
 ///
 /// Headers mirror the reference client; auth is the token mode (the
@@ -834,45 +997,8 @@ pub async fn request_license(
         "response_groups": "last_position_heard,pdf_url,content_reference",
     });
 
-    // X-Device-Type-Id from the registered device (falls back to the
-    // iOS app type only if the auth file predates the typed device).
-    let device_type = client.device_type().unwrap_or(DEFAULT_DEVICE_TYPE);
-
-    // Auto = signing when the account has signing material (refresh-free,
-    // the endpoint accepts it), the access token otherwise.
-    let response = client
-        .request(Method::POST, format!("/1.0/content/{asin}/licenserequest"))
-        .country_code(country_code)
-        .auth(AuthMode::Auto)
-        .header("X-ADP-Transport", "WIFI")
-        .header("X-ADP-LTO", "120")
-        .header("X-Device-Type-Id", device_type)
-        .header("device_idiom", "phone")
-        .body(body)
-        .send()
-        .await?;
-
-    let status = response.status();
-    let request_id = echoed_request_id(&response);
-    // Read the body as text first: a rejected licenserequest answers with
-    // a small JSON error (`error_code`/`message`) we want to surface, and
-    // calling `response.json()` on an error status would otherwise discard
-    // it behind a generic decode error.
-    let body = response.text().await?;
-
-    if !status.is_success() {
-        let (error_code, message) = parse_license_error(&body);
-        return Err(ApiError::LicenseRejected {
-            asin: asin.to_owned(),
-            status,
-            error_code,
-            message,
-            request_id: request_id.unwrap_or_else(|| "-".into()),
-        });
-    }
-
-    let payload: serde_json::Value =
-        serde_json::from_str(&body).map_err(|_| ApiError::LicenseResponse(asin.to_owned()))?;
+    let payload =
+        send_licenserequest(client, country_code, asin, "licenserequest", body, true).await?;
     DownloadLicense::from_response(payload)
         .ok_or_else(|| ApiError::LicenseResponse(asin.to_owned()))
 }
@@ -893,6 +1019,21 @@ pub struct WidevineLicense {
     pub content_size: Option<u64>,
     /// Companion PDF URL, if the title has one and `pdf_url` was requested.
     pub pdf_url: Option<String>,
+}
+
+impl WidevineLicense {
+    /// The content-version identity for CENC resume validation (A9):
+    /// `acr:version`. `None` when the grant carries neither.
+    pub fn version_tag(&self) -> Option<String> {
+        if self.acr.is_none() && self.version.is_none() {
+            return None;
+        }
+        Some(format!(
+            "{}:{}",
+            self.acr.as_deref().unwrap_or(""),
+            self.version.as_deref().unwrap_or("")
+        ))
+    }
 }
 
 /// A Mpeg fallback grant from a `[Widevine, Mpeg]` request — a plain, DRM-free
@@ -960,34 +1101,8 @@ pub async fn request_widevine_license(
         "response_groups": "content_reference,chapter_info,pdf_url",
     });
 
-    let device_type = client.device_type().unwrap_or(DEFAULT_DEVICE_TYPE);
-    let response = client
-        .request(Method::POST, format!("/1.0/content/{asin}/licenserequest"))
-        .country_code(country_code)
-        .auth(AuthMode::Auto)
-        .header("X-ADP-Transport", "WIFI")
-        .header("X-ADP-LTO", "120")
-        .header("X-Device-Type-Id", device_type)
-        .header("device_idiom", "phone")
-        .body(body)
-        .send()
-        .await?;
-
-    let status = response.status();
-    let request_id = echoed_request_id(&response);
-    let text = response.text().await?;
-    if !status.is_success() {
-        let (error_code, message) = parse_license_error(&text);
-        return Err(ApiError::LicenseRejected {
-            asin: asin.to_owned(),
-            status,
-            error_code,
-            message,
-            request_id: request_id.unwrap_or_else(|| "-".into()),
-        });
-    }
-    let payload: serde_json::Value =
-        serde_json::from_str(&text).map_err(|_| ApiError::LicenseResponse(asin.to_owned()))?;
+    let payload =
+        send_licenserequest(client, country_code, asin, "licenserequest", body, true).await?;
     parse_widevine_grant(&payload, asin)
 }
 
@@ -1011,12 +1126,9 @@ fn parse_widevine_grant(
             version: cref["version"].as_str().map(str::to_owned),
             sku: cref["sku"].as_str().map(str::to_owned),
             content_size,
-            // `pdf_url` sits under content_metadata (like the aaxc path), with a
-            // top-level fallback.
-            pdf_url: metadata["pdf_url"]
-                .as_str()
-                .or_else(|| license["pdf_url"].as_str())
-                .map(str::to_owned),
+            // Same `pdf_url` rule as the aaxc path (content_metadata,
+            // top-level fallback) — one home, D6.
+            pdf_url: crate::models::content::pdf_url_from_license(license, Some(metadata)),
         })),
         // A Mpeg fallback (podcasts / asset-less titles) — a plain MP3 URL.
         Some("Mpeg") => Ok(WidevineGrant::Mpeg(MpegGrant {
@@ -1047,28 +1159,8 @@ pub async fn request_drmlicense(
         "tenant_id": "Audible",
         "licenseChallenge": base64::engine::general_purpose::STANDARD.encode(challenge),
     });
-    let response = client
-        .request(Method::POST, format!("/1.0/content/{asin}/drmlicense"))
-        .country_code(country_code)
-        .auth(AuthMode::Auto)
-        .body(body)
-        .send()
-        .await?;
-    let status = response.status();
-    let request_id = echoed_request_id(&response);
-    let text = response.text().await?;
-    if !status.is_success() {
-        let (error_code, message) = parse_license_error(&text);
-        return Err(ApiError::LicenseRejected {
-            asin: asin.to_owned(),
-            status,
-            error_code,
-            message,
-            request_id: request_id.unwrap_or_else(|| "-".into()),
-        });
-    }
-    let payload: serde_json::Value =
-        serde_json::from_str(&text).map_err(|_| ApiError::LicenseResponse(asin.to_owned()))?;
+    let payload =
+        send_licenserequest(client, country_code, asin, "drmlicense", body, false).await?;
     let license_b64 = payload["license"]
         .as_str()
         .ok_or_else(|| ApiError::LicenseResponse(asin.to_owned()))?;
@@ -1187,20 +1279,38 @@ pub async fn request_annotations(
     let response = response.error_for_status()?;
     let status = response.status();
     let bytes = response.bytes().await?;
-    Ok(decode_annotations(status, &bytes))
+    match decode_annotations(status, &bytes) {
+        AnnotationBody::Payload(doc) => Ok(Some(doc)),
+        AnnotationBody::None => Ok(None),
+        AnnotationBody::Unparseable => Err(ApiError::AnnotationResponse(asin.to_owned())),
+    }
 }
 
-/// Decides what an annotation response means, free of IO so it can be
-/// unit-tested: a `404`, an empty/whitespace body, or an unparseable body
-/// all mean "no annotations" (`None`); valid JSON is the annotation payload.
-fn decode_annotations(status: reqwest::StatusCode, body: &[u8]) -> Option<serde_json::Value> {
+/// What an annotation response body means (free of IO for unit tests).
+#[derive(Debug)]
+enum AnnotationBody {
+    /// `404` or an empty/whitespace body: genuinely no annotations.
+    None,
+    /// Valid JSON: the annotation payload.
+    Payload(serde_json::Value),
+    /// 2xx with a non-empty body that is not JSON (a proxy/HTML error
+    /// page, a transient fault). A **failure**, never "no annotations" —
+    /// recording it as `none` made `annotations sync --missing` skip the
+    /// item's real bookmarks forever (audit 2026-07-17, A14).
+    Unparseable,
+}
+
+fn decode_annotations(status: reqwest::StatusCode, body: &[u8]) -> AnnotationBody {
     if status == reqwest::StatusCode::NOT_FOUND {
-        return None;
+        return AnnotationBody::None;
     }
     if body.iter().all(u8::is_ascii_whitespace) {
-        return None;
+        return AnnotationBody::None;
     }
-    serde_json::from_slice(body).ok()
+    match serde_json::from_slice(body) {
+        Ok(doc) => AnnotationBody::Payload(doc),
+        Err(_) => AnnotationBody::Unparseable,
+    }
 }
 
 /// Fetches `asin`'s cover source images from the catalog at the given

@@ -27,10 +27,13 @@ pub struct Broker {
 
 impl Broker {
     /// Binds a fresh socket in a private random-named 0700 directory and
-    /// starts serving with the given manifest scopes.
-    pub async fn start(ctx: Arc<Ctx>, scopes: Vec<String>) -> Result<Self> {
+    /// starts serving with the given manifest scopes. `builtins` names the
+    /// commands `/v1/invoke` may self-exec — passed down from the
+    /// composition root (main.rs owns the registry; this layer must not
+    /// reach up for it).
+    pub async fn start(ctx: Arc<Ctx>, scopes: Vec<String>, builtins: Vec<String>) -> Result<Self> {
         let invoke_exe = std::env::current_exe().context("could not resolve the own binary")?;
-        Self::start_with_exe(ctx, scopes, invoke_exe).await
+        Self::start_with_exe(ctx, scopes, builtins, invoke_exe).await
     }
 
     /// [`Self::start`] with the `/v1/invoke` binary explicit — tests use
@@ -38,6 +41,7 @@ impl Broker {
     async fn start_with_exe(
         ctx: Arc<Ctx>,
         scopes: Vec<String>,
+        builtins: Vec<String>,
         invoke_exe: PathBuf,
     ) -> Result<Self> {
         let dir = crate::session::runtime_dir(&ctx).join(format!(
@@ -55,6 +59,7 @@ impl Broker {
             token: token.clone(),
             scopes,
             invoke_exe,
+            builtins,
         });
         let accept_task = tokio::spawn(rpc::serve_unix(listener, backend));
 
@@ -81,11 +86,15 @@ struct Ephemeral {
     token: String,
     scopes: Vec<String>,
     invoke_exe: PathBuf,
+    /// Built-in command names for `/v1/invoke`, from the composition root.
+    builtins: Vec<String>,
 }
 
 #[async_trait::async_trait]
 impl Backend for Ephemeral {
-    fn authenticate(&self, token: &str) -> Option<Auth> {
+    fn authenticate(&self, token: &str, _trusted: bool) -> Option<Auth> {
+        // The ephemeral broker is UDS-only (always trusted); its single
+        // per-invocation token has no admin/network distinction.
         (token == self.token).then(|| Auth {
             scopes: self.scopes.clone(),
             account: None,
@@ -101,6 +110,10 @@ impl Backend for Ephemeral {
 
     fn invoke_exe(&self) -> PathBuf {
         self.invoke_exe.clone()
+    }
+
+    fn builtin_names(&self) -> &[String] {
+        &self.builtins
     }
 
     // Plugins use the plugin allowlist (AUD-124); the invoking process is
@@ -164,8 +177,12 @@ mod tests {
         let ctx = Arc::new(Ctx::with_dir(config_dir, Default::default()).unwrap());
         let scopes: Vec<String> = scopes.iter().map(|scope| (*scope).to_owned()).collect();
         let broker = match invoke_exe {
-            Some(exe) => Broker::start_with_exe(ctx, scopes, exe).await.unwrap(),
-            None => Broker::start(ctx, scopes).await.unwrap(),
+            Some(exe) => Broker::start_with_exe(ctx, scopes, vec!["library".to_owned()], exe)
+                .await
+                .unwrap(),
+            None => Broker::start(ctx, scopes, vec!["library".to_owned()])
+                .await
+                .unwrap(),
         };
         (broker, tmp)
     }

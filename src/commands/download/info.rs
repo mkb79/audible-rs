@@ -40,13 +40,8 @@ pub(super) fn info_command() -> clap::Command {
 
 /// `download info` — one table row per artifact kind and audio format.
 pub(super) async fn info(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
-    let strings = |id: &str| -> Vec<String> {
-        matches
-            .get_many::<String>(id)
-            .map(|v| v.cloned().collect())
-            .unwrap_or_default()
-    };
-    show(ctx, strings("asin"), strings("title")).await
+    use crate::commands::strings;
+    show(ctx, strings(matches, "asin"), strings(matches, "title")).await
 }
 
 async fn show(ctx: &Ctx, asins: Vec<String>, titles: Vec<String>) -> Result<()> {
@@ -152,8 +147,9 @@ struct AssetFacts {
     codecs: Vec<String>,
     /// `product_images` sizes, ascending.
     image_sizes: Vec<u32>,
-    /// `is_pdf_url_available` — `None` when the source cannot know
-    /// (catalog products carry no ownership data).
+    /// [`crate::models::library::pdf_available`] (flag with `pdf_url`
+    /// fallback) — `None` when the source cannot know (catalog products
+    /// carry no ownership data).
     pdf_available: Option<bool>,
     /// `customer_rights.is_consumable_offline` (library docs only).
     offline_right: Option<bool>,
@@ -188,7 +184,7 @@ fn facts(value: &Value) -> AssetFacts {
     AssetFacts {
         codecs,
         image_sizes,
-        pdf_available: value.get("is_pdf_url_available").and_then(Value::as_bool),
+        pdf_available: crate::models::library::pdf_available(value),
         offline_right: value
             .get("customer_rights")
             .and_then(|rights| rights.get("is_consumable_offline"))
@@ -208,24 +204,18 @@ async fn catalog_facts(
     asins: &[String],
     into: &mut BTreeMap<String, AssetFacts>,
 ) -> Result<()> {
-    for chunk in asins.chunks(50) {
-        let body: Value = client
-            .request(Method::GET, "/1.0/catalog/products")
-            .country_code(marketplace)
-            .query("asins", chunk.join(","))
-            .query("response_groups", "product_attrs,media")
-            .query("image_sizes", "252,408,500,558,900,1215")
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        if let Some(products) = body.get("products").and_then(Value::as_array) {
-            for product in products {
-                if let Some(asin) = product.get("asin").and_then(Value::as_str) {
-                    into.insert(asin.to_owned(), facts(product));
-                }
-            }
+    let products = crate::commands::catalog::products_batched(
+        client,
+        marketplace,
+        asins,
+        "product_attrs,media",
+        Some("252,408,500,558,900,1215"),
+        1,
+    )
+    .await?;
+    for product in &products {
+        if let Some(asin) = product.get("asin").and_then(Value::as_str) {
+            into.insert(asin.to_owned(), facts(product));
         }
     }
     Ok(())

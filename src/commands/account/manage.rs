@@ -436,11 +436,18 @@ pub(super) async fn export(ctx: &Ctx, args: ExportArgs) -> Result<()> {
                 Ok(password) => SecretString::from(password),
                 Err(_) => prompt_new_password()?,
             };
-            authfile::write(
-                &auth.export_value(),
-                Protection::Encrypted(KdfParams::default()),
-                Some(&password),
-            )?
+            // Argon2id off the async runtime (E5) — authfile's own
+            // contract, honored everywhere else.
+            let value = auth.export_value();
+            tokio::task::spawn_blocking(move || {
+                authfile::write(
+                    &value,
+                    Protection::Encrypted(KdfParams::default()),
+                    Some(&password),
+                )
+            })
+            .await
+            .expect("blocking export task must not panic")?
         }
         "plain" => {
             eprintln!(

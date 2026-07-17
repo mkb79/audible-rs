@@ -3,21 +3,40 @@
 //! Title search reuses the FTS5 engine (Db::search), so the same query
 //! syntax works here and in `library search`.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::{Arg, ArgAction};
+
+/// The named-but-empty contract (audit 2026-07-17, D7): a user who
+/// explicitly named items (`--asin`/`--title`) and got nothing back must
+/// see a failing exit code, not a note — the seven commands disagreed and
+/// scripts could rely on none of them. Sweeps that name nothing
+/// (`--missing`, `--all`) legitimately stay exit 0 when empty; this is
+/// only for explicit selections.
+pub(crate) fn require_nonempty(resolved: &[String], what: &str) -> anyhow::Result<()> {
+    if resolved.is_empty() {
+        anyhow::bail!("the requested {what} resolved to nothing — nothing to do");
+    }
+    Ok(())
+}
+
+/// The shared `--asin` input: comma-separated **and** repeatable, one
+/// contract everywhere. Commands that pair it with their own `--title`
+/// semantics (`library add/remove`, `collections …`) take this arg and
+/// override only the help — hand-rolling the arg is what let `--asin A,B`
+/// silently become one literal ASIN "A,B" in half the commands.
+pub(crate) fn asin_arg() -> Arg {
+    Arg::new("asin")
+        .long("asin")
+        .value_name("ASIN")
+        .value_delimiter(',')
+        .action(ArgAction::Append)
+        .help("Item ASIN(s) — comma-separated or repeated")
+}
 
 /// Adds the shared `--asin`/`--title` inputs (both multi: comma-separated
 /// and repeatable). Requiredness/grouping is the caller's choice.
 pub(crate) fn item_source_args(cmd: clap::Command) -> clap::Command {
-    cmd.arg(
-        Arg::new("asin")
-            .long("asin")
-            .value_name("ASIN")
-            .value_delimiter(',')
-            .action(ArgAction::Append)
-            .help("Item ASIN(s) — comma-separated or repeated"),
-    )
-    .arg(
+    cmd.arg(asin_arg()).arg(
         Arg::new("title")
             .long("title")
             .value_name("QUERY")
@@ -123,61 +142,19 @@ pub(crate) async fn resolve_asins(
                 choose(&candidates[0], &mut push);
             }
             _ => {
-                if console::Term::stderr().is_term() {
-                    let labels: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
-                    // `report(false)`: the default echoes the whole chosen
-                    // list back as one long line — we clear the picker and
-                    // print a concise confirmation instead.
-                    let selection = dialoguer::MultiSelect::with_theme(
-                        &dialoguer::theme::ColorfulTheme::default(),
-                    )
-                    .with_prompt(format!(
-                        "Matches for {:?} — space toggles · a all · enter confirms",
-                        tq.query
-                    ))
-                    .items(&labels)
-                    .report(false)
-                    .interact_on(&console::Term::stderr())?;
-                    interacted = true;
-                    if selection.is_empty() {
-                        eprintln!("no titles selected for {:?}", tq.query);
-                    } else {
-                        eprintln!(
-                            "selected {} of {} for {:?}",
-                            selection.len(),
-                            candidates.len(),
-                            tq.query
-                        );
-                        for i in selection {
-                            choose(&candidates[i], &mut push);
-                        }
-                    }
+                let labels: Vec<String> = candidates.iter().map(|c| c.label.clone()).collect();
+                // A podcast show can only be taken whole non-interactively.
+                let hint = if candidates.iter().any(|c| c.kind == "podcast") {
+                    "; a podcast show is among them — use --asin <ASIN> to take all its \
+                     episodes, or narrow the query"
                 } else {
-                    // Cap the dump — a single podcast show can expand to
-                    // hundreds of episode rows.
-                    const MAX_LISTED: usize = 20;
-                    let mut listing: Vec<String> = candidates
-                        .iter()
-                        .take(MAX_LISTED)
-                        .map(|c| format!("  {}", c.label))
-                        .collect();
-                    if candidates.len() > MAX_LISTED {
-                        listing.push(format!("  … and {} more", candidates.len() - MAX_LISTED));
-                    }
-                    // A podcast show can only be taken whole non-interactively.
-                    let hint = if candidates.iter().any(|c| c.kind == "podcast") {
-                        "; a podcast show is among them — use --asin <ASIN> to take all its \
-                         episodes, or narrow the query"
-                    } else {
-                        "; pass --asin or run interactively"
-                    };
-                    bail!(
-                        "{} titles match {:?}{}:\n{}",
-                        candidates.len(),
-                        tq.query,
-                        hint,
-                        listing.join("\n"),
-                    );
+                    "; pass --asin or run interactively"
+                };
+                let selection =
+                    super::prompt::pick_many("Matches", "titles", &tq.query, &labels, hint)?;
+                interacted = true;
+                for i in selection {
+                    choose(&candidates[i], &mut push);
                 }
             }
         }

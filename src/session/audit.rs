@@ -8,7 +8,6 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -33,19 +32,66 @@ pub struct AuditEntry {
     pub detail: Option<String>,
 }
 
-/// Append-only audit writer (serialized across connections).
+/// A queued writer job: an entry, or a flush handshake.
+enum Job {
+    Write(AuditEntry),
+    Flush(std::sync::mpsc::Sender<()>),
+}
+
+/// Append-only audit writer. The file IO runs on a dedicated blocking
+/// writer thread (audit 2026-07-17, E4 — it used to run synchronously
+/// under a mutex on the daemon's hottest async path, per request); the
+/// async side only enqueues. Ordering is the channel's FIFO.
 pub struct AuditLog {
     path: PathBuf,
-    lock: Mutex<()>,
+    sender: std::sync::mpsc::Sender<Job>,
+}
+
+fn write_entry(path: &Path, entry: &AuditEntry) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if std::fs::metadata(path).is_ok_and(|meta| meta.len() >= ROTATE_AT_BYTES) {
+        let _ = std::fs::rename(path, path.with_extension("jsonl.1"));
+    }
+    let mut line = serde_json::to_vec(entry).expect("audit entry serializes");
+    line.push(b'\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    file.write_all(&line)
 }
 
 impl AuditLog {
     /// Log at `<data_dir>/agent-audit.jsonl`.
     pub fn new(data_dir: &Path) -> Self {
-        Self {
-            path: data_dir.join("agent-audit.jsonl"),
-            lock: Mutex::new(()),
-        }
+        let path = data_dir.join("agent-audit.jsonl");
+        let (sender, receiver) = std::sync::mpsc::channel::<Job>();
+        let writer_path = path.clone();
+        std::thread::Builder::new()
+            .name("audit-writer".into())
+            .spawn(move || {
+                for job in receiver {
+                    match job {
+                        Job::Write(entry) => {
+                            if let Err(error) = write_entry(&writer_path, &entry) {
+                                tracing::warn!(%error, "could not write the audit log");
+                            }
+                        }
+                        Job::Flush(done) => {
+                            let _ = done.send(());
+                        }
+                    }
+                }
+            })
+            .expect("the audit writer thread spawns");
+        Self { path, sender }
     }
 
     /// The log path.
@@ -53,34 +99,20 @@ impl AuditLog {
         &self.path
     }
 
-    /// Appends one entry; errors are swallowed to a warning (auditing
-    /// must never break serving).
+    /// Enqueues one entry for the writer thread; failures on the write
+    /// side are swallowed to a warning there (auditing must never break
+    /// serving), and a dead writer drops entries silently the same way.
     pub fn append(&self, entry: &AuditEntry) {
-        if let Err(error) = self.try_append(entry) {
-            tracing::warn!(%error, "could not write the audit log");
-        }
+        let _ = self.sender.send(Job::Write(entry.clone()));
     }
 
-    fn try_append(&self, entry: &AuditEntry) -> std::io::Result<()> {
-        let _guard = self.lock.lock().expect("audit lock");
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+    /// Waits until every entry enqueued so far has hit the disk (tests,
+    /// orderly shutdown).
+    pub fn flush(&self) {
+        let (done, wait) = std::sync::mpsc::channel();
+        if self.sender.send(Job::Flush(done)).is_ok() {
+            let _ = wait.recv();
         }
-        if std::fs::metadata(&self.path).is_ok_and(|meta| meta.len() >= ROTATE_AT_BYTES) {
-            let _ = std::fs::rename(&self.path, self.path.with_extension("jsonl.1"));
-        }
-        let mut line = serde_json::to_vec(entry).expect("audit entry serializes");
-        line.push(b'\n');
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
-        }
-        file.write_all(&line)
     }
 
     /// Reads the recorded entries (oldest first). Malformed lines are
@@ -119,6 +151,7 @@ mod tests {
             detail: Some("external:cde-ta-g7g.amazon.com".into()),
             ..entry("web", 403)
         });
+        log.flush();
         let entries = log.read();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].caller, "admin");

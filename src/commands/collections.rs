@@ -98,11 +98,7 @@ impl super::Command for CollectionsCommand {
     }
 
     async fn run(&self, ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
-        let strings = |m: &clap::ArgMatches, id: &str| -> Vec<String> {
-            m.get_many::<String>(id)
-                .map(|v| v.cloned().collect())
-                .unwrap_or_default()
-        };
+        use crate::commands::strings;
         match matches.subcommand() {
             Some(("list", _)) => list_lists(ctx).await,
             Some((name, sub)) => {
@@ -154,13 +150,7 @@ fn noun_command(noun: &'static Noun) -> clap::Command {
     };
     let mut add = clap::Command::new("add")
         .about(format!("Add titles to {}", noun.phrase))
-        .arg(
-            Arg::new("asin")
-                .long("asin")
-                .action(ArgAction::Append)
-                .value_name("ASIN")
-                .help("ASIN to add (repeatable)"),
-        )
+        .arg(super::items::asin_arg().help("ASIN(s) to add — comma-separated or repeated"))
         .arg(
             Arg::new("title")
                 .long("title")
@@ -176,13 +166,7 @@ fn noun_command(noun: &'static Noun) -> clap::Command {
         );
     let mut remove = clap::Command::new("remove")
         .about(format!("Remove titles from {}", noun.phrase))
-        .arg(
-            Arg::new("asin")
-                .long("asin")
-                .action(ArgAction::Append)
-                .value_name("ASIN")
-                .help("ASIN to remove (repeatable)"),
-        )
+        .arg(super::items::asin_arg().help("ASIN(s) to remove — comma-separated or repeated"))
         .arg(
             Arg::new("title")
                 .long("title")
@@ -369,6 +353,9 @@ async fn noun_add(
             }
         }
     };
+    // D7: a named selection that resolves to nothing fails; items that are
+    // merely already present keep the friendly note below.
+    crate::commands::items::require_nonempty(&asins, "titles")?;
 
     // Pre-check so a duplicate does not silently vanish into the 202.
     let current: HashSet<String> = collection_items(client, &marketplace, noun.collection_id)
@@ -441,23 +428,10 @@ async fn noun_remove(
         catalog_details(client, &marketplace, &all).await?
     };
     let targets = resolve_removals(&items, &details, asins, titles, noun.phrase)?;
-    if targets.is_empty() {
-        eprintln!("nothing to remove");
-        return Ok(());
-    }
+    // D7: a named selection that resolves to nothing fails.
+    crate::commands::items::require_nonempty(&targets, "titles")?;
 
-    let meta = collection_meta(client, &marketplace, noun.collection_id).await?;
-    let mut request = client
-        .request(
-            Method::DELETE,
-            format!("/1.0/collections/{}/items", noun.collection_id),
-        )
-        .country_code(&marketplace)
-        .query("state_token", &meta.state_token);
-    for asin in &targets {
-        request = request.query("asins", asin);
-    }
-    request.send().await?.error_for_status()?;
+    delete_collection_items(client, &marketplace, noun.collection_id, &targets).await?;
     for asin in &targets {
         eprintln!("removed {asin} from {}", noun.phrase);
     }
@@ -466,16 +440,6 @@ async fn noun_remove(
     }
     Ok(())
 }
-
-/// Delays before each `--sync` delta attempt: the mutation 202 is
-/// "accepted" — the library index follows asynchronously (verified live:
-/// an immediate delta reported 0 changes, one a few seconds later carried
-/// the `is_archived` flip; the app polls `/1.0/library` the same way).
-const SYNC_ATTEMPT_DELAYS: [std::time::Duration; 3] = [
-    std::time::Duration::from_secs(2),
-    std::time::Duration::from_secs(5),
-    std::time::Duration::from_secs(10),
-];
 
 /// After an archive mutation: run delta syncs until the local item docs
 /// reflect the new `is_archived` state (`--sync`, bounded retries because
@@ -495,38 +459,17 @@ async fn sync_or_hint(
     asins: &[String],
     expect_archived: bool,
 ) -> Result<()> {
-    if !sync {
-        eprintln!("note: run `audible library sync` to reflect the change in the local library");
-        return Ok(());
-    }
-    let db = ctx.open_library_db().await?;
-    for (attempt, delay) in SYNC_ATTEMPT_DELAYS.iter().enumerate() {
-        if attempt > 0 {
-            eprintln!("change not in the library view yet; retrying the sync…");
-        }
-        tokio::time::sleep(*delay).await;
-        crate::commands::library::sync(ctx, false, false, false).await?;
-        let mut reflected = true;
-        for asin in asins {
-            let doc = db.item_doc(asin.clone(), marketplace.to_owned()).await?;
-            // Items without a library doc (e.g. archived podcast parents
-            // outside the items table) cannot be verified — treat as done.
-            if let Some(doc) = doc
-                && archived_in_doc(&doc) != Some(expect_archived)
-            {
-                reflected = false;
-                break;
-            }
-        }
-        if reflected {
-            return Ok(());
-        }
-    }
-    eprintln!(
-        "warning: the archive change has not reached the library view yet — \
-         run `audible library sync` again in a moment"
-    );
-    Ok(())
+    crate::commands::library::poll_until_reflected(
+        ctx,
+        sync,
+        marketplace,
+        asins,
+        "the archive change",
+        // Items without a library doc (e.g. archived podcast parents
+        // outside the items table) cannot be verified — treat as done.
+        |doc| doc.is_none_or(|doc| archived_in_doc(doc) == Some(expect_archived)),
+    )
+    .await
 }
 
 /// The `is_archived` value of a stored library item doc, if present.
@@ -651,19 +594,33 @@ pub(crate) async fn remove_from_archive(
     if targets.is_empty() {
         return Ok(targets);
     }
-    let meta = collection_meta(client, marketplace, ARCHIVE.collection_id).await?;
+    delete_collection_items(client, marketplace, ARCHIVE.collection_id, &targets).await?;
+    Ok(targets)
+}
+
+/// The batched collection-item DELETE (audit 2026-07-17, D6): fetch the
+/// collection's `state_token` and issue `DELETE …/items` with repeated
+/// `asins=` params. One home for `collections … remove` and the archive
+/// removal used by `library add` (re-adding a title unarchives it).
+async fn delete_collection_items(
+    client: &Client,
+    marketplace: &str,
+    collection_id: &str,
+    asins: &[String],
+) -> Result<()> {
+    let meta = collection_meta(client, marketplace, collection_id).await?;
     let mut request = client
         .request(
             Method::DELETE,
-            format!("/1.0/collections/{}/items", ARCHIVE.collection_id),
+            format!("/1.0/collections/{collection_id}/items"),
         )
         .country_code(marketplace)
         .query("state_token", &meta.state_token);
-    for asin in &targets {
+    for asin in asins {
         request = request.query("asins", asin);
     }
     request.send().await?.error_for_status()?;
-    Ok(targets)
+    Ok(())
 }
 
 /// Resolves `remove` inputs to collection ASINs: explicit ASINs must be
@@ -939,6 +896,13 @@ mod tests {
             ])
             .is_ok()
         );
+        // The shared --asin contract (AUD-220/C3): comma-separated splits
+        // exactly like repetition — "A,B" is never one literal ASIN.
+        let matches = parse(&["collections", "wishlist", "add", "--asin", "B0A,B0B"]).unwrap();
+        let (_, sub) = matches.subcommand().unwrap();
+        let (_, sub) = sub.subcommand().unwrap();
+        let asins: Vec<&String> = sub.get_many::<String>("asin").unwrap().collect();
+        assert_eq!(asins, ["B0A", "B0B"]);
         // Wishlist add takes --asin and/or --title (catalog search) but no --sync.
         assert!(parse(&["collections", "wishlist", "add"]).is_err());
         assert!(parse(&["collections", "wishlist", "add", "--title", "x"]).is_ok());

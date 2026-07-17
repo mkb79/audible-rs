@@ -7,6 +7,7 @@
 //! `db check`, `db reset` (archived architecture §12).
 
 use super::prompt::confirm;
+use super::strings;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
@@ -233,19 +234,11 @@ impl super::Command for DbCommand {
         match matches.subcommand() {
             Some(("downloads", sub)) => match sub.subcommand() {
                 Some(("list", list)) => {
-                    let asins: Vec<String> = list
-                        .get_many::<String>("asin")
-                        .map(|v| v.cloned().collect())
-                        .unwrap_or_default();
-                    let titles: Vec<String> = list
-                        .get_many::<String>("title")
-                        .map(|v| v.cloned().collect())
-                        .unwrap_or_default();
                     let has_source = list.contains_id("asin") || list.contains_id("title");
                     downloads_list(
                         ctx,
-                        asins,
-                        titles,
+                        strings(list, "asin"),
+                        strings(list, "title"),
                         has_source,
                         list.get_one::<String>("kind").cloned(),
                         list.get_one::<String>("variant").cloned(),
@@ -266,19 +259,11 @@ impl super::Command for DbCommand {
                     .await
                 }
                 Some(("remove", remove)) => {
-                    let asins: Vec<String> = remove
-                        .get_many::<String>("asin")
-                        .map(|v| v.cloned().collect())
-                        .unwrap_or_default();
-                    let titles: Vec<String> = remove
-                        .get_many::<String>("title")
-                        .map(|v| v.cloned().collect())
-                        .unwrap_or_default();
                     let has_source = remove.contains_id("asin") || remove.contains_id("title");
                     downloads_remove(
                         ctx,
-                        asins,
-                        titles,
+                        strings(remove, "asin"),
+                        strings(remove, "title"),
                         has_source,
                         remove.get_one::<String>("kind").cloned(),
                         remove.get_one::<String>("format").cloned(),
@@ -296,14 +281,8 @@ impl super::Command for DbCommand {
                 Some(("remove", remove)) => {
                     library_remove(
                         ctx,
-                        remove
-                            .get_many::<String>("asin")
-                            .map(|v| v.cloned().collect())
-                            .unwrap_or_default(),
-                        remove
-                            .get_many::<String>("title")
-                            .map(|v| v.cloned().collect())
-                            .unwrap_or_default(),
+                        strings(remove, "asin"),
+                        strings(remove, "title"),
                         remove.get_flag("yes"),
                     )
                     .await
@@ -519,7 +498,8 @@ async fn db_restore(ctx: &Ctx, source: &str, yes: bool) -> Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::copy(src, &dest)
+    tokio::fs::copy(src, &dest)
+        .await
         .with_context(|| format!("could not copy {source} to {}", dest.display()))?;
     // A stale WAL/shm/lock from the old DB must not survive, or SQLite
     // would apply the old WAL on top of the restored file.
@@ -645,7 +625,15 @@ fn classify_downloads(entries: Vec<DownloadEntry>) -> DownloadsReport {
 /// `path` vs `missing path`).
 fn download_table(ctx: &Ctx, entries: &[DownloadEntry], path_header: &str) {
     ctx.print(&Output::table(
-        vec!["asin", "kind", "variant", "format", "size", path_header],
+        vec![
+            "asin",
+            "mp",
+            "kind",
+            "variant",
+            "format",
+            "size",
+            path_header,
+        ],
         entries
             .iter()
             .map(|entry| {
@@ -655,6 +643,7 @@ fn download_table(ctx: &Ctx, entries: &[DownloadEntry], path_header: &str) {
                     .unwrap_or_else(|| "-".to_owned());
                 vec![
                     entry.asin.clone(),
+                    entry.marketplace.clone(),
                     entry.kind.clone(),
                     entry.variant.clone(),
                     show_format(&entry.content_format),
@@ -664,6 +653,17 @@ fn download_table(ctx: &Ctx, entries: &[DownloadEntry], path_header: &str) {
             })
             .collect(),
     ));
+}
+
+/// The marketplace set to narrow `db downloads` matching to, but only
+/// when the user explicitly selected one (`-m`/`AUDIBLE_MARKETPLACE`) —
+/// without a selector these commands deliberately span the whole
+/// per-account database.
+fn explicit_marketplaces(ctx: &Ctx) -> Result<Option<std::collections::HashSet<String>>> {
+    if ctx.marketplace_selector().is_none() {
+        return Ok(None);
+    }
+    Ok(Some(ctx.marketplaces()?.into_iter().collect()))
 }
 
 /// Human-readable content_format (empty → `-`).
@@ -723,27 +723,32 @@ async fn downloads_list(
     // without a filter spans the whole per-account database.
     let asin_filter: Option<std::collections::HashSet<String>> = if has_source {
         let marketplace = ctx.marketplace_single()?;
-        Some(
-            crate::commands::items::resolve_asins(
-                &db,
-                &marketplace,
-                asins,
-                titles,
-                crate::commands::items::PodcastMode::Episodes,
-            )
-            .await?
-            .into_iter()
-            .collect(),
+        let resolved = crate::commands::items::resolve_asins(
+            &db,
+            &marketplace,
+            asins,
+            titles,
+            crate::commands::items::PodcastMode::Episodes,
         )
+        .await?;
+        // D7: a named selection that resolves to nothing fails.
+        crate::commands::items::require_nonempty(&resolved, "items")?;
+        Some(resolved.into_iter().collect())
     } else {
         None
     };
 
+    // An explicit -m narrows the records too (A15); without one the
+    // listing keeps spanning the whole per-account database.
+    let marketplace_filter = explicit_marketplaces(ctx)?;
     let mut entries = db.download_entries().await?;
     entries.retain(|entry| {
         asin_filter
             .as_ref()
             .is_none_or(|set| set.contains(&entry.asin))
+            && marketplace_filter
+                .as_ref()
+                .is_none_or(|set| set.contains(&entry.marketplace))
             && kind.as_ref().is_none_or(|k| &entry.kind == k)
             && variant.as_ref().is_none_or(|v| &entry.variant == v)
     });
@@ -825,22 +830,26 @@ async fn downloads_remove(
 
     let asin_filter: Option<std::collections::HashSet<String>> = if has_source {
         let marketplace = ctx.marketplace_single()?;
-        Some(
-            crate::commands::items::resolve_asins(
-                &db,
-                &marketplace,
-                asins,
-                titles,
-                crate::commands::items::PodcastMode::Episodes,
-            )
-            .await?
-            .into_iter()
-            .collect(),
+        let resolved = crate::commands::items::resolve_asins(
+            &db,
+            &marketplace,
+            asins,
+            titles,
+            crate::commands::items::PodcastMode::Episodes,
         )
+        .await?;
+        // D7: a named selection that resolves to nothing fails.
+        crate::commands::items::require_nonempty(&resolved, "items")?;
+        Some(resolved.into_iter().collect())
     } else {
         None
     };
 
+    // An explicit -m narrows what gets removed (A15): matching was by
+    // ASIN across the whole per-account database, so with the same title
+    // on de and us a `remove --asin X -m de --with-files` also deleted
+    // the us record and file, invisibly.
+    let marketplace_filter = explicit_marketplaces(ctx)?;
     let matched: Vec<DownloadEntry> = db
         .download_entries()
         .await?
@@ -849,6 +858,9 @@ async fn downloads_remove(
             asin_filter
                 .as_ref()
                 .is_none_or(|set| set.contains(&entry.asin))
+                && marketplace_filter
+                    .as_ref()
+                    .is_none_or(|set| set.contains(&entry.marketplace))
                 && kind.as_ref().is_none_or(|k| &entry.kind == k)
                 && format.as_ref().is_none_or(|f| &entry.content_format == f)
                 && variant.as_ref().is_none_or(|v| &entry.variant == v)
@@ -856,8 +868,9 @@ async fn downloads_remove(
         .collect();
 
     if matched.is_empty() {
-        eprintln!("no matching tracked downloads");
-        return Ok(());
+        // D7: remove always names its selection (a filter is required), so
+        // matching nothing is an error scripts can see.
+        bail!("no tracked downloads match the given filters — nothing removed");
     }
     download_table(ctx, &matched, "path");
 

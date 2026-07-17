@@ -293,18 +293,21 @@ impl Db {
                        LEFT JOIN items i
                          ON i.asin = e.parent_asin AND i.marketplace = e.marketplace
                        WHERE e.marketplace = ?1 AND e.is_deleted = 0
-                         AND lower(e.full_title) LIKE '%' || lower(?2) || '%'
+                         AND lower(e.full_title) LIKE '%' || lower(?2) || '%' ESCAPE '\\'
                        ORDER BY e.full_title, e.asin
                        LIMIT ?3";
             let mut statement = conn.prepare_cached(sql)?;
             let rows = statement
-                .query_map(rusqlite::params![marketplace, query, limit], |row| {
-                    Ok(EpisodeHit {
-                        asin: row.get(0)?,
-                        full_title: row.get(1)?,
-                        parent_title: row.get(2)?,
-                    })
-                })?
+                .query_map(
+                    rusqlite::params![marketplace, super::escape_like(&query), limit],
+                    |row| {
+                        Ok(EpisodeHit {
+                            asin: row.get(0)?,
+                            full_title: row.get(1)?,
+                            parent_title: row.get(2)?,
+                        })
+                    },
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         })

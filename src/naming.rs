@@ -14,11 +14,19 @@ use crate::config::paths;
 /// Resolved download directory: the settings bundle's `download_dir`,
 /// else the platform data dir's `downloads` subfolder.
 pub(crate) fn download_dir(ctx: &Ctx) -> Result<PathBuf> {
-    let dir = ctx
-        .settings_view()?
+    Ok(download_dir_for(&ctx.settings_view()?))
+}
+
+/// The effective download directory of a resolved settings view: the
+/// configured `download_dir`, else `<data_dir>/downloads`, tilde-expanded.
+/// One rule (audit 2026-07-17, D6): the broker's `/v1/config/resolved`
+/// restated it and could have drifted into reporting a directory the
+/// downloads never use.
+pub(crate) fn download_dir_for(view: &crate::config::resolve::SettingsView) -> PathBuf {
+    let dir = view
         .download_dir(None, None)
         .unwrap_or_else(|| paths::data_dir().join("downloads"));
-    Ok(expand_tilde(&dir))
+    expand_tilde(&dir)
 }
 
 pub(crate) fn expand_tilde(path: &Path) -> PathBuf {
@@ -96,7 +104,9 @@ pub(crate) fn resolve_base(
 /// current resolved settings. Falls back to the ASIN when the item is not in the
 /// local database (no metadata to name it by).
 pub(crate) async fn base_filename(ctx: &Ctx, marketplace: &str, asin: &str) -> Result<String> {
-    let Some(values) = template_context(ctx, marketplace, asin).await else {
+    // The bare-ASIN fallback is only for titles the database genuinely does
+    // not know; a database failure propagates (see `template_context`).
+    let Some(values) = template_context(ctx, marketplace, asin).await? else {
         return Ok(asin.to_owned());
     };
     let (mode, max_len, template) = template_settings(ctx);
@@ -119,10 +129,49 @@ fn template_settings(ctx: &Ctx) -> (crate::config::schema::FilenameMode, usize, 
     (mode, max_len, template)
 }
 
+/// Guards a rendered base name against filename collisions between
+/// distinct titles (audit 2026-07-17, A7): the non-ASIN modes slug
+/// "Dune: Part 1" and "Dune Part 1" to the same `Dune_Part_1`, and the
+/// second download silently overwrote the first. When the stem already
+/// belongs to another ASIN's records, the ASIN is appended — the same
+/// disambiguator the `asin_*` modes and `%asin%` templates carry anyway.
+/// Same-ASIN matches (re-downloads, other qualities) pass unchanged.
+pub(crate) async fn disambiguated_base(
+    ctx: &Ctx,
+    dir: &Path,
+    base: String,
+    asin: &str,
+) -> Result<String> {
+    let db = ctx
+        .open_library_db()
+        .await
+        .context("could not consult the download records (collision check)")?;
+    let stem = join_relative(dir, &base);
+    let prefix = format!("{}.", stem.display());
+    let owners = db
+        .colliding_asins(prefix, asin.to_owned())
+        .await
+        .context("could not consult the download records (collision check)")?;
+    if owners.is_empty() {
+        return Ok(base);
+    }
+    eprintln!(
+        "{asin}: filename {base:?} already belongs to {} — appending the ASIN to keep \
+         both titles' files apart",
+        owners.join(", ")
+    );
+    Ok(format!("{base} [{asin}]"))
+}
+
 /// The fixed filename suffix (discriminator + extension) for a download
 /// artifact. `ext` is the actual on-disk extension (e.g. `aaxc`/`mp3` for
 /// audio) — for reorganize it comes from the existing file, so a renamed
 /// (`.mp3`) audio keeps its extension.
+///
+/// This is the **single home** of the suffix contract (audit 2026-07-17,
+/// C5): the artifact writers build their file names through it, and
+/// `reorganize` recomputes the same names from the records — a suffix
+/// renamed in only one place would silently stop matching fresh files.
 pub(crate) fn artifact_suffix(kind: &str, content_format: &str, ext: &str) -> String {
     match kind {
         // Audio keeps the quality segment; the decrypted m4b and any reencode
@@ -131,6 +180,7 @@ pub(crate) fn artifact_suffix(kind: &str, content_format: &str, ext: &str) -> St
         "audio" => format!(".{content_format}.{ext}"),
         "cover" => format!(".cover_{content_format}.{ext}"),
         "chapter" => format!(".chapters_{content_format}.{ext}"),
+        "annotation" => ".annot".to_owned(),
         _ => format!(".{ext}"), // pdf and any single-extension artifact
     }
 }
@@ -150,14 +200,20 @@ pub(crate) fn sidecar_path(file: &Path) -> Option<PathBuf> {
 }
 
 /// Collects the scalar variable values for a `custom` filename template from
-/// the stored item document (plus context). `None` when the item is not in the
-/// local database. Keys match [`crate::config::filename_template::TEMPLATE_VARS`].
+/// the stored item document (plus context). `Ok(None)` when the item is
+/// genuinely not in the local database; a database failure is an **error**,
+/// never "unknown" — folding the two together permanently named files by
+/// their bare ASIN (or refiled them as external) after one transient
+/// SQLite error. Keys match [`crate::config::filename_template::TEMPLATE_VARS`].
 pub(crate) async fn template_context(
     ctx: &Ctx,
     marketplace: &str,
     asin: &str,
-) -> Option<std::collections::HashMap<&'static str, String>> {
-    let db = ctx.open_library_db().await.ok()?;
+) -> Result<Option<std::collections::HashMap<&'static str, String>>> {
+    let db = ctx
+        .open_library_db()
+        .await
+        .context("could not consult the library database for file naming")?;
     // Books live in `items`; podcast episodes in `episodes`. Fall back to the
     // episode doc so episodes are named/reorganized by title, not bare ASIN
     // (AUD-100); `parent_asin` lets us group them under their show.
@@ -170,18 +226,25 @@ pub(crate) async fn template_context(
     let (doc_str, parent_asin) = match db
         .item_doc_including_deleted(asin.to_owned(), marketplace.to_owned())
         .await
+        .context("could not consult the library database for file naming")?
     {
-        Ok(Some(doc)) => (doc, None),
-        _ => {
-            let (doc, parent) = db
+        Some(doc) => (doc, None),
+        None => {
+            match db
                 .episode_doc_including_deleted(asin.to_owned(), marketplace.to_owned())
                 .await
-                .ok()??;
-            (doc, Some(parent))
+                .context("could not consult the library database for file naming")?
+            {
+                Some((doc, parent)) => (doc, Some(parent)),
+                None => return Ok(None),
+            }
         }
     };
-    let doc: serde_json::Value = serde_json::from_str(&doc_str).ok()?;
-    Some(values_from_doc(ctx, &db, marketplace, asin, &doc, parent_asin).await)
+    let doc: serde_json::Value = serde_json::from_str(&doc_str)
+        .with_context(|| format!("the stored document for {asin} is not valid JSON"))?;
+    Ok(Some(
+        values_from_doc(ctx, &db, marketplace, asin, &doc, parent_asin).await,
+    ))
 }
 
 /// The naming variables held in one document, whatever its source.
@@ -695,6 +758,7 @@ mod tests {
             ".chapters_tree.json"
         );
         assert_eq!(artifact_suffix("pdf", "", "pdf"), ".pdf");
+        assert_eq!(artifact_suffix("annotation", "", "annot"), ".annot");
     }
 
     #[test]

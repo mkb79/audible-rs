@@ -217,18 +217,44 @@ pub fn state_token_iso(raw: &str) -> Option<String> {
         value
     };
     let timestamp = time::OffsetDateTime::from_unix_timestamp(seconds).ok()?;
-    let format =
-        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
-    timestamp.format(format).ok()
+    crate::timefmt::format_iso(timestamp)
+}
+
+/// The `items_fts` columns a `col:term` filter may target. `asin` is
+/// UNINDEXED and cannot appear in a MATCH, so it is deliberately absent.
+const FTS_FILTER_COLUMNS: [&str; 3] = ["full_title", "title", "subtitle"];
+
+/// True when every `:` in the query directly follows a real FTS column
+/// name (`title:dune`, negated `-title:dune`). Only then is a colon FTS5
+/// syntax; in "Dune: Part Two" it is title punctuation, and passing it
+/// through would make FTS5 read `Dune:` as a filter on a nonexistent
+/// column ("no such column: Dune").
+fn colons_are_column_filters(text: &str) -> bool {
+    let mut found_any = false;
+    for (idx, _) in text.match_indices(':') {
+        let ident_rev: String = text[..idx]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        let ident: String = ident_rev.chars().rev().collect();
+        if !FTS_FILTER_COLUMNS.contains(&ident.as_str()) {
+            return false;
+        }
+        found_any = true;
+    }
+    found_any
 }
 
 /// Prepares a user query for an FTS5 `MATCH`. Plain words become
 /// quoted prefix tokens joined by an implicit AND, so `jed` finds
 /// "Jedi" and punctuation can no longer break the query syntax
 /// (`c++` would otherwise be a syntax error). If the input already
-/// uses FTS5 syntax (`"`, `*`, `(`, `)`, `:`, `^`, or a bare
-/// `AND`/`OR`/`NOT`/`NEAR` token), it is passed through unchanged so
-/// power users keep full control.
+/// uses FTS5 syntax (`"`, `*`, `(`, `)`, `^`, a `column:` filter, or a
+/// bare `AND`/`OR`/`NOT`/`NEAR` token), it is passed through unchanged
+/// so power users keep full control. A colon after anything that is
+/// not an FTS column ("Dune: Part Two") is ordinary punctuation and is
+/// tokenized like any other word.
 pub fn prepare_fts_query(input: &str) -> String {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -239,8 +265,8 @@ pub fn prepare_fts_query(input: &str) -> String {
         || trimmed.contains('*')
         || trimmed.contains('(')
         || trimmed.contains(')')
-        || trimmed.contains(':')
         || trimmed.contains('^')
+        || colons_are_column_filters(trimmed)
     {
         return trimmed.to_owned();
     }
@@ -1165,7 +1191,7 @@ impl Db {
                             CAST(runtime_min AS TEXT), CAST(language AS TEXT), kind
                      FROM v_books
                      WHERE marketplace IN ({placeholders}) {}
-                       AND lower(full_title) LIKE '%' || lower(?) || '%'
+                       AND lower(full_title) LIKE '%' || lower(?) || '%' ESCAPE '\\'
                      ORDER BY full_title, marketplace
                      LIMIT ?",
                     super::kind_clause("kind", &item_kinds)
@@ -1176,7 +1202,8 @@ impl Db {
                 for marketplace in &marketplaces {
                     params.push(marketplace);
                 }
-                params.push(&query);
+                let like_query = super::escape_like(&query);
+                params.push(&like_query);
                 params.push(&limit);
                 let rows = statement
                     .query_map(params.as_slice(), book_row)?
@@ -1245,7 +1272,7 @@ impl Db {
                 return Ok(Vec::new());
             }
             let sql = format!(
-                "SELECT doc FROM items WHERE marketplace IN ({}) AND is_deleted = 0
+                "SELECT asin, doc FROM items WHERE marketplace IN ({}) AND is_deleted = 0
                  ORDER BY marketplace, asin",
                 in_placeholders(marketplaces.len())
             );
@@ -1255,10 +1282,24 @@ impl Db {
                 .map(|m| m as &dyn rusqlite::ToSql)
                 .collect();
             let docs = statement
-                .query_map(params.as_slice(), |row| row.get::<_, String>(0))?
+                .query_map(params.as_slice(), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
-                .map(|doc| serde_json::from_str(&doc).unwrap_or(serde_json::Value::Null))
+                .filter_map(|(asin, doc)| match serde_json::from_str(&doc) {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        // Name the damaged row instead of exporting a silent
+                        // `null` nobody can trace back to its item.
+                        tracing::warn!(
+                            asin,
+                            %error,
+                            "stored document is not valid JSON; skipping it in the export"
+                        );
+                        None
+                    }
+                })
                 .collect();
             Ok(docs)
         })
@@ -1344,33 +1385,78 @@ impl Db {
         asin: String,
     ) -> Result<bool, DbError> {
         self.call(move |conn| {
+            // One transaction: parent and episodes flip together, or not at
+            // all — a crash between the two updates left the parent hidden
+            // with its episodes still active until a delta sync touched the
+            // parent again (its `apply_page` sibling was already atomic).
+            let tx = conn.transaction()?;
             let now = crate::db::now_iso_utc();
-            let flipped = conn.execute(
+            let flipped = tx.execute(
                 "UPDATE items SET is_deleted = 1, deleted_utc = ?, updated_utc = ?
                  WHERE asin = ? AND marketplace = ? AND is_deleted = 0",
                 rusqlite::params![now, now, asin, marketplace],
             )?;
             if flipped > 0 {
                 // A soft-deleted parent takes its episodes with it.
-                conn.execute(
+                tx.execute(
                     "UPDATE episodes SET is_deleted = 1, deleted_utc = ?, updated_utc = ?
                      WHERE parent_asin = ? AND marketplace = ? AND is_deleted = 0",
                     rusqlite::params![now, now, asin, marketplace],
                 )?;
             }
+            tx.commit()?;
             Ok(flipped > 0)
         })
         .await
     }
 
-    /// Timestamp of the last successful sync request, if any.
-    pub async fn last_sync_utc(&self) -> Result<Option<String>, DbError> {
-        self.call(|conn| {
-            Ok(conn.query_row(
-                "SELECT MAX(response_time_utc) FROM sync_log WHERE http_status = 200",
-                [],
-                |row| row.get(0),
-            )?)
+    /// Persists the sync state token — called **only after every page of
+    /// a sync stream has been applied** (audit 2026-07-17, A16, verified
+    /// live 2026-07-17): the server sends `State-Token` on the **first**
+    /// page of a paginated sync, a snapshot marker from before the pages.
+    /// Persisting it together with its page meant an abort after page 1
+    /// advanced the token past the never-applied remainder, and the next
+    /// delta silently skipped those items until a manual `--full`.
+    pub async fn persist_state_token(
+        &self,
+        marketplace: String,
+        raw: String,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            conn.execute(
+                "UPDATE sync_state SET last_state_token_raw = ?, last_state_token_utc = ?
+                 WHERE marketplace = ?",
+                rusqlite::params![raw, state_token_iso(&raw), marketplace],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Timestamp of the last successful sync request for each of the
+    /// given marketplaces. A marketplace that never synced successfully
+    /// is absent from the map — staleness is per marketplace, so a fresh
+    /// `de` must not hide a never-synced `us` (and one stale marketplace
+    /// must not force a resync of its fresh siblings).
+    pub async fn last_sync_utc_by_marketplace(
+        &self,
+        marketplaces: Vec<String>,
+    ) -> Result<std::collections::HashMap<String, String>, DbError> {
+        if marketplaces.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        self.call(move |conn| {
+            let placeholders = vec!["?"; marketplaces.len()].join(",");
+            let sql = format!(
+                "SELECT marketplace, MAX(response_time_utc) FROM sync_log
+                 WHERE http_status = 200 AND marketplace IN ({placeholders})
+                 GROUP BY marketplace"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(marketplaces.iter()), |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+            Ok(rows.collect::<Result<_, _>>()?)
         })
         .await
     }
@@ -1701,7 +1787,15 @@ mod tests {
         // State token persisted (and converted to ISO) for this marketplace.
         let settings = db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
         assert_eq!(settings.last_state_token.as_deref(), Some("1750000000000"));
-        assert!(db.last_sync_utc().await.unwrap().is_some());
+        let last = db
+            .last_sync_utc_by_marketplace(vec![MP.to_owned(), "zz".to_owned()])
+            .await
+            .unwrap();
+        // The synced marketplace has a timestamp; a never-synced one must
+        // not inherit it (that hid a stale/empty marketplace behind a
+        // fresh sibling and made auto-sync skip it).
+        assert!(last.contains_key(MP));
+        assert!(!last.contains_key("zz"));
 
         // Soft delete via a second page.
         let log = SyncLogEntry {
@@ -2729,6 +2823,38 @@ mod tests {
         assert_eq!(prepare_fts_query("NEAR(jedi sith)"), "NEAR(jedi sith)");
     }
 
+    #[test]
+    fn prepare_fts_query_colon_is_punctuation_unless_column_filter() {
+        // A subtitle colon is punctuation: tokenized, not passed through
+        // (passthrough would raise "no such column: Dune" in FTS5).
+        assert_eq!(
+            prepare_fts_query("Dune: Part Two"),
+            "\"Dune:\"* \"Part\"* \"Two\"*"
+        );
+        // Colon glued to the next word, same story.
+        assert_eq!(
+            prepare_fts_query("12:30 to Paris"),
+            "\"12:30\"* \"to\"* \"Paris\"*"
+        );
+        // A real column filter is power-user FTS5 syntax: passthrough.
+        assert_eq!(prepare_fts_query("title:dune"), "title:dune");
+        assert_eq!(prepare_fts_query("subtitle:two"), "subtitle:two");
+        assert_eq!(
+            prepare_fts_query("full_title:dune title:part"),
+            "full_title:dune title:part"
+        );
+        // Negated column filter keeps working.
+        assert_eq!(prepare_fts_query("-title:dune"), "-title:dune");
+        // One real filter plus one punctuation colon: not a valid filter
+        // query as a whole, so it is tokenized.
+        assert_eq!(
+            prepare_fts_query("title:dune Bonus: extras"),
+            "\"title:dune\"* \"Bonus:\"* \"extras\"*"
+        );
+        // The UNINDEXED asin column cannot be matched: treat as text.
+        assert_eq!(prepare_fts_query("asin:B0EXAMPLE1"), "\"asin:B0EXAMPLE1\"*");
+    }
+
     #[tokio::test]
     async fn fts_prefix_search_finds_partial_title() {
         let (_dir, db) = open_temp().await;
@@ -2773,5 +2899,97 @@ mod tests {
             .unwrap();
         assert_eq!(exact.len(), 1);
         assert_eq!(exact[0].asin, "SW1");
+    }
+
+    /// A16: `%`/`_` in a LIKE search are literal text, not wildcards —
+    /// "100%" must not match every title starting with "100".
+    #[tokio::test]
+    async fn like_search_treats_percent_and_underscore_literally() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        db.apply_page(
+            MP.into(),
+            vec![
+                item("PC1", "100% Motivation"),
+                item("YR1", "100 Jahre Einsamkeit"),
+            ],
+            vec![],
+            SyncLogEntry {
+                request_time_utc: now_iso_utc(),
+                response_time_utc: now_iso_utc(),
+                http_status: Some(200),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let results = db
+            .search(vec![MP.to_owned()], vec![], "100%".into(), 10, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "\"100%\" must match only the literal title"
+        );
+        assert_eq!(results[0].asin, "PC1");
+
+        // `_` is literal too ("100_" would otherwise match "100 J…").
+        let results = db
+            .search(vec![MP.to_owned()], vec![], "100_".into(), 10, false)
+            .await
+            .unwrap();
+        assert!(results.is_empty(), "\"100_\" matches nothing literally");
+    }
+
+    #[tokio::test]
+    async fn fts_search_matches_titles_with_colons() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        db.apply_page(
+            MP.into(),
+            vec![item("DN2", "Dune: Part Two"), item("SW1", "Star Wars")],
+            vec![],
+            SyncLogEntry {
+                request_time_utc: now_iso_utc(),
+                response_time_utc: now_iso_utc(),
+                http_status: Some(200),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Searching with the colon typed exactly as the title carries it
+        // used to raise "no such column: Dune"; it must match the title.
+        let results = db
+            .search(
+                vec![MP.to_owned()],
+                vec![],
+                "Dune: Part Two".into(),
+                10,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1, "colon query must find 'Dune: Part Two'");
+        assert_eq!(results[0].asin, "DN2");
+
+        // A genuine column filter still reaches FTS5 untouched.
+        let filtered = db
+            .search(
+                vec![MP.to_owned()],
+                vec![],
+                "full_title:dune".into(),
+                10,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].asin, "DN2");
     }
 }

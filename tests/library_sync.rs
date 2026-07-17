@@ -3,7 +3,7 @@
 
 use audible_rs::api::client::Client;
 use audible_rs::auth::Authenticator;
-use audible_rs::commands::library::{SyncOptions, sync_library};
+use audible_rs::commands::library::{DEFAULT_RESPONSE_GROUPS, SyncOptions, sync_library};
 use audible_rs::db::Db;
 use reqwest::Url;
 use wiremock::matchers::{method, path, query_param, query_param_is_missing};
@@ -36,6 +36,68 @@ fn book(asin: &str, title: &str, status: &str) -> serde_json::Value {
         "purchase_date": "2024-01-01",
         "runtime_length_min": 100,
     })
+}
+
+/// A16 (verified live 2026-07-17): the server sends `State-Token` on the
+/// FIRST page — a snapshot marker from before the pages. An abort on a
+/// later page must therefore leave the stored token untouched; persisting
+/// it with page 1 made the next delta silently skip the never-applied
+/// remainder until a manual --full.
+#[tokio::test]
+async fn aborted_sync_never_advances_the_state_token() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path().join("library_test.sqlite"), 5000)
+        .await
+        .unwrap();
+    let client = make_client(&server);
+
+    // Page 1 carries the token (the live wire shape) and a continuation.
+    Mock::given(method("GET"))
+        .and(path("/1.0/library"))
+        .and(query_param_is_missing("continuation_token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"items": [book("A1", "Erstes Buch", "Active")]}))
+                .insert_header("State-Token", "1750000000000")
+                .insert_header("Continuation-Token", "page-2"),
+        )
+        .mount(&server)
+        .await;
+    // Page 2 fails: the sync aborts mid-stream.
+    Mock::given(method("GET"))
+        .and(path("/1.0/library"))
+        .and(query_param("continuation_token", "page-2"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    let result = sync_library(
+        &client,
+        &db,
+        "de",
+        SyncOptions {
+            full: false,
+            page_size: 1,
+            resolve_podcasts: false,
+            record_changes: false,
+            change_retention_days: 0,
+        },
+        &tokio::sync::Semaphore::new(10),
+    )
+    .await;
+    assert!(result.is_err(), "the aborted stream must error");
+
+    // The stored token is untouched — the next run is still a full sync
+    // that fetches the never-applied remainder.
+    let settings = db
+        .ensure_sync_state("de".into(), DEFAULT_RESPONSE_GROUPS.to_owned())
+        .await
+        .unwrap();
+    assert_eq!(
+        settings.last_state_token, None,
+        "an aborted sync must not advance the state token"
+    );
 }
 
 #[tokio::test]

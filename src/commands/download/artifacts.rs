@@ -33,10 +33,13 @@ pub(super) async fn download_audio(
     // The content format is part of the file name so different qualities
     // of the same title do not overwrite each other on disk.
     let format = license.content_format.as_deref().filter(|f| !f.is_empty());
-    let planned = match format {
-        Some(format) => join_relative(dir, &format!("{base}.{format}.aaxc")),
-        None => join_relative(dir, &format!("{base}.aaxc")),
-    };
+    let planned = join_relative(
+        dir,
+        &format!(
+            "{base}{}",
+            crate::naming::artifact_suffix("audio", format.unwrap_or(""), "aaxc")
+        ),
+    );
 
     // The on-disk extension follows the response Content-Type: the plain,
     // DRM-free variants (`audio/mpeg` → .mp3, AAC-in-MP4 → .m4a) get their
@@ -65,6 +68,9 @@ pub(super) async fn download_audio(
             ("audio/mp4", "m4a"),
             ("audio/x-m4a", "m4a"),
         ],
+        // Gate a resumed partial on the license's content version (A9):
+        // a corrected re-release must not be resumed over old bytes.
+        license.version_tag().as_deref(),
     )
     .await?;
     match outcome {
@@ -77,8 +83,8 @@ pub(super) async fn download_audio(
     // encrypted `.aaxc` downloads need one — plain media (mp3/m4a podcast
     // episodes) is DRM-free and its license carries only an empty voucher, so
     // write the sidecar only when the file actually stayed encrypted.
-    if dest.extension().and_then(|ext| ext.to_str()) == Some("aaxc") {
-        write_keyfile(client, license, &dest.with_extension("voucher"));
+    if let Some(sidecar) = crate::naming::sidecar_path(&dest) {
+        write_keyfile(client, license, &sidecar);
     }
 
     let size = std::fs::metadata(&dest).ok().map(|m| m.len());
@@ -95,7 +101,7 @@ pub(super) async fn download_audio(
         size,
         no_db_write,
     )
-    .await;
+    .await?;
 
     Ok(dest.display().to_string())
 }
@@ -121,9 +127,11 @@ fn write_keyfile(client: &crate::api::client::Client, license: &DownloadLicense,
         }
     };
     let body = serde_json::json!({ "key": voucher.key, "iv": voucher.iv });
-    if let Err(error) = std::fs::write(
+    // Owner-only from the first byte: the sidecar holds the decrypted
+    // content key, the same secrecy class as the auth file.
+    if let Err(error) = super::write_private(
         dest,
-        serde_json::to_vec_pretty(&body).expect("strings serialize"),
+        &serde_json::to_vec_pretty(&body).expect("strings serialize"),
     ) {
         eprintln!("warning: could not write {}: {error}", dest.display());
     }
@@ -146,7 +154,7 @@ pub(super) async fn write_chapters(
     // chapter files of the same title stay distinct.
     let token = chapter_type.as_str();
 
-    if !force && !no_db_write && variant_recorded(ctx, marketplace, asin, "chapter", token).await {
+    if !force && !no_db_write && variant_recorded(ctx, marketplace, asin, "chapter", token).await? {
         eprintln!("skipping chapter ({token}) — already recorded (use --force)");
         return Ok(None);
     }
@@ -162,7 +170,13 @@ pub(super) async fn write_chapters(
     )
     .await
     .context("could not fetch chapter metadata")?;
-    let dest = join_relative(dir, &format!("{base}.chapters_{token}.json"));
+    let dest = join_relative(
+        dir,
+        &format!(
+            "{base}{}",
+            crate::naming::artifact_suffix("chapter", token, "json")
+        ),
+    );
     std::fs::write(&dest, serde_json::to_vec_pretty(&chapters)?)
         .with_context(|| format!("could not write {}", dest.display()))?;
 
@@ -180,7 +194,7 @@ pub(super) async fn write_chapters(
         size,
         no_db_write,
     )
-    .await;
+    .await?;
 
     Ok(Some(dest.display().to_string()))
 }
@@ -222,9 +236,14 @@ pub(super) async fn download_pdf(
         "https://www.audible.{}/companion-file/{asin}",
         locale.domain
     );
-    let dest = join_relative(dir, &format!("{base}.pdf"));
+    let dest = join_relative(
+        dir,
+        &format!("{base}{}", crate::naming::artifact_suffix("pdf", "", "pdf")),
+    );
 
-    // PDFs are small — no byte bar, just counted in the summary.
+    // PDFs are small — no byte bar, just counted in the summary. No
+    // version tag: a companion PDF carries no license version, and its
+    // unknown size already routes re-issues through the 416 guard.
     let (_, dest) = match download_to_file(
         client,
         &url,
@@ -234,6 +253,7 @@ pub(super) async fn download_pdf(
         None,
         &["application/octet-stream", "application/pdf"],
         &[],
+        None,
     )
     .await
     {
@@ -259,7 +279,7 @@ pub(super) async fn download_pdf(
         size,
         no_db_write,
     )
-    .await;
+    .await?;
 
     Ok(Some(dest.display().to_string()))
 }
@@ -275,12 +295,7 @@ pub(super) async fn download_pdf(
 /// the probe is now skipped.
 async fn library_pdf_flag(ctx: &Ctx, marketplace: &str, asin: &str) -> Option<bool> {
     let value = stored_doc(ctx, marketplace, asin).await?;
-    let flag = value
-        .get("is_pdf_url_available")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-        || value.get("pdf_url").is_some_and(|v| !v.is_null());
-    Some(flag)
+    crate::models::library::pdf_available(&value)
 }
 
 /// Downloads each requested cover size to `<base>.cover_<size>.jpg`. Every size
@@ -306,7 +321,8 @@ pub(super) async fn download_covers(
     let mut fetched: Option<Option<ImageMap>> = None;
 
     for size in sizes {
-        if !force && !no_db_write && variant_recorded(ctx, marketplace, asin, "cover", size).await {
+        if !force && !no_db_write && variant_recorded(ctx, marketplace, asin, "cover", size).await?
+        {
             eprintln!("skipping cover {size} — already recorded (use --force)");
             continue;
         }
@@ -337,9 +353,26 @@ pub(super) async fn download_covers(
             }
             continue;
         };
-        let dest = join_relative(dir, &format!("{base}.cover_{size}.jpg"));
+        let dest = join_relative(
+            dir,
+            &format!(
+                "{base}{}",
+                crate::naming::artifact_suffix("cover", size, "jpg")
+            ),
+        );
         // Covers are small — no byte bar, just counted in the summary.
-        download_to_file(client, &url, &dest, None, force, None, &["image/jpeg"], &[]).await?;
+        download_to_file(
+            client,
+            &url,
+            &dest,
+            None,
+            force,
+            None,
+            &["image/jpeg"],
+            &[],
+            None,
+        )
+        .await?;
 
         let file_size = std::fs::metadata(&dest).ok().map(|m| m.len());
         record_download(
@@ -355,7 +388,7 @@ pub(super) async fn download_covers(
             file_size,
             no_db_write,
         )
-        .await;
+        .await?;
         written.push(dest.display().to_string());
     }
     Ok(written)

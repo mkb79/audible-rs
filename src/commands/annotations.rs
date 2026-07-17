@@ -108,14 +108,8 @@ async fn sync(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
     let marketplaces = ctx.marketplaces()?;
     let save = matches.get_flag("save");
 
-    let many = |key| -> Vec<String> {
-        matches
-            .get_many::<String>(key)
-            .map(|values| values.cloned().collect())
-            .unwrap_or_default()
-    };
-    let asins = many("asin");
-    let titles = many("title");
+    let asins = crate::commands::strings(matches, "asin");
+    let titles = crate::commands::strings(matches, "title");
     let all = matches.get_flag("all");
     let missing = matches.get_flag("missing");
     if asins.is_empty() && titles.is_empty() && !all && !missing {
@@ -123,6 +117,7 @@ async fn sync(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
     }
 
     let (mut ok, mut none, mut failed) = (0usize, 0usize, 0usize);
+    let mut total_targets = 0usize;
     for marketplace in &marketplaces {
         let targets = if all {
             db.annotation_target_asins(marketplace.clone(), false)
@@ -141,6 +136,7 @@ async fn sync(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
             .await?
         };
 
+        total_targets += targets.len();
         let db_ref = &db;
         let outcomes: Vec<&'static str> =
             futures::stream::iter(targets)
@@ -158,7 +154,18 @@ async fn sync(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
             }
         }
     }
+    // D7: an explicitly named selection that resolved to nothing on every
+    // marketplace is an error, not a "0 synced" success.
+    if total_targets == 0 && !all && !missing {
+        crate::commands::items::require_nonempty(&[], "items")?;
+    }
     eprintln!("annotations: {ok} synced · {none} none · {failed} failed");
+    // Exit-code honesty (its siblings download/library sync bail the same
+    // way): a run with failures must not report success — an agent job or
+    // cron would otherwise treat a total network failure as code 0.
+    if failed > 0 {
+        bail!("{failed} item(s) failed to sync annotations");
+    }
     Ok(())
 }
 
@@ -241,7 +248,17 @@ async fn save_annot(
 ) -> Result<std::path::PathBuf> {
     let base = base_filename(ctx, marketplace, asin).await?;
     let dir = download_dir(ctx)?;
-    let dest = dir.join(format!("{base}.annot"));
+    // join_relative, not a plain join (audit 2026-07-17, C6): a custom
+    // template embeds `/` in `base`, and a plain join records
+    // mixed-separator paths on Windows — the exact hazard the naming
+    // module exists to prevent; `reorganize` already goes through it.
+    let dest = crate::naming::join_relative(
+        &dir,
+        &format!(
+            "{base}{}",
+            crate::naming::artifact_suffix("annotation", "", "annot")
+        ),
+    );
     // `base` may nest folders (custom filename mode); create the parent.
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;

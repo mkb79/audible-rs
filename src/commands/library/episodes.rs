@@ -65,13 +65,8 @@ pub(crate) async fn episodes(
     let (query_limit, offset) = crate::commands::page_window(limit, page);
     if let Some(kinds) = missing {
         // Expand `all` and normalize to the canonical kind order, deduped —
-        // exactly as `library list --missing` does.
-        let all = kinds.iter().any(|kind| kind == "all");
-        let kinds: Vec<String> = crate::db::DOWNLOAD_KINDS
-            .iter()
-            .filter(|kind| all || kinds.iter().any(|k| k == *kind))
-            .map(|kind| (*kind).to_owned())
-            .collect();
+        // the same rule as `library list --missing`.
+        let kinds = crate::db::normalize_download_kinds(&kinds);
         let rows = if limit == 0 && page > 1 {
             Vec::new() // page 1 holds everything; no need to query
         } else {
