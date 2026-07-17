@@ -306,7 +306,6 @@ fn https_file_name(url: &str) -> Result<String> {
 async fn download_https(url: &str, dest: &Path) -> Result<(u64, String)> {
     use futures::StreamExt as _;
     use sha2::{Digest as _, Sha256};
-    use std::io::Write as _;
 
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
@@ -336,7 +335,8 @@ async fn download_https(url: &str, dest: &Path) -> Result<(u64, String)> {
         );
     }
 
-    let mut file = std::fs::File::create(dest)?;
+    use tokio::io::AsyncWriteExt as _;
+    let mut file = tokio::fs::File::create(dest).await?;
     let mut hasher = Sha256::new();
     let mut size: u64 = 0;
     let mut stream = response.bytes_stream();
@@ -350,8 +350,9 @@ async fn download_https(url: &str, dest: &Path) -> Result<(u64, String)> {
             );
         }
         hasher.update(&chunk);
-        file.write_all(&chunk)?;
+        file.write_all(&chunk).await?;
     }
+    file.flush().await?;
     let sha256: String = hasher
         .finalize()
         .iter()

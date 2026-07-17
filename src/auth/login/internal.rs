@@ -289,7 +289,7 @@ fn dump_page(step: usize, label: &str, text: &str) {
     };
     let path = std::path::Path::new(&dir).join(format!("login-{step:02}-{label}.html"));
     match std::fs::write(&path, text) {
-        Ok(()) => eprintln!(
+        Ok(()) => tracing::warn!(
             "login: dumped sign-in page to {} \
              (contains session form tokens — review before sharing)",
             path.display()

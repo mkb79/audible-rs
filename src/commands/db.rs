@@ -519,7 +519,8 @@ async fn db_restore(ctx: &Ctx, source: &str, yes: bool) -> Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::copy(src, &dest)
+    tokio::fs::copy(src, &dest)
+        .await
         .with_context(|| format!("could not copy {source} to {}", dest.display()))?;
     // A stale WAL/shm/lock from the old DB must not survive, or SQLite
     // would apply the old WAL on top of the restored file.

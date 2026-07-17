@@ -169,8 +169,8 @@ fn warn_if_readable(path: &Path) {
         if let Ok(meta) = fs::metadata(path)
             && meta.permissions().mode() & 0o077 != 0
         {
-            eprintln!(
-                "warning: {} is readable by group/other — it holds plaintext \
+            tracing::warn!(
+                "{} is readable by group/other — it holds plaintext \
                  passphrases; run `chmod 600 {}`",
                 path.display(),
                 path.display()
