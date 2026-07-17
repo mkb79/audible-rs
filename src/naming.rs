@@ -155,11 +155,20 @@ pub(crate) async fn template_context(
     // Books live in `items`; podcast episodes in `episodes`. Fall back to the
     // episode doc so episodes are named/reorganized by title, not bare ASIN
     // (AUD-100); `parent_asin` lets us group them under their show.
-    let (doc_str, parent_asin) = match db.item_doc(asin.to_owned(), marketplace.to_owned()).await {
+    //
+    // Deliberately including titles that left the library (AUD-216): the doc
+    // describes the file we downloaded, and the file outlives the loan. A
+    // return only soft-deletes — doc, download records and file all survive —
+    // so honouring the flag here would stand a downloaded title's name up on
+    // whether it is still yours, and strand every returned show's episodes.
+    let (doc_str, parent_asin) = match db
+        .item_doc_including_deleted(asin.to_owned(), marketplace.to_owned())
+        .await
+    {
         Ok(Some(doc)) => (doc, None),
         _ => {
             let (doc, parent) = db
-                .episode_doc(asin.to_owned(), marketplace.to_owned())
+                .episode_doc_including_deleted(asin.to_owned(), marketplace.to_owned())
                 .await
                 .ok()??;
             (doc, Some(parent))
