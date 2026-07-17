@@ -1410,6 +1410,29 @@ impl Db {
         .await
     }
 
+    /// Persists the sync state token — called **only after every page of
+    /// a sync stream has been applied** (audit 2026-07-17, A16, verified
+    /// live 2026-07-17): the server sends `State-Token` on the **first**
+    /// page of a paginated sync, a snapshot marker from before the pages.
+    /// Persisting it together with its page meant an abort after page 1
+    /// advanced the token past the never-applied remainder, and the next
+    /// delta silently skipped those items until a manual `--full`.
+    pub async fn persist_state_token(
+        &self,
+        marketplace: String,
+        raw: String,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            conn.execute(
+                "UPDATE sync_state SET last_state_token_raw = ?, last_state_token_utc = ?
+                 WHERE marketplace = ?",
+                rusqlite::params![raw, state_token_iso(&raw), marketplace],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Timestamp of the last successful sync request for each of the
     /// given marketplaces. A marketplace that never synced successfully
     /// is absent from the map — staleness is per marketplace, so a fresh

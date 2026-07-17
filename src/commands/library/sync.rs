@@ -58,7 +58,10 @@ pub struct SyncSummary {
 /// Syncs the library into the database: full (status=Active) without a
 /// state token, delta (status=Active,Revoked plus `state_token`) with
 /// one. Each page is applied atomically together with its audit-log
-/// row; the freshest state token wins.
+/// row; the state token is persisted only after **every** page applied
+/// (verified live, audit A16: the server sends it on the *first* page —
+/// a pre-pagination snapshot marker — so persisting it per page let an
+/// aborted run advance the token past never-applied items).
 pub async fn sync_library(
     client: &Client,
     db: &Db,
@@ -116,6 +119,9 @@ pub async fn sync_library(
     };
     // Podcast parents touched in this run: (asin, announced episode count).
     let mut podcast_parents: Vec<(String, Option<u64>)> = Vec::new();
+    // The freshest token any page delivered — persisted only after the
+    // whole stream applied (A16).
+    let mut response_token: Option<String> = None;
 
     while let Some(page) = {
         let request_time = db::now_iso_utc();
@@ -192,7 +198,9 @@ pub async fn sync_library(
                 upserts,
                 deletes,
                 log,
-                page.state_token.clone(),
+                // Never per page (A16) — the token advances below, once
+                // the whole stream has been applied.
+                None,
                 recording,
             )
             .await?;
@@ -203,10 +211,20 @@ pub async fn sync_library(
             removed = outcome.removed.len(),
             "library page applied"
         );
-        if page.state_token.is_some() {
-            summary.state_token = page.state_token;
+        if let Some(token) = page.state_token {
+            response_token = Some(token.clone());
+            summary.state_token = Some(token);
         }
         summary.changes.extend(outcome);
+    }
+
+    // Every page applied — only now may the token advance (A16, verified
+    // live: the server sends it on the FIRST page, so an abort between
+    // pages must leave the stored token untouched or the next delta
+    // would silently skip the never-applied remainder).
+    if let Some(token) = &response_token {
+        db.persist_state_token(marketplace.to_owned(), token.clone())
+            .await?;
     }
 
     // Resolve podcasts concurrently, bounded by the shared semaphore (each
