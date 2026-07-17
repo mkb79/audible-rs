@@ -101,6 +101,11 @@ type Jobs = Arc<RwLock<HashMap<String, JobEntry>>>;
 /// every per-account `Ctx` is built from.
 struct AgentBackend {
     config_dir: PathBuf,
+    /// The parsed config, cached against `config.toml`'s mtime (E4): the
+    /// probe Ctx used to re-read and re-parse the file on every `/v1`
+    /// request. `allowed_hosts` deliberately keeps its own fresh load —
+    /// that one is fail-closed security state (AUD-121).
+    config_cache: std::sync::Mutex<Option<(std::time::SystemTime, crate::config::schema::Config)>>,
     /// Base instant for the sessions' atomic last-use stamps.
     epoch: Instant,
     admin_token: String,
@@ -355,13 +360,36 @@ impl AgentBackend {
     /// client cell is unset — unlock happens lazily on first `client()`
     /// via the account's `password_source`.
     fn build_ctx(&self, account: Option<&str>) -> Result<Ctx> {
-        Ctx::with_dir(
+        Ok(Ctx::with_config(
             self.config_dir.clone(),
+            self.cached_config()?,
             Selectors {
                 account: account.map(str::to_owned),
                 ..Default::default()
             },
-        )
+        ))
+    }
+
+    /// The parsed config, reloaded only when `config.toml`'s mtime
+    /// changed on disk (the TokenStore pattern). A missing mtime (exotic
+    /// filesystem) falls back to loading every time.
+    fn cached_config(&self) -> Result<crate::config::schema::Config> {
+        let path = self.config_dir.join("config.toml");
+        let mtime = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        let mut cache = self.config_cache.lock().expect("config cache lock");
+        if let (Some(mtime), Some((cached_mtime, config))) = (mtime, cache.as_ref())
+            && mtime == *cached_mtime
+        {
+            return Ok(config.clone());
+        }
+        let config = crate::config::schema::Config::load(&path)
+            .with_context(|| format!("could not load {}", path.display()))?;
+        if let Some(mtime) = mtime {
+            *cache = Some((mtime, config.clone()));
+        }
+        Ok(config)
     }
 
     /// Drops sessions idle longer than the timeout.
@@ -405,6 +433,7 @@ pub async fn serve(ctx: &Ctx, builtins: Vec<String>) -> Result<()> {
         .unwrap_or_else(|_| Duration::from_secs(900));
     let backend = Arc::new(AgentBackend {
         config_dir: ctx.config_dir().to_owned(),
+        config_cache: std::sync::Mutex::new(None),
         epoch: Instant::now(),
         admin_token,
         invoke_exe: std::env::current_exe().context("could not resolve the own binary")?,
@@ -541,6 +570,7 @@ mod tests {
     fn backend(ctx: &Ctx, idle: Duration) -> AgentBackend {
         AgentBackend {
             config_dir: ctx.config_dir().to_owned(),
+            config_cache: std::sync::Mutex::new(None),
             epoch: Instant::now(),
             admin_token: "T".into(),
             invoke_exe: PathBuf::from("/bin/true"),
