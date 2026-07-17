@@ -743,18 +743,17 @@ async fn downloads_list(
     // without a filter spans the whole per-account database.
     let asin_filter: Option<std::collections::HashSet<String>> = if has_source {
         let marketplace = ctx.marketplace_single()?;
-        Some(
-            crate::commands::items::resolve_asins(
-                &db,
-                &marketplace,
-                asins,
-                titles,
-                crate::commands::items::PodcastMode::Episodes,
-            )
-            .await?
-            .into_iter()
-            .collect(),
+        let resolved = crate::commands::items::resolve_asins(
+            &db,
+            &marketplace,
+            asins,
+            titles,
+            crate::commands::items::PodcastMode::Episodes,
         )
+        .await?;
+        // D7: a named selection that resolves to nothing fails.
+        crate::commands::items::require_nonempty(&resolved, "items")?;
+        Some(resolved.into_iter().collect())
     } else {
         None
     };
@@ -851,18 +850,17 @@ async fn downloads_remove(
 
     let asin_filter: Option<std::collections::HashSet<String>> = if has_source {
         let marketplace = ctx.marketplace_single()?;
-        Some(
-            crate::commands::items::resolve_asins(
-                &db,
-                &marketplace,
-                asins,
-                titles,
-                crate::commands::items::PodcastMode::Episodes,
-            )
-            .await?
-            .into_iter()
-            .collect(),
+        let resolved = crate::commands::items::resolve_asins(
+            &db,
+            &marketplace,
+            asins,
+            titles,
+            crate::commands::items::PodcastMode::Episodes,
         )
+        .await?;
+        // D7: a named selection that resolves to nothing fails.
+        crate::commands::items::require_nonempty(&resolved, "items")?;
+        Some(resolved.into_iter().collect())
     } else {
         None
     };
@@ -890,8 +888,9 @@ async fn downloads_remove(
         .collect();
 
     if matched.is_empty() {
-        eprintln!("no matching tracked downloads");
-        return Ok(());
+        // D7: remove always names its selection (a filter is required), so
+        // matching nothing is an error scripts can see.
+        bail!("no tracked downloads match the given filters — nothing removed");
     }
     download_table(ctx, &matched, "path");
 

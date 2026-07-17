@@ -362,6 +362,13 @@ impl super::Command for DownloadCommand {
         )
         .await?;
         if asins.is_empty() {
+            // D7: an explicitly named selection that resolves to nothing
+            // is an error; an empty --missing sweep is a legitimate no-op.
+            if matches.get_many::<String>("asin").is_some()
+                || matches.get_many::<String>("title").is_some()
+            {
+                crate::commands::items::require_nonempty(&asins, "items")?;
+            }
             eprintln!("no items to download");
             return Ok(());
         }

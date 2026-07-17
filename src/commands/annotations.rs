@@ -123,6 +123,7 @@ async fn sync(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
     }
 
     let (mut ok, mut none, mut failed) = (0usize, 0usize, 0usize);
+    let mut total_targets = 0usize;
     for marketplace in &marketplaces {
         let targets = if all {
             db.annotation_target_asins(marketplace.clone(), false)
@@ -141,6 +142,7 @@ async fn sync(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
             .await?
         };
 
+        total_targets += targets.len();
         let db_ref = &db;
         let outcomes: Vec<&'static str> =
             futures::stream::iter(targets)
@@ -157,6 +159,11 @@ async fn sync(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
                 _ => failed += 1,
             }
         }
+    }
+    // D7: an explicitly named selection that resolved to nothing on every
+    // marketplace is an error, not a "0 synced" success.
+    if total_targets == 0 && !all && !missing {
+        crate::commands::items::require_nonempty(&[], "items")?;
     }
     eprintln!("annotations: {ok} synced · {none} none · {failed} failed");
     // Exit-code honesty (its siblings download/library sync bail the same

@@ -357,6 +357,9 @@ async fn noun_add(
             }
         }
     };
+    // D7: a named selection that resolves to nothing fails; items that are
+    // merely already present keep the friendly note below.
+    crate::commands::items::require_nonempty(&asins, "titles")?;
 
     // Pre-check so a duplicate does not silently vanish into the 202.
     let current: HashSet<String> = collection_items(client, &marketplace, noun.collection_id)
@@ -429,10 +432,8 @@ async fn noun_remove(
         catalog_details(client, &marketplace, &all).await?
     };
     let targets = resolve_removals(&items, &details, asins, titles, noun.phrase)?;
-    if targets.is_empty() {
-        eprintln!("nothing to remove");
-        return Ok(());
-    }
+    // D7: a named selection that resolves to nothing fails.
+    crate::commands::items::require_nonempty(&targets, "titles")?;
 
     let meta = collection_meta(client, &marketplace, noun.collection_id).await?;
     let mut request = client

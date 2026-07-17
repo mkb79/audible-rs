@@ -6,6 +6,19 @@
 use anyhow::Result;
 use clap::{Arg, ArgAction};
 
+/// The named-but-empty contract (audit 2026-07-17, D7): a user who
+/// explicitly named items (`--asin`/`--title`) and got nothing back must
+/// see a failing exit code, not a note — the seven commands disagreed and
+/// scripts could rely on none of them. Sweeps that name nothing
+/// (`--missing`, `--all`) legitimately stay exit 0 when empty; this is
+/// only for explicit selections.
+pub(crate) fn require_nonempty(resolved: &[String], what: &str) -> anyhow::Result<()> {
+    if resolved.is_empty() {
+        anyhow::bail!("the requested {what} resolved to nothing — nothing to do");
+    }
+    Ok(())
+}
+
 /// The shared `--asin` input: comma-separated **and** repeatable, one
 /// contract everywhere. Commands that pair it with their own `--title`
 /// semantics (`library add/remove`, `collections …`) take this arg and
