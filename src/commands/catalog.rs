@@ -417,11 +417,12 @@ pub(crate) struct Eligibility {
     /// `customer_rights.is_consumable_indefinitely` — `true` = kept
     /// forever (a purchase), `false` = a time-limited loan.
     pub is_consumable_indefinitely: Option<bool>,
-    /// `content_delivery_type` — classifies the wording of the action
-    /// (an audiobook is "borrowed", a `PodcastParent`/`Periodical` is
-    /// "followed", a `PodcastEpisode` is "added"). The wire call is the
-    /// same `PUT /1.0/library/item` regardless.
-    pub content_delivery_type: Option<String>,
+    /// The shared taxonomy kind (`book`/`podcast`/`episode`), classified
+    /// by the one classifier [`crate::models::library::item_kind`] —
+    /// selects the membership wording (an audiobook is "borrowed", a show
+    /// "followed", an episode "added") and the `--kind` guard. The wire
+    /// call is the same `PUT /1.0/library/item` regardless.
+    pub kind: &'static str,
 }
 
 impl Eligibility {
@@ -471,10 +472,7 @@ pub(crate) async fn eligibility(
                 full_title: details.full_title(),
                 is_consumable: flag("is_consumable"),
                 is_consumable_indefinitely: flag("is_consumable_indefinitely"),
-                content_delivery_type: product
-                    .get("content_delivery_type")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
+                kind: crate::models::library::item_kind(product),
             },
         );
     }
@@ -517,7 +515,7 @@ mod tests {
             full_title: "t".into(),
             is_consumable: consumable,
             is_consumable_indefinitely: indefinitely,
-            content_delivery_type: None,
+            kind: "book",
         };
         // Consumable + not-indefinitely = a loan → borrowable.
         assert!(case(Some(true), Some(false)).is_borrowable());

@@ -14,7 +14,8 @@
 //!
 //! The wire call is identical across kinds; only the wording differs (an
 //! audiobook is "borrowed"/"returned", a podcast "followed"/"unfollowed", an
-//! episode "added"/"removed"), driven by `content_delivery_type`.
+//! episode "added"/"removed"), driven by the shared taxonomy
+//! (`models::library::item_kind`).
 
 use anyhow::{Result, bail};
 use reqwest::Method;
@@ -33,7 +34,7 @@ const SYNC_ATTEMPT_DELAYS: [std::time::Duration; 3] = [
     std::time::Duration::from_secs(10),
 ];
 
-/// The membership kind, from `content_delivery_type` — selects the wording
+/// The membership kind, from the shared taxonomy — selects the wording
 /// only; the wire call (`PUT`/`DELETE /1.0/library/item`) is the same.
 #[derive(Clone, Copy)]
 enum Kind {
@@ -43,10 +44,17 @@ enum Kind {
 }
 
 impl Kind {
-    fn classify(content_delivery_type: Option<&str>) -> Kind {
-        match content_delivery_type {
-            Some("PodcastParent" | "Periodical") => Kind::Podcast,
-            Some("PodcastEpisode") => Kind::Episode,
+    /// Maps the shared taxonomy (`models::library::item_kind`, the one
+    /// classifier) onto the membership wording. This used to reimplement
+    /// the classification and had drifted (audit 2026-07-17, C1):
+    /// `PodcastSeason` and the `content_type == "Podcast"` fallback were
+    /// missing, so a show without a delivery type was worded — and
+    /// `--kind`-filtered — as an audiobook while every other command
+    /// called it a podcast.
+    fn from_item_kind(kind: &str) -> Kind {
+        match kind {
+            "podcast" => Kind::Podcast,
+            "episode" => Kind::Episode,
             _ => Kind::Audiobook,
         }
     }
@@ -134,7 +142,7 @@ pub(super) async fn add(
         } else {
             format!("{asin} ({title})")
         };
-        let kind = Kind::classify(entry.and_then(|e| e.content_delivery_type.as_deref()));
+        let kind = Kind::from_item_kind(entry.map(|e| e.kind).unwrap_or("book"));
         // The --kind guard: never add something outside the requested
         // kinds — applies to explicit --asin values too, no silent
         // substitution (AUD-173).
@@ -226,7 +234,7 @@ pub(super) async fn remove(
             eprintln!("{named} is a purchase — it can't be removed from the library");
             continue;
         }
-        let kind = Kind::classify(doc.get("content_delivery_type").and_then(Value::as_str));
+        let kind = Kind::from_item_kind(crate::models::library::item_kind(&doc));
         // The --kind guard: never remove something outside the requested
         // kinds — applies to explicit --asin values too, no silent
         // substitution (AUD-173).
@@ -326,4 +334,37 @@ async fn reflect_present(ctx: &Ctx, sync: bool, marketplace: &str, asins: &[Stri
          run `audible library sync` again in a moment"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// C1: membership classifies through the one taxonomy. The old local
+    /// copy missed `PodcastSeason` and the `content_type == "Podcast"`
+    /// fallback — a show without a delivery type was worded and
+    /// `--kind`-filtered as an audiobook.
+    #[test]
+    fn membership_kind_follows_the_shared_taxonomy() {
+        let kind_of = |doc: serde_json::Value| {
+            Kind::from_item_kind(crate::models::library::item_kind(&doc)).as_filter()
+        };
+        assert_eq!(
+            kind_of(serde_json::json!({"content_type": "Podcast"})),
+            "podcast",
+            "the content_type fallback must classify as podcast"
+        );
+        assert_eq!(
+            kind_of(serde_json::json!({"content_delivery_type": "PodcastSeason"})),
+            "podcast"
+        );
+        assert_eq!(
+            kind_of(serde_json::json!({"content_delivery_type": "PodcastEpisode"})),
+            "episode"
+        );
+        assert_eq!(
+            kind_of(serde_json::json!({"content_delivery_type": "SinglePartBook"})),
+            "book"
+        );
+    }
 }
