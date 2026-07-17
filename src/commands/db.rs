@@ -645,7 +645,15 @@ fn classify_downloads(entries: Vec<DownloadEntry>) -> DownloadsReport {
 /// `path` vs `missing path`).
 fn download_table(ctx: &Ctx, entries: &[DownloadEntry], path_header: &str) {
     ctx.print(&Output::table(
-        vec!["asin", "kind", "variant", "format", "size", path_header],
+        vec![
+            "asin",
+            "mp",
+            "kind",
+            "variant",
+            "format",
+            "size",
+            path_header,
+        ],
         entries
             .iter()
             .map(|entry| {
@@ -655,6 +663,7 @@ fn download_table(ctx: &Ctx, entries: &[DownloadEntry], path_header: &str) {
                     .unwrap_or_else(|| "-".to_owned());
                 vec![
                     entry.asin.clone(),
+                    entry.marketplace.clone(),
                     entry.kind.clone(),
                     entry.variant.clone(),
                     show_format(&entry.content_format),
@@ -664,6 +673,17 @@ fn download_table(ctx: &Ctx, entries: &[DownloadEntry], path_header: &str) {
             })
             .collect(),
     ));
+}
+
+/// The marketplace set to narrow `db downloads` matching to, but only
+/// when the user explicitly selected one (`-m`/`AUDIBLE_MARKETPLACE`) —
+/// without a selector these commands deliberately span the whole
+/// per-account database.
+fn explicit_marketplaces(ctx: &Ctx) -> Result<Option<std::collections::HashSet<String>>> {
+    if ctx.marketplace_selector().is_none() {
+        return Ok(None);
+    }
+    Ok(Some(ctx.marketplaces()?.into_iter().collect()))
 }
 
 /// Human-readable content_format (empty → `-`).
@@ -739,11 +759,17 @@ async fn downloads_list(
         None
     };
 
+    // An explicit -m narrows the records too (A15); without one the
+    // listing keeps spanning the whole per-account database.
+    let marketplace_filter = explicit_marketplaces(ctx)?;
     let mut entries = db.download_entries().await?;
     entries.retain(|entry| {
         asin_filter
             .as_ref()
             .is_none_or(|set| set.contains(&entry.asin))
+            && marketplace_filter
+                .as_ref()
+                .is_none_or(|set| set.contains(&entry.marketplace))
             && kind.as_ref().is_none_or(|k| &entry.kind == k)
             && variant.as_ref().is_none_or(|v| &entry.variant == v)
     });
@@ -841,6 +867,11 @@ async fn downloads_remove(
         None
     };
 
+    // An explicit -m narrows what gets removed (A15): matching was by
+    // ASIN across the whole per-account database, so with the same title
+    // on de and us a `remove --asin X -m de --with-files` also deleted
+    // the us record and file, invisibly.
+    let marketplace_filter = explicit_marketplaces(ctx)?;
     let matched: Vec<DownloadEntry> = db
         .download_entries()
         .await?
@@ -849,6 +880,9 @@ async fn downloads_remove(
             asin_filter
                 .as_ref()
                 .is_none_or(|set| set.contains(&entry.asin))
+                && marketplace_filter
+                    .as_ref()
+                    .is_none_or(|set| set.contains(&entry.marketplace))
                 && kind.as_ref().is_none_or(|k| &entry.kind == k)
                 && format.as_ref().is_none_or(|f| &entry.content_format == f)
                 && variant.as_ref().is_none_or(|v| &entry.variant == v)
