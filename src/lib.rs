@@ -22,4 +22,5 @@ pub(crate) mod fsutil;
 pub mod output;
 pub mod plugins;
 pub mod session;
+pub(crate) mod timefmt;
 pub mod widevine;

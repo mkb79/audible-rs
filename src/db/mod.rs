@@ -151,13 +151,10 @@ fn open_connection(path: &Path, busy_timeout_ms: u64) -> Result<Connection, DbEr
     Ok(conn)
 }
 
-/// Current UTC time as `YYYY-MM-DDTHH:MM:SSZ` (the reference format).
+/// Current UTC time as `YYYY-MM-DDTHH:MM:SSZ` (the reference format,
+/// one home: [`crate::timefmt`]).
 pub fn now_iso_utc() -> String {
-    let format =
-        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
-    time::OffsetDateTime::now_utc()
-        .format(format)
-        .expect("formatting a UTC timestamp with a const format never fails")
+    crate::timefmt::now_iso()
 }
 
 // ------------------------- typed operations -------------------------

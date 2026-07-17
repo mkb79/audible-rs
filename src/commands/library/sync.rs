@@ -592,12 +592,12 @@ fn is_stale(last_sync_utc: Option<&str>, max_age: std::time::Duration) -> bool {
     let Some(last) = last_sync_utc else {
         return true;
     };
-    let format =
-        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
-    let Ok(parsed) = time::PrimitiveDateTime::parse(last, format) else {
+    // The stored timestamp is `now_iso_utc` output — the same one home
+    // (`timefmt`) parses it back, so writer and reader cannot drift.
+    let Some(parsed) = crate::timefmt::parse_iso(last) else {
         return true;
     };
-    let age = time::OffsetDateTime::now_utc() - parsed.assume_utc();
+    let age = time::OffsetDateTime::now_utc() - parsed;
     age > max_age
 }
 

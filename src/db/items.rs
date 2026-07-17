@@ -217,9 +217,7 @@ pub fn state_token_iso(raw: &str) -> Option<String> {
         value
     };
     let timestamp = time::OffsetDateTime::from_unix_timestamp(seconds).ok()?;
-    let format =
-        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
-    timestamp.format(format).ok()
+    crate::timefmt::format_iso(timestamp)
 }
 
 /// The `items_fts` columns a `col:term` filter may target. `asin` is
