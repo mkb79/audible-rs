@@ -166,25 +166,25 @@ impl super::Command for DbCommand {
                     .arg_required_else_help(true)
                     .subcommand(
                         crate::commands::items::item_source_args(
-                            clap::Command::new("remove").about(
-                                "Hard-delete library items (episodes, series memberships, \
-                                     downloads and licenses go with them)",
-                            ),
+                            clap::Command::new("remove")
+                                .about(
+                                    "Hard-delete library items (episodes and series \
+                                     memberships go with them)",
+                                )
+                                .long_about(
+                                    "Hard-delete library items from the local database, together \
+                                     with their episodes and series memberships.\n\n\
+                                     Their downloads are untouched: the files stay tracked, stay \
+                                     reorganizable, and are not reported by `download orphans`. \
+                                     To forget a title's downloads — or delete the files — use \
+                                     `db downloads remove`.",
+                                ),
                         )
                         .group(
                             clap::ArgGroup::new("source")
                                 .args(["asin", "title"])
                                 .multiple(true)
                                 .required(true),
-                        )
-                        .arg(
-                            Arg::new("with_files")
-                                .long("with-files")
-                                .action(ArgAction::SetTrue)
-                                .help(
-                                    "Also delete the downloaded files \
-                                     (not just the records)",
-                                ),
                         )
                         .arg(super::yes_arg()),
                     ),
@@ -304,7 +304,6 @@ impl super::Command for DbCommand {
                             .get_many::<String>("title")
                             .map(|v| v.cloned().collect())
                             .unwrap_or_default(),
-                        remove.get_flag("with_files"),
                         remove.get_flag("yes"),
                     )
                     .await
@@ -331,13 +330,15 @@ impl super::Command for DbCommand {
     }
 }
 
-/// `db library remove` — hard-delete items together with their
-/// episodes, series memberships, download records and licenses.
+/// `db library remove` — hard-delete items together with their episodes and
+/// series memberships. The library, and nothing else (AUD-217): the download
+/// records and the files stay, so they remain tracked, reorganizable, and are
+/// not reported as orphans. Forgetting a title's files is `db downloads
+/// remove`.
 async fn library_remove(
     ctx: &Ctx,
     asins: Vec<String>,
     titles: Vec<String>,
-    with_files: bool,
     yes: bool,
 ) -> Result<()> {
     let db = ctx.open_library_db().await?;
@@ -364,14 +365,7 @@ async fn library_remove(
             None => eprintln!("  {asin}"),
         }
     }
-    let prompt = if with_files {
-        format!(
-            "Remove {} item(s) AND delete their downloaded files?",
-            resolved.len()
-        )
-    } else {
-        format!("Remove {} item(s)?", resolved.len())
-    };
+    let prompt = format!("Remove {} item(s) from the library?", resolved.len());
     if !confirm(yes, &prompt)? {
         eprintln!("aborted; nothing removed");
         return Ok(());
@@ -382,15 +376,11 @@ async fn library_remove(
         eprintln!("warning: {asin} is not in the database");
     }
     eprintln!(
-        "removed {} item(s), {} episode(s), {} download record(s), {} license(s)",
+        "removed {} item(s) and {} episode(s) from the library; their downloads \
+         are untouched (`db downloads remove` forgets those)",
         removal.removed_asins.len(),
         removal.episodes_removed,
-        removal.downloads_removed,
-        removal.licenses_removed,
     );
-    if with_files {
-        eprintln!("deleted {} file(s)", delete_files(&removal.file_paths));
-    }
     Ok(())
 }
 

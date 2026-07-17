@@ -105,12 +105,6 @@ pub struct ItemRemoval {
     pub missing_asins: Vec<String>,
     /// Episodes removed via the parent cascade.
     pub episodes_removed: usize,
-    /// Download records removed (item and its episodes).
-    pub downloads_removed: usize,
-    /// License grants removed (item and its episodes).
-    pub licenses_removed: usize,
-    /// File paths of the removed download records (for `--with-files`).
-    pub file_paths: Vec<String>,
 }
 
 /// A flat export row (`library export --format csv`).
@@ -1293,9 +1287,15 @@ impl Db {
 
     /// Hard-deletes library items by ASIN in a given marketplace, in one
     /// transaction (`db library remove`). Deleting an item cascades its
-    /// `episodes` and `item_series` rows; `downloads` and `licenses` carry
-    /// no foreign key, so the rows of the item *and its episodes* are
-    /// cleared by hand. Unknown ASINs are reported, not an error.
+    /// `episodes` and `item_series` rows. Unknown ASINs are reported, not an
+    /// error.
+    ///
+    /// **The library, and nothing else** (AUD-217). `downloads` and `licenses`
+    /// carry no foreign key, and this used to clear them by hand — which left
+    /// the files on disk referenced by nothing: `download orphans` offered to
+    /// delete them, `reorganize` could no longer see them, and no re-sync
+    /// brought them back. The command's name is its scope; forgetting a title's
+    /// files is `db downloads remove`.
     pub async fn remove_items(
         &self,
         marketplace: String,
@@ -1310,13 +1310,6 @@ impl Db {
                 let mut find_episodes = tx.prepare_cached(
                     "SELECT asin FROM episodes WHERE parent_asin = ? AND marketplace = ?",
                 )?;
-                let mut find_files = tx.prepare_cached(
-                    "SELECT file_path FROM downloads WHERE asin = ? AND marketplace = ?",
-                )?;
-                let mut delete_downloads =
-                    tx.prepare_cached("DELETE FROM downloads WHERE asin = ? AND marketplace = ?")?;
-                let mut delete_licenses =
-                    tx.prepare_cached("DELETE FROM licenses WHERE asin = ? AND marketplace = ?")?;
                 let mut delete_item =
                     tx.prepare_cached("DELETE FROM items WHERE asin = ? AND marketplace = ?")?;
                 for asin in asins {
@@ -1327,18 +1320,6 @@ impl Db {
                     let episode_asins: Vec<String> = find_episodes
                         .query_map(rusqlite::params![asin, marketplace], |row| row.get(0))?
                         .collect::<Result<_, _>>()?;
-                    for owner in std::iter::once(&asin).chain(episode_asins.iter()) {
-                        let files = find_files
-                            .query_map(rusqlite::params![owner, marketplace], |row| {
-                                row.get::<_, String>(0)
-                            })?
-                            .collect::<Result<Vec<_>, _>>()?;
-                        removal.file_paths.extend(files);
-                        removal.downloads_removed +=
-                            delete_downloads.execute(rusqlite::params![owner, marketplace])?;
-                        removal.licenses_removed +=
-                            delete_licenses.execute(rusqlite::params![owner, marketplace])?;
-                    }
                     removal.episodes_removed += episode_asins.len();
                     delete_item.execute(rusqlite::params![asin, marketplace])?;
                     removal.removed_asins.push(asin);
@@ -2190,7 +2171,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_items_cascades_episodes_series_downloads_and_licenses() {
+    async fn remove_items_takes_the_library_and_leaves_the_downloads() {
         let (_dir, db) = open_temp().await;
         db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
 
@@ -2264,25 +2245,28 @@ mod tests {
         assert_eq!(removal.removed_asins, vec!["A1".to_owned()]);
         assert_eq!(removal.missing_asins, vec!["GHOST".to_owned()]);
         assert_eq!(removal.episodes_removed, 2);
-        assert_eq!(removal.downloads_removed, 2, "item + episode records");
-        assert_eq!(removal.licenses_removed, 1, "episode license");
-        let mut paths = removal.file_paths.clone();
-        paths.sort();
-        assert_eq!(
-            paths,
-            vec!["/dl/A1.jpg".to_owned(), "/dl/E1.aaxc".to_owned()]
-        );
 
-        // A2 survives untouched; A1's episodes and series rows are gone.
+        // The library goes: A1's episodes and series rows with it, A2 untouched.
         let stats = db.stats().await.unwrap();
         assert_eq!(stats.items_active, 1);
         assert_eq!(stats.episodes_active, 0);
         assert_eq!(stats.series, 0);
-        assert_eq!(stats.downloads, 1);
-        assert_eq!(stats.licenses, 0);
-        let rest = db.download_entries().await.unwrap();
-        assert_eq!(rest.len(), 1);
-        assert_eq!(rest[0].asin, "A2");
+
+        // The downloads stay — all three, including the removed item's own and
+        // its episode's. Clearing them here left the files referenced by
+        // nothing: `download orphans` offered to delete them and `reorganize`
+        // went blind to them, with no way back (AUD-217).
+        assert_eq!(stats.downloads, 3);
+        assert_eq!(stats.licenses, 1, "the episode's grant serves its audio");
+        let mut rest: Vec<String> = db
+            .download_entries()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.asin)
+            .collect();
+        rest.sort();
+        assert_eq!(rest, vec!["A1", "A2", "E1"]);
     }
 
     #[tokio::test]

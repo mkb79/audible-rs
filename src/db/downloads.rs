@@ -364,7 +364,22 @@ impl Db {
     }
 
     /// Deletes the given download rows by their (asin, marketplace, kind,
-    /// content_format) key, in one transaction. Returns the count.
+    /// content_format, variant) key, in one transaction. Returns the count.
+    ///
+    /// A license belongs to the **original** audio it was granted for, and goes
+    /// with it (AUD-217). The tables meet at `content_format`: `licenses` is
+    /// keyed `(asin, marketplace, content_format)`, so each quality and DRM path
+    /// has its own grant.
+    ///
+    /// Only the `original` carries one. A decrypted m4b is DRM-free and never
+    /// needs it, and the grant's one lasting use is regenerating the aaxc's
+    /// key sidecar should it be lost — its other use, reuse for a download,
+    /// dies with the signed URL inside it after hours. So once the aaxc is
+    /// gone, the grant serves nothing, whatever else was decrypted from it.
+    ///
+    /// **This also fires on `--decrypt --remove-source`**, which drops the
+    /// original's record by this same path: the aaxc it insured no longer
+    /// exists, so the grant goes with it rather than lingering as dead weight.
     pub async fn delete_downloads(
         &self,
         keys: Vec<(String, String, String, String, String)>,
@@ -378,6 +393,10 @@ impl Db {
                      WHERE asin = ? AND marketplace = ? AND kind = ? AND content_format = ?
                        AND variant = ?",
                 )?;
+                let mut delete_license = tx.prepare_cached(
+                    "DELETE FROM licenses
+                     WHERE asin = ? AND marketplace = ? AND content_format = ?",
+                )?;
                 for (asin, marketplace, kind, content_format, variant) in &keys {
                     removed += statement.execute(rusqlite::params![
                         asin,
@@ -386,6 +405,13 @@ impl Db {
                         content_format,
                         variant
                     ])?;
+                    if kind == "audio" && variant == "original" {
+                        delete_license.execute(rusqlite::params![
+                            asin,
+                            marketplace,
+                            content_format
+                        ])?;
+                    }
                 }
             }
             tx.commit()?;
@@ -473,6 +499,111 @@ mod tests {
     use crate::db::test_util::{MP, open_temp};
     #[allow(unused_imports)]
     use crate::db::*;
+
+    /// A license belongs to the aaxc it was granted for, and to nothing else: a
+    /// decrypted m4b is DRM-free and never needs it. So it goes with the
+    /// original, whatever was decrypted from it (AUD-217).
+    #[tokio::test]
+    async fn a_license_goes_with_the_original_it_belongs_to() {
+        let (_dir, db) = open_temp().await;
+        let audio = |format: &str, variant: &str| DownloadRecord {
+            asin: "A1".into(),
+            kind: "audio".into(),
+            acr: None,
+            content_format: format.into(),
+            variant: variant.into(),
+            request_kind: "adrm-high".into(),
+            version: None,
+            sku: None,
+            file_path: format!("/dl/A1.{format}.{variant}"),
+            file_size: None,
+        };
+        let grant = |format: &str| LicenseGrant {
+            asin: "A1".into(),
+            content_format: format.into(),
+            request_kind: "adrm-high".into(),
+            valid_until: None,
+            doc: "{}".into(),
+        };
+        // One title, two qualities; the high one also decrypted.
+        for record in [
+            audio("AAX_44_128", "original"),
+            audio("AAX_44_128", "decrypted"),
+            audio("AAX_22_32", "original"),
+        ] {
+            db.record_download(MP.into(), record).await.unwrap();
+        }
+        for format in ["AAX_44_128", "AAX_22_32"] {
+            db.upsert_license(MP.into(), grant(format)).await.unwrap();
+        }
+
+        let key = |format: &str, variant: &str| {
+            (
+                "A1".to_owned(),
+                MP.to_owned(),
+                "audio".to_owned(),
+                format.to_owned(),
+                variant.to_owned(),
+            )
+        };
+
+        // Dropping the m4b touches no grant — it never carried one.
+        db.delete_downloads(vec![key("AAX_44_128", "decrypted")])
+            .await
+            .unwrap();
+        assert_eq!(db.stats().await.unwrap().licenses, 2);
+
+        // Dropping the aaxc takes that format's grant with it — and only that
+        // one: the other quality is a separate grant, untouched.
+        db.delete_downloads(vec![key("AAX_44_128", "original")])
+            .await
+            .unwrap();
+        assert_eq!(db.stats().await.unwrap().licenses, 1);
+
+        // Even with an m4b of that format still around, the grant is gone: it
+        // insured the aaxc, and the aaxc is what left. This is also what
+        // `--decrypt --remove-source` does, by this same path.
+        db.record_download(MP.into(), audio("AAX_44_128", "decrypted"))
+            .await
+            .unwrap();
+        db.upsert_license(MP.into(), grant("AAX_44_128"))
+            .await
+            .unwrap();
+        db.delete_downloads(vec![key("AAX_44_128", "original")])
+            .await
+            .unwrap();
+        assert_eq!(db.stats().await.unwrap().licenses, 1, "only AAX_22_32 left");
+
+        // A non-audio artifact never carries a grant away.
+        db.record_download(
+            MP.into(),
+            DownloadRecord {
+                kind: "cover".into(),
+                content_format: "500".into(),
+                file_path: "/dl/A1.jpg".into(),
+                ..audio("AAX_22_32", "original")
+            },
+        )
+        .await
+        .unwrap();
+        db.delete_downloads(vec![(
+            "A1".to_owned(),
+            MP.to_owned(),
+            "cover".to_owned(),
+            "500".to_owned(),
+            "original".to_owned(),
+        )])
+        .await
+        .unwrap();
+        assert_eq!(db.stats().await.unwrap().licenses, 1);
+
+        // …and the survivor is the other quality's: dropping its audio clears
+        // the last one, so the grant that stayed was never the wrong one.
+        db.delete_downloads(vec![key("AAX_22_32", "original")])
+            .await
+            .unwrap();
+        assert_eq!(db.stats().await.unwrap().licenses, 0);
+    }
 
     #[tokio::test]
     async fn reorg_paths_roundtrip() {
