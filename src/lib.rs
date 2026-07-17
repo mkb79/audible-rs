@@ -18,6 +18,7 @@ pub mod config;
 pub mod crypto;
 pub mod db;
 pub mod downloader;
+pub(crate) mod fsutil;
 pub mod output;
 pub mod plugins;
 pub mod session;

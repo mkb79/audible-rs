@@ -904,25 +904,17 @@ async fn read_file(path: PathBuf) -> Result<Vec<u8>, AuthError> {
         .map_err(AuthError::Io)
 }
 
-/// Writes via a temp file next to the target plus rename, with owner-only
-/// (`0o600`) permissions on Unix. On Windows the mode is a no-op — the auth
-/// envelope rests on user-profile isolation, not an ACL (AUD-198).
+/// Writes via a unique temp file next to the target plus rename, with
+/// owner-only (`0o600`) permissions on Unix, under the file's
+/// cross-process write lock — the CLI and the agent both write auth
+/// files back after a token refresh, and a shared temp name interleaved
+/// them into one torn file (audit 2026-07-17, B5). On Windows the mode
+/// is a no-op — the auth envelope rests on user-profile isolation, not
+/// an ACL (AUD-198).
 fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-
-    let tmp_path = path.with_extension("tmp");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&tmp_path)?;
-    file.write_all(content)?;
-    file.sync_all()?;
-    drop(file);
-    std::fs::rename(&tmp_path, path)
+    let mut lock = crate::fsutil::write_lock(path)?;
+    let _guard = lock.write()?;
+    crate::fsutil::persist_atomically(path, content, Some(0o600))
 }
 
 #[cfg(test)]
