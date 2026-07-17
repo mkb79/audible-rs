@@ -864,6 +864,56 @@ impl Quality {
     }
 }
 
+/// Sends one `/1.0/content/{asin}/<endpoint>` POST and decodes the shared
+/// licenserequest protocol (audit 2026-07-17, D5 — this lived three
+/// times). The body is read as text first: a rejected request answers
+/// with a small JSON error (`error_code`/`message`) surfaced verbatim as
+/// [`ApiError::LicenseRejected`] together with the echoed request id;
+/// a success body must parse as JSON or is [`ApiError::LicenseResponse`].
+/// `app_headers` adds the app-parity block (X-ADP-*, device type/idiom)
+/// both licenserequest flavors send; `drmlicense` sends none.
+async fn send_licenserequest(
+    client: &Client,
+    country_code: &str,
+    asin: &str,
+    endpoint: &str,
+    body: serde_json::Value,
+    app_headers: bool,
+) -> Result<serde_json::Value, ApiError> {
+    let mut request = client
+        .request(Method::POST, format!("/1.0/content/{asin}/{endpoint}"))
+        .country_code(country_code)
+        // Auto = signing when the account has signing material
+        // (refresh-free, the endpoint accepts it), the access token
+        // otherwise.
+        .auth(AuthMode::Auto);
+    if app_headers {
+        // X-Device-Type-Id from the registered device (falls back to the
+        // iOS app type only if the auth file predates the typed device).
+        let device_type = client.device_type().unwrap_or(DEFAULT_DEVICE_TYPE);
+        request = request
+            .header("X-ADP-Transport", "WIFI")
+            .header("X-ADP-LTO", "120")
+            .header("X-Device-Type-Id", device_type)
+            .header("device_idiom", "phone");
+    }
+    let response = request.body(body).send().await?;
+    let status = response.status();
+    let request_id = echoed_request_id(&response);
+    let text = response.text().await?;
+    if !status.is_success() {
+        let (error_code, message) = parse_license_error(&text);
+        return Err(ApiError::LicenseRejected {
+            asin: asin.to_owned(),
+            status,
+            error_code,
+            message,
+            request_id: request_id.unwrap_or_else(|| "-".into()),
+        });
+    }
+    serde_json::from_str(&text).map_err(|_| ApiError::LicenseResponse(asin.to_owned()))
+}
+
 /// Requests a download license for `asin` via the Adrm path.
 ///
 /// Headers mirror the reference client; auth is the token mode (the
@@ -883,45 +933,8 @@ pub async fn request_license(
         "response_groups": "last_position_heard,pdf_url,content_reference",
     });
 
-    // X-Device-Type-Id from the registered device (falls back to the
-    // iOS app type only if the auth file predates the typed device).
-    let device_type = client.device_type().unwrap_or(DEFAULT_DEVICE_TYPE);
-
-    // Auto = signing when the account has signing material (refresh-free,
-    // the endpoint accepts it), the access token otherwise.
-    let response = client
-        .request(Method::POST, format!("/1.0/content/{asin}/licenserequest"))
-        .country_code(country_code)
-        .auth(AuthMode::Auto)
-        .header("X-ADP-Transport", "WIFI")
-        .header("X-ADP-LTO", "120")
-        .header("X-Device-Type-Id", device_type)
-        .header("device_idiom", "phone")
-        .body(body)
-        .send()
-        .await?;
-
-    let status = response.status();
-    let request_id = echoed_request_id(&response);
-    // Read the body as text first: a rejected licenserequest answers with
-    // a small JSON error (`error_code`/`message`) we want to surface, and
-    // calling `response.json()` on an error status would otherwise discard
-    // it behind a generic decode error.
-    let body = response.text().await?;
-
-    if !status.is_success() {
-        let (error_code, message) = parse_license_error(&body);
-        return Err(ApiError::LicenseRejected {
-            asin: asin.to_owned(),
-            status,
-            error_code,
-            message,
-            request_id: request_id.unwrap_or_else(|| "-".into()),
-        });
-    }
-
-    let payload: serde_json::Value =
-        serde_json::from_str(&body).map_err(|_| ApiError::LicenseResponse(asin.to_owned()))?;
+    let payload =
+        send_licenserequest(client, country_code, asin, "licenserequest", body, true).await?;
     DownloadLicense::from_response(payload)
         .ok_or_else(|| ApiError::LicenseResponse(asin.to_owned()))
 }
@@ -1009,34 +1022,8 @@ pub async fn request_widevine_license(
         "response_groups": "content_reference,chapter_info,pdf_url",
     });
 
-    let device_type = client.device_type().unwrap_or(DEFAULT_DEVICE_TYPE);
-    let response = client
-        .request(Method::POST, format!("/1.0/content/{asin}/licenserequest"))
-        .country_code(country_code)
-        .auth(AuthMode::Auto)
-        .header("X-ADP-Transport", "WIFI")
-        .header("X-ADP-LTO", "120")
-        .header("X-Device-Type-Id", device_type)
-        .header("device_idiom", "phone")
-        .body(body)
-        .send()
-        .await?;
-
-    let status = response.status();
-    let request_id = echoed_request_id(&response);
-    let text = response.text().await?;
-    if !status.is_success() {
-        let (error_code, message) = parse_license_error(&text);
-        return Err(ApiError::LicenseRejected {
-            asin: asin.to_owned(),
-            status,
-            error_code,
-            message,
-            request_id: request_id.unwrap_or_else(|| "-".into()),
-        });
-    }
-    let payload: serde_json::Value =
-        serde_json::from_str(&text).map_err(|_| ApiError::LicenseResponse(asin.to_owned()))?;
+    let payload =
+        send_licenserequest(client, country_code, asin, "licenserequest", body, true).await?;
     parse_widevine_grant(&payload, asin)
 }
 
@@ -1096,28 +1083,8 @@ pub async fn request_drmlicense(
         "tenant_id": "Audible",
         "licenseChallenge": base64::engine::general_purpose::STANDARD.encode(challenge),
     });
-    let response = client
-        .request(Method::POST, format!("/1.0/content/{asin}/drmlicense"))
-        .country_code(country_code)
-        .auth(AuthMode::Auto)
-        .body(body)
-        .send()
-        .await?;
-    let status = response.status();
-    let request_id = echoed_request_id(&response);
-    let text = response.text().await?;
-    if !status.is_success() {
-        let (error_code, message) = parse_license_error(&text);
-        return Err(ApiError::LicenseRejected {
-            asin: asin.to_owned(),
-            status,
-            error_code,
-            message,
-            request_id: request_id.unwrap_or_else(|| "-".into()),
-        });
-    }
-    let payload: serde_json::Value =
-        serde_json::from_str(&text).map_err(|_| ApiError::LicenseResponse(asin.to_owned()))?;
+    let payload =
+        send_licenserequest(client, country_code, asin, "drmlicense", body, false).await?;
     let license_b64 = payload["license"]
         .as_str()
         .ok_or_else(|| ApiError::LicenseResponse(asin.to_owned()))?;
