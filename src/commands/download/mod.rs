@@ -58,6 +58,11 @@ pub(crate) use reorganize::{hint_reorganize, key_affects_filenames};
 /// `audible download`.
 pub struct DownloadCommand;
 
+/// Catalog documents for the run's titles that the library does not hold, by
+/// ASIN — how they get named, since there is no stored document to read
+/// (AUD-197). Empty unless `--allow-external` let some through.
+pub(crate) type ExternalDocs = std::collections::BTreeMap<String, serde_json::Value>;
+
 // Help-section headings for `download --help` (AUD-18): the many options
 // group into what to select, which artifacts, general behavior, and the two
 // specialized paths (decrypt, Widevine).
@@ -347,7 +352,7 @@ impl super::Command for DownloadCommand {
                 .map(|v| v.include_podcasts())
                 .unwrap_or(true)
         };
-        let asins = resolve_source(
+        let (asins, external) = resolve_source(
             ctx,
             &marketplace,
             matches,
@@ -439,6 +444,7 @@ impl super::Command for DownloadCommand {
             codec_xhe,
             spatial,
             cdm: cdm.as_ref(),
+            external: &external,
             mp: multi.as_ref(),
         };
 
@@ -586,7 +592,7 @@ async fn resolve_source(
     kinds: &BTreeSet<Artifact>,
     audio_request_kinds: Vec<String>,
     include_podcasts: bool,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, ExternalDocs)> {
     let asins: Vec<String> = matches
         .get_many::<String>("asin")
         .map(|values| values.cloned().collect())
@@ -629,7 +635,9 @@ async fn resolve_source(
                 );
             }
         }
-        return Ok(asins);
+        // `--missing` reads the database, so every ASIN it names is held —
+        // nothing here can be external.
+        return Ok((asins, Default::default()));
     }
     // `--asin` is the only unchecked source: `--title` and `--missing` resolve
     // against the database and can only ever name rows that exist. A mistyped
@@ -637,18 +645,24 @@ async fn resolve_source(
     // downloads, and the user silently receives a title they never asked for.
     // Checked on the raw request, before podcast expansion and before the first
     // licenserequest, so nothing is fetched (AUD-197).
-    if !asins.is_empty() && !matches.get_flag("allow_external") {
-        let unknown = crate::commands::items::unknown_asins(&db, marketplace, &asins).await?;
-        if !unknown.is_empty() {
-            return Err(reject_unknown(ctx, marketplace, &unknown).await);
-        }
-    }
+    let external = if asins.is_empty() {
+        Default::default()
+    } else {
+        reconcile_external(
+            ctx,
+            &db,
+            marketplace,
+            &asins,
+            matches.get_flag("allow_external"),
+        )
+        .await?
+    };
 
     let titles: Vec<String> = matches
         .get_many::<String>("title")
         .map(|values| values.cloned().collect())
         .unwrap_or_default();
-    crate::commands::items::resolve_asins(
+    let resolved = crate::commands::items::resolve_asins(
         &db,
         marketplace,
         asins,
@@ -657,7 +671,8 @@ async fn resolve_source(
             include: include_podcasts,
         },
     )
-    .await
+    .await?;
+    Ok((resolved, external))
 }
 
 /// A `--kind` artifact.
@@ -709,56 +724,94 @@ fn parse_cover_sizes(sizes: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// Refuses a run whose `--asin` names titles the library does not have, saying
-/// for each what is actually wrong (AUD-197).
+/// Reconciles the requested `--asin` values against the library, and returns the
+/// catalog documents of the ones it lets through that the library does not hold
+/// — non-empty only under `--allow-external` (AUD-197).
 ///
-/// The catalog is asked only to **sharpen** the message, never to decide: the
-/// gate is the local membership check, so a catalog that cannot be reached
-/// still refuses — it just says less. Its three answers are kept apart, because
-/// "we could not ask" is not "no such product", and neither is "you have not
-/// added it".
-async fn reject_unknown(ctx: &Ctx, marketplace: &str, unknown: &[String]) -> anyhow::Error {
-    let checked = match ctx.client().await {
-        Ok(client) => crate::commands::catalog::eligibility(client, marketplace, unknown)
-            .await
-            .map_err(|error| eprintln!("could not reach the catalog to say more: {error}"))
-            .ok(),
+/// Four things can be wrong with an ASIN the library does not hold, and
+/// `--allow-external` relaxes exactly **one** of them — the membership check.
+/// It says "this title is not mine yet", not "take whatever I typed":
+///
+/// | | refused with `--allow-external`? |
+/// | --- | --- |
+/// | the catalog could not be asked | **yes** — we could not name it either |
+/// | no such product | **yes** — an override is not a licence to guess |
+/// | the subscription does not cover it | **yes** — the license would fail anyway |
+/// | simply not added yet | no — this is the case it exists for |
+async fn reconcile_external(
+    ctx: &Ctx,
+    db: &crate::db::Db,
+    marketplace: &str,
+    asins: &[String],
+    allow_external: bool,
+) -> Result<ExternalDocs> {
+    use std::collections::BTreeMap;
+
+    let unknown = crate::commands::items::unknown_asins(db, marketplace, asins).await?;
+    if unknown.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    // The membership check already decided these are not ours; the catalog only
+    // says *why*, and supplies the name for the ones that get through. It never
+    // decides — unreachable means refuse, not proceed.
+    let docs = match ctx.client().await {
+        Ok(client) => crate::commands::catalog::documents(client, marketplace, &unknown).await,
+        Err(error) => Err(error),
+    };
+    let docs = match docs {
+        Ok(docs) => docs,
         Err(error) => {
-            eprintln!("could not reach the catalog to say more: {error}");
-            None
+            eprintln!("could not reach the catalog: {error}");
+            bail!(
+                "{} requested ASIN(s) are not in your library, and the catalog \
+                 could not be asked about them",
+                unknown.len()
+            );
         }
     };
 
-    for asin in unknown {
-        let named = |title: &str| format!("{asin} ({title})");
-        // The catalog does not drop an ASIN it has never heard of — it echoes
-        // it back as a hollow product, `asin` set and everything else null. So
-        // a missing title is what "no such product" looks like from here, and
-        // treating the echo as real would tell someone to go buy their typo.
-        let found = checked
-            .as_ref()
-            .map(|map| map.get(asin).filter(|entry| !entry.full_title.is_empty()));
-        match found {
-            None => eprintln!("{asin}: not in your library for {marketplace}"),
-            Some(None) => {
-                eprintln!("{asin}: not a product on {marketplace} — check the ASIN");
-            }
-            Some(Some(entry)) if entry.is_consumable == Some(true) => eprintln!(
-                "{}: not in your library — run `library sync` if you added it, \
-                 or pass --allow-external to download it anyway",
-                named(&entry.full_title)
-            ),
-            Some(Some(entry)) => eprintln!(
-                "{}: not in your library, and your subscription does not cover it — \
-                 buying it puts it in your library",
-                named(&entry.full_title)
-            ),
+    let mut external = BTreeMap::new();
+    let mut refused = 0usize;
+    for asin in &unknown {
+        let Some(doc) = docs.get(asin) else {
+            eprintln!("{asin}: not a product on {marketplace} — check the ASIN");
+            refused += 1;
+            continue;
+        };
+        let named = crate::models::library::build_full_title(doc)
+            .map(|title| format!("{asin} ({title})"))
+            .unwrap_or_else(|| asin.clone());
+        if crate::commands::catalog::is_consumable(doc) != Some(true) {
+            eprintln!(
+                "{named}: not in your library, and your subscription does not cover it — \
+                 buying it puts it in your library"
+            );
+            refused += 1;
+        } else if allow_external {
+            external.insert(asin.clone(), doc.clone());
+        } else {
+            eprintln!(
+                "{named}: not in your library — run `library sync` if you added it, \
+                 or pass --allow-external to download it anyway"
+            );
+            refused += 1;
         }
     }
-    anyhow::anyhow!(
-        "{} requested ASIN(s) are not in your library",
-        unknown.len()
-    )
+    if refused > 0 {
+        bail!("{refused} requested ASIN(s) cannot be downloaded");
+    }
+    if !external.is_empty() {
+        eprintln!(
+            "{} title(s) are not in your library — filing them under {}/. \
+             They are named once, now: with no library entry to re-read, a later \
+             `filename_template` change cannot reach them, and `download reorganize` \
+             only carries them along when the download directory moves.",
+            external.len(),
+            crate::naming::EXTERNAL_DIR
+        );
+    }
+    Ok(external)
 }
 
 /// Whether this run decrypts: `--decrypt` overrides the settings bundle, and

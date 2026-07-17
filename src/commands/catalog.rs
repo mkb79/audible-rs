@@ -283,6 +283,69 @@ pub(crate) async fn catalog_details(
     Ok(details)
 }
 
+/// The raw catalog documents for `asins`, batched 50 per request, carrying the
+/// fields the naming engine reads plus `customer_rights`.
+///
+/// For titles the library holds no document for (AUD-197): the catalog names
+/// them under the same keys, so they can be filed like any other title. The one
+/// field it cannot carry is `purchase_date` — a title that was never bought has
+/// none, so `%purchase_year%` renders empty.
+///
+/// **An ASIN that is no product is absent from the result.** The catalog does
+/// not reject one it has never heard of; it echoes it back as a product
+/// carrying only that ASIN, counted in `total_results`. Presence therefore
+/// proves nothing, and a missing title is what "no such product" looks like
+/// from here — so the hollow echoes are dropped rather than passed on as if
+/// they were real.
+pub(crate) async fn documents(
+    client: &Client,
+    marketplace: &str,
+    asins: &[String],
+) -> Result<BTreeMap<String, Value>> {
+    let mut docs = BTreeMap::new();
+    for chunk in asins.chunks(CATALOG_BATCH) {
+        let body: Value = client
+            .request(Method::GET, "/1.0/catalog/products")
+            .country_code(marketplace)
+            .query("asins", chunk.join(","))
+            .query(
+                "response_groups",
+                "product_desc,product_attrs,product_extended_attrs,customer_rights",
+            )
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        for product in body
+            .get("products")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(asin) = product.get("asin").and_then(Value::as_str) else {
+                continue;
+            };
+            let titled = product
+                .get("title")
+                .and_then(Value::as_str)
+                .is_some_and(|title| !title.trim().is_empty());
+            if titled {
+                docs.insert(asin.to_owned(), product.clone());
+            }
+        }
+    }
+    Ok(docs)
+}
+
+/// Whether the account may fetch this title, from a catalog document's
+/// `customer_rights` — the same signal [`Eligibility::is_consumable`] carries,
+/// for callers that already hold the document. `None` when unauthenticated:
+/// the field is the account's, so it is absent without one.
+pub(crate) fn is_consumable(doc: &Value) -> Option<bool> {
+    doc.get("customer_rights")?.get("is_consumable")?.as_bool()
+}
+
 /// Extracts per-ASIN display details from a `/1.0/catalog/products` body.
 fn parse_catalog_details(body: &Value, details: &mut BTreeMap<String, CatalogDetails>) {
     let Some(products) = body.get("products").and_then(Value::as_array) else {

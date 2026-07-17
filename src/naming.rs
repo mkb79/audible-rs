@@ -96,6 +96,15 @@ pub(crate) fn resolve_base(
 /// current resolved settings. Falls back to the ASIN when the item is not in the
 /// local database (no metadata to name it by).
 pub(crate) async fn base_filename(ctx: &Ctx, marketplace: &str, asin: &str) -> Result<String> {
+    let Some(values) = template_context(ctx, marketplace, asin).await else {
+        return Ok(asin.to_owned());
+    };
+    let (mode, max_len, template) = template_settings(ctx);
+    resolve_base(mode, template.as_deref(), max_len, asin, &values)
+}
+
+/// The naming settings this run writes with — mode, length cap and template.
+fn template_settings(ctx: &Ctx) -> (crate::config::schema::FilenameMode, usize, Option<String>) {
     use crate::config::schema::FilenameMode;
     let view = ctx.settings_view().ok();
     let mode = view
@@ -107,10 +116,7 @@ pub(crate) async fn base_filename(ctx: &Ctx, marketplace: &str, asin: &str) -> R
         .map(|v| v.filename_max_length(None, None))
         .unwrap_or(crate::config::resolve::DEFAULT_FILENAME_MAX_LENGTH);
     let template = view.as_ref().and_then(|v| v.filename_template());
-    let Some(values) = template_context(ctx, marketplace, asin).await else {
-        return Ok(asin.to_owned());
-    };
-    resolve_base(mode, template.as_deref(), max_len, asin, &values)
+    (mode, max_len, template)
 }
 
 /// The fixed filename suffix (discriminator + extension) for a download
@@ -175,7 +181,23 @@ pub(crate) async fn template_context(
         }
     };
     let doc: serde_json::Value = serde_json::from_str(&doc_str).ok()?;
+    Some(values_from_doc(ctx, &db, marketplace, asin, &doc, parent_asin).await)
+}
 
+/// The naming variables held in one document, whatever its source.
+///
+/// Normally the stored library document. A title the library does not hold
+/// supplies a **catalog** document instead (AUD-197): it carries the same fields
+/// under the same names, with one exception — `purchase_date`, which a title
+/// that was never bought cannot have, so `%purchase_year%` renders empty for it.
+pub(crate) async fn values_from_doc(
+    ctx: &Ctx,
+    db: &crate::db::Db,
+    marketplace: &str,
+    asin: &str,
+    doc: &serde_json::Value,
+    parent_asin: Option<String>,
+) -> std::collections::HashMap<&'static str, String> {
     let text = |key: &str| {
         doc.get(key)
             .and_then(serde_json::Value::as_str)
@@ -202,7 +224,7 @@ pub(crate) async fn template_context(
     values.insert("subtitle", text("subtitle"));
     values.insert(
         "fulltitle",
-        crate::models::library::build_full_title(&doc).unwrap_or_default(),
+        crate::models::library::build_full_title(doc).unwrap_or_default(),
     );
     values.insert("account", ctx.account_name().unwrap_or_default());
     values.insert("marketplace", marketplace.to_owned());
@@ -224,7 +246,38 @@ pub(crate) async fn template_context(
     {
         values.insert("publication", show);
     }
-    Some(values)
+    values
+}
+
+/// The folder holding titles the library does not have a document for
+/// (AUD-197). Named so it cannot collide with anything a template produces: a
+/// real title, publisher or series is never wrapped in double underscores, and
+/// the bare word was already taken — [`EMPTY_PLACEHOLDER`] fills an empty
+/// variable with `unknown`, so a folder of that name means something else
+/// entirely.
+///
+/// [`EMPTY_PLACEHOLDER`]: crate::config::filename_template::EMPTY_PLACEHOLDER
+pub(crate) const EXTERNAL_DIR: &str = "__external__";
+
+/// The relative path for a title the library does not hold, named from its
+/// **catalog** document under [`EXTERNAL_DIR`] (AUD-197).
+///
+/// The user's own template applies inside that folder, so such a title is filed
+/// the way every other one is — it is only kept apart, because nothing here can
+/// be re-derived later: with no document in the database, a future template
+/// change cannot reach these files, and `reorganize` only carries them along
+/// when the download directory moves.
+pub(crate) async fn external_base_filename(
+    ctx: &Ctx,
+    marketplace: &str,
+    asin: &str,
+    doc: &serde_json::Value,
+) -> Result<String> {
+    let db = ctx.open_library_db().await?;
+    let values = values_from_doc(ctx, &db, marketplace, asin, doc, None).await;
+    let (mode, max_len, template) = template_settings(ctx);
+    let base = resolve_base(mode, template.as_deref(), max_len, asin, &values)?;
+    Ok(format!("{EXTERNAL_DIR}/{base}"))
 }
 
 /// Expands a `custom` template into a path relative to `download_dir` (may

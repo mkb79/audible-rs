@@ -10,8 +10,25 @@ use clap::{Arg, ArgAction};
 use crate::commands::prompt::confirm;
 use crate::config::ctx::Ctx;
 use crate::naming::{
-    artifact_suffix, download_dir, expand_tilde, join_relative, resolve_base, template_context,
+    EXTERNAL_DIR, artifact_suffix, download_dir, expand_tilde, join_relative, resolve_base,
+    template_context,
 };
+
+/// Where a file with no library document goes: the same place inside the tree,
+/// under [`EXTERNAL_DIR`] (AUD-197).
+///
+/// Its name is not recomputed — with nothing to read it from, the name it was
+/// given when it was downloaded is the only one there is. So only the tree's
+/// root moves, and its place within the tree is preserved.
+///
+/// `None` for a file that is not under the download directory at all (a `--dir`
+/// grab): those are left where they are rather than pulled in.
+fn external_target(file_path: &str, current_dir: &Path, target_dir: &Path) -> Option<PathBuf> {
+    let relative = Path::new(file_path).strip_prefix(current_dir).ok()?;
+    // A file already filed here keeps one level of it, not one per run.
+    let relative = relative.strip_prefix(EXTERNAL_DIR).unwrap_or(relative);
+    Some(target_dir.join(EXTERNAL_DIR).join(relative))
+}
 
 fn filename_mode_from_str(value: &str) -> crate::config::schema::FilenameMode {
     use crate::config::schema::FilenameMode;
@@ -197,22 +214,38 @@ pub(super) async fn reorganize(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()>
     let mut skipped = 0usize;
     for marketplace in &marketplaces {
         for entry in db.reorg_downloads(marketplace.clone()).await? {
-            let Some(values) = template_context(ctx, marketplace, &entry.asin).await else {
-                skipped += 1;
-                continue;
+            // Where a file belongs follows from one question: does the library
+            // have a document for it (AUD-197)? With one, the template decides
+            // — which also carries a title *out* of the external folder the
+            // moment it enters the library. Without one, nothing can re-derive
+            // a name, so the file keeps the one it was given and only follows
+            // the download directory.
+            let paths = match template_context(ctx, marketplace, &entry.asin).await {
+                Some(values) => planned_paths(
+                    &entry.asin,
+                    &entry.kind,
+                    &entry.content_format,
+                    &entry.file_path,
+                    &values,
+                    target_mode,
+                    target_template.as_deref(),
+                    max_len,
+                    &target_dir,
+                )?,
+                None => match external_target(&entry.file_path, &current_dir, &target_dir) {
+                    Some(new) => {
+                        let old = PathBuf::from(&entry.file_path);
+                        (old != new).then_some((old, new))
+                    }
+                    // Outside the download tree entirely (a `--dir` grab): left
+                    // where it is rather than dragged in.
+                    None => {
+                        skipped += 1;
+                        None
+                    }
+                },
             };
-            let Some((old, new)) = planned_paths(
-                &entry.asin,
-                &entry.kind,
-                &entry.content_format,
-                &entry.file_path,
-                &values,
-                target_mode,
-                target_template.as_deref(),
-                max_len,
-                &target_dir,
-            )?
-            else {
+            let Some((old, new)) = paths else {
                 continue;
             };
             // An original audio file carries a key sidecar keyed by its
@@ -281,7 +314,8 @@ pub(super) async fn reorganize(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()>
     }
     if skipped > 0 {
         eprintln!(
-            "note: {skipped} recorded file(s) have no library metadata (item not synced) — skipped"
+            "note: {skipped} recorded file(s) lie outside the download directory \
+             and have no library entry to rename them by — left where they are"
         );
     }
     if planned.is_empty() {
@@ -512,6 +546,46 @@ pub(crate) async fn hint_reorganize(ctx: &Ctx) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file with no library document follows the download directory and
+    /// nothing else — its name cannot be re-derived, so only the root moves
+    /// (AUD-197).
+    #[test]
+    fn a_file_without_a_document_follows_the_download_dir() {
+        let old_root = Path::new("/books");
+        let new_root = Path::new("/moved");
+
+        // Downloaded as external: keeps its place inside the folder.
+        assert_eq!(
+            external_target(
+                "/books/__external__/unknown/Title [B0EXAMPLE1].aaxc",
+                old_root,
+                new_root
+            ),
+            Some(PathBuf::from(
+                "/moved/__external__/unknown/Title [B0EXAMPLE1].aaxc"
+            ))
+        );
+
+        // Never nests: a second run must not produce __external__/__external__.
+        let once = external_target("/books/__external__/X.aaxc", old_root, old_root).unwrap();
+        assert_eq!(once, PathBuf::from("/books/__external__/X.aaxc"));
+        assert_eq!(
+            external_target(once.to_str().unwrap(), old_root, old_root),
+            Some(once),
+            "already filed, so the plan is a no-op rather than another level"
+        );
+
+        // A title that lost its document *after* being filed normally is drawn
+        // in, keeping the folders it sat in.
+        assert_eq!(
+            external_target("/books/Some Show/Ep 1.aaxc", old_root, new_root),
+            Some(PathBuf::from("/moved/__external__/Some Show/Ep 1.aaxc"))
+        );
+
+        // Outside the tree entirely (a `--dir` grab): not ours to move.
+        assert!(external_target("/tmp/grab/X.aaxc", old_root, new_root).is_none());
+    }
 
     #[test]
     fn filename_mode_from_str_maps_all() {
