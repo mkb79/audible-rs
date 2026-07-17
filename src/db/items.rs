@@ -1391,14 +1391,30 @@ impl Db {
         .await
     }
 
-    /// Timestamp of the last successful sync request, if any.
-    pub async fn last_sync_utc(&self) -> Result<Option<String>, DbError> {
-        self.call(|conn| {
-            Ok(conn.query_row(
-                "SELECT MAX(response_time_utc) FROM sync_log WHERE http_status = 200",
-                [],
-                |row| row.get(0),
-            )?)
+    /// Timestamp of the last successful sync request for each of the
+    /// given marketplaces. A marketplace that never synced successfully
+    /// is absent from the map — staleness is per marketplace, so a fresh
+    /// `de` must not hide a never-synced `us` (and one stale marketplace
+    /// must not force a resync of its fresh siblings).
+    pub async fn last_sync_utc_by_marketplace(
+        &self,
+        marketplaces: Vec<String>,
+    ) -> Result<std::collections::HashMap<String, String>, DbError> {
+        if marketplaces.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        self.call(move |conn| {
+            let placeholders = vec!["?"; marketplaces.len()].join(",");
+            let sql = format!(
+                "SELECT marketplace, MAX(response_time_utc) FROM sync_log
+                 WHERE http_status = 200 AND marketplace IN ({placeholders})
+                 GROUP BY marketplace"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(marketplaces.iter()), |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+            Ok(rows.collect::<Result<_, _>>()?)
         })
         .await
     }
@@ -1729,7 +1745,15 @@ mod tests {
         // State token persisted (and converted to ISO) for this marketplace.
         let settings = db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
         assert_eq!(settings.last_state_token.as_deref(), Some("1750000000000"));
-        assert!(db.last_sync_utc().await.unwrap().is_some());
+        let last = db
+            .last_sync_utc_by_marketplace(vec![MP.to_owned(), "zz".to_owned()])
+            .await
+            .unwrap();
+        // The synced marketplace has a timestamp; a never-synced one must
+        // not inherit it (that hid a stale/empty marketplace behind a
+        // fresh sibling and made auto-sync skip it).
+        assert!(last.contains_key(MP));
+        assert!(!last.contains_key("zz"));
 
         // Soft delete via a second page.
         let log = SyncLogEntry {

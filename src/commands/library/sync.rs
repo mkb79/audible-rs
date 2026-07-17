@@ -581,6 +581,20 @@ pub(crate) async fn sync(
     Ok(())
 }
 
+/// The subset of `marketplaces` whose own last successful sync is older
+/// than `max_age` (never synced = stale). Judged per marketplace so a
+/// fresh sibling can neither mask nor trigger another marketplace's sync.
+fn stale_marketplaces(
+    marketplaces: Vec<String>,
+    last_syncs: &std::collections::HashMap<String, String>,
+    max_age: std::time::Duration,
+) -> Vec<String> {
+    marketplaces
+        .into_iter()
+        .filter(|mp| is_stale(last_syncs.get(mp).map(String::as_str), max_age))
+        .collect()
+}
+
 /// Whether the last sync is older than `sync_max_age` (no sync = stale).
 fn is_stale(last_sync_utc: Option<&str>, max_age: std::time::Duration) -> bool {
     let Some(last) = last_sync_utc else {
@@ -596,7 +610,10 @@ fn is_stale(last_sync_utc: Option<&str>, max_age: std::time::Duration) -> bool {
 }
 
 /// Runs a delta sync before a read when `auto_sync = delta` and the
-/// data is older than `sync_max_age` (archived architecture §8). Skipped when
+/// data is older than `sync_max_age` (archived architecture §8). Staleness
+/// is judged **per selected marketplace**: a fresh `de` sync must not let
+/// a stale (or never-synced) `us` answer from an empty view, and one stale
+/// marketplace only resyncs itself, not its fresh siblings. Skipped when
 /// another process holds the sync lock.
 pub(crate) async fn maybe_auto_sync(ctx: &Ctx, db: &Db) -> Result<()> {
     let config = ctx.db_config()?;
@@ -604,7 +621,12 @@ pub(crate) async fn maybe_auto_sync(ctx: &Ctx, db: &Db) -> Result<()> {
         return Ok(());
     }
     let max_age = crate::config::schema::parse_duration(&config.sync_max_age)?;
-    if !is_stale(db.last_sync_utc().await?.as_deref(), max_age) {
+    let marketplaces = ctx.marketplaces()?;
+    let last_syncs = db
+        .last_sync_utc_by_marketplace(marketplaces.clone())
+        .await?;
+    let stale = stale_marketplaces(marketplaces, &last_syncs, max_age);
+    if stale.is_empty() {
         return Ok(());
     }
 
@@ -619,10 +641,13 @@ pub(crate) async fn maybe_auto_sync(ctx: &Ctx, db: &Db) -> Result<()> {
         return Ok(());
     };
 
-    tracing::info!("library data is stale; running auto-sync");
+    tracing::info!(
+        "library data is stale for {}; running auto-sync",
+        stale.join(",")
+    );
     let client = ctx.client().await?;
     let sem = Semaphore::new(SYNC_RESOLUTION_CONCURRENCY);
-    for marketplace in ctx.marketplaces()? {
+    for marketplace in stale {
         let options = SyncOptions {
             full: false,
             page_size: config.page_size.clamp(10, 1000),
@@ -654,5 +679,31 @@ mod tests {
             Some("2020-01-01T00:00:00Z"),
             Duration::from_secs(3600)
         ));
+    }
+
+    #[test]
+    fn staleness_is_judged_per_marketplace() {
+        let hour = Duration::from_secs(3600);
+        let now = db::now_iso_utc();
+        let mut last = std::collections::HashMap::new();
+        last.insert("de".to_owned(), now.clone());
+
+        // A fresh de must not hide a never-synced us — and only us syncs.
+        assert_eq!(
+            stale_marketplaces(vec!["de".into(), "us".into()], &last, hour),
+            vec!["us".to_owned()]
+        );
+        // Both fresh: nothing to do.
+        last.insert("us".to_owned(), now);
+        assert!(stale_marketplaces(vec!["de".into(), "us".into()], &last, hour).is_empty());
+        // One goes stale: only that one resyncs, not its fresh sibling.
+        last.insert("de".to_owned(), "2020-01-01T00:00:00Z".to_owned());
+        assert_eq!(
+            stale_marketplaces(vec!["de".into(), "us".into()], &last, hour),
+            vec!["de".to_owned()]
+        );
+        // Only the *selected* set matters: a stale de outside the
+        // selection triggers nothing.
+        assert!(stale_marketplaces(vec!["us".into()], &last, hour).is_empty());
     }
 }
