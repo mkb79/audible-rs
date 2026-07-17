@@ -87,6 +87,34 @@ pub const DOWNLOAD_KINDS: [&str; 4] = ["audio", "chapter", "pdf", "cover"];
 pub const DOWNLOAD_VARIANTS: [&str; 3] = ["original", "decrypted", "reencoded"];
 
 impl Db {
+    /// ASINs other than `asin` that already own a download record whose
+    /// path starts with `prefix` (the rendered `<dir>/<base>.` stem) — the
+    /// collision guard for the non-ASIN filename modes (audit 2026-07-17,
+    /// A7): distinct titles can slug to the same base name, and without
+    /// this check the second download silently overwrote the first.
+    /// Checked across all marketplaces — the filesystem is one namespace.
+    pub async fn colliding_asins(
+        &self,
+        prefix: String,
+        asin: String,
+    ) -> Result<Vec<String>, DbError> {
+        self.call(move |conn| {
+            let mut statement = conn.prepare_cached(
+                "SELECT DISTINCT asin FROM downloads
+                 WHERE file_path LIKE ? ESCAPE '\\' AND asin != ?
+                 ORDER BY asin",
+            )?;
+            let pattern = format!("{}%", super::escape_like(&prefix));
+            let rows = statement
+                .query_map(rusqlite::params![pattern, asin], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
     /// Records (or updates) a downloaded asset. The primary key is
     /// (asin, marketplace, kind, content_format, variant), so re-downloading
     /// the same quality updates the row (new acr/version → corrected release).
@@ -500,6 +528,58 @@ mod tests {
     use crate::db::test_util::{MP, open_temp};
     #[allow(unused_imports)]
     use crate::db::*;
+
+    /// A7: the collision guard reports only *other* ASINs owning the stem —
+    /// the same title's own records (re-downloads, other qualities) pass,
+    /// LIKE metacharacters in paths are literal, and a base that is a
+    /// prefix of a longer base does not collide (the trailing dot splits).
+    #[tokio::test]
+    async fn colliding_asins_reports_only_foreign_owners() {
+        let (_dir, db) = open_temp().await;
+        let record = |asin: &str, path: &str| DownloadRecord {
+            asin: asin.into(),
+            kind: "audio".into(),
+            acr: None,
+            content_format: "AAX_44_128".into(),
+            variant: "original".into(),
+            request_kind: "adrm-high".into(),
+            version: None,
+            sku: None,
+            file_path: path.into(),
+            file_size: None,
+        };
+        db.record_download(MP.into(), record("A1", "/dl/Dune_Part_1.AAX_44_128.aaxc"))
+            .await
+            .unwrap();
+        db.record_download(MP.into(), record("A2", "/dl/Dune_Part_10.AAX_44_128.aaxc"))
+            .await
+            .unwrap();
+
+        // A different title rendering to the same stem collides with A1.
+        let owners = db
+            .colliding_asins("/dl/Dune_Part_1.".into(), "B9".into())
+            .await
+            .unwrap();
+        assert_eq!(owners, ["A1"], "prefix must not swallow Dune_Part_10");
+        // The owner itself never collides with its own files.
+        assert!(
+            db.colliding_asins("/dl/Dune_Part_1.".into(), "A1".into())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // `_` in the *queried* stem is literal, not a LIKE wildcard: an
+        // unescaped prefix "/dl/Dune_Part_1." would also match this record
+        // (each `_` matching the X/Y) and report a phantom collision.
+        db.record_download(MP.into(), record("A3", "/dl/DuneXPartY1.AAX_44_128.aaxc"))
+            .await
+            .unwrap();
+        let owners = db
+            .colliding_asins("/dl/Dune_Part_1.".into(), "B9".into())
+            .await
+            .unwrap();
+        assert_eq!(owners, ["A1"], "A3's X/Y path must not match the _ stem");
+    }
 
     /// A license belongs to the aaxc it was granted for, and to nothing else: a
     /// decrypted m4b is DRM-free and never needs it. So it goes with the

@@ -121,6 +121,40 @@ fn template_settings(ctx: &Ctx) -> (crate::config::schema::FilenameMode, usize, 
     (mode, max_len, template)
 }
 
+/// Guards a rendered base name against filename collisions between
+/// distinct titles (audit 2026-07-17, A7): the non-ASIN modes slug
+/// "Dune: Part 1" and "Dune Part 1" to the same `Dune_Part_1`, and the
+/// second download silently overwrote the first. When the stem already
+/// belongs to another ASIN's records, the ASIN is appended — the same
+/// disambiguator the `asin_*` modes and `%asin%` templates carry anyway.
+/// Same-ASIN matches (re-downloads, other qualities) pass unchanged.
+pub(crate) async fn disambiguated_base(
+    ctx: &Ctx,
+    dir: &Path,
+    base: String,
+    asin: &str,
+) -> Result<String> {
+    let db = ctx
+        .open_library_db()
+        .await
+        .context("could not consult the download records (collision check)")?;
+    let stem = join_relative(dir, &base);
+    let prefix = format!("{}.", stem.display());
+    let owners = db
+        .colliding_asins(prefix, asin.to_owned())
+        .await
+        .context("could not consult the download records (collision check)")?;
+    if owners.is_empty() {
+        return Ok(base);
+    }
+    eprintln!(
+        "{asin}: filename {base:?} already belongs to {} — appending the ASIN to keep \
+         both titles' files apart",
+        owners.join(", ")
+    );
+    Ok(format!("{base} [{asin}]"))
+}
+
 /// The fixed filename suffix (discriminator + extension) for a download
 /// artifact. `ext` is the actual on-disk extension (e.g. `aaxc`/`mp3` for
 /// audio) — for reorganize it comes from the existing file, so a renamed

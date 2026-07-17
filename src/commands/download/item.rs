@@ -100,6 +100,10 @@ pub(super) async fn download_one(
         }
         None => base_filename(ctx, plan.marketplace, asin).await?,
     };
+    // Distinct titles can render to the same name (non-ASIN modes); when
+    // the stem already belongs to another ASIN's records, append the ASIN
+    // instead of silently overwriting the other title's files (A7).
+    let base = crate::naming::disambiguated_base(ctx, plan.dir, base, asin).await?;
     // The custom filename mode may nest the title in subfolders; create them
     // before any artifact is written (a no-op for the flat modes).
     let stem = crate::naming::join_relative(plan.dir, &base);
