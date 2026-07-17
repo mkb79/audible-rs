@@ -24,16 +24,6 @@ use serde_json::{Value, json};
 use crate::commands::{catalog, collections, items};
 use crate::config::ctx::Ctx;
 
-/// Delays before each `add --sync` delta attempt: the library index
-/// follows an add asynchronously (same eventual consistency as the archive
-/// mutations, AUD-111). A remove needs no such wait — it soft-deletes
-/// locally.
-const SYNC_ATTEMPT_DELAYS: [std::time::Duration; 3] = [
-    std::time::Duration::from_secs(2),
-    std::time::Duration::from_secs(5),
-    std::time::Duration::from_secs(10),
-];
-
 /// The membership kind, from the shared taxonomy — selects the wording
 /// only; the wire call (`PUT`/`DELETE /1.0/library/item`) is the same.
 #[derive(Clone, Copy)]
@@ -299,41 +289,14 @@ pub(super) async fn remove(
 }
 
 /// After an add with `--sync`: run delta syncs until the new item is
-/// present in the local library, bounded because the server indexes an add
-/// asynchronously (within seconds); without `--sync`, point at the sync
-/// dependency. Remove needs no counterpart — it soft-deletes locally.
+/// present in the local library (shared poller — D4); without `--sync`,
+/// point at the sync dependency. Remove needs no counterpart — it
+/// soft-deletes locally.
 async fn reflect_present(ctx: &Ctx, sync: bool, marketplace: &str, asins: &[String]) -> Result<()> {
-    if !sync {
-        eprintln!("note: run `audible library sync` to reflect the change in the local library");
-        return Ok(());
-    }
-    let db = ctx.open_library_db().await?;
-    for (attempt, delay) in SYNC_ATTEMPT_DELAYS.iter().enumerate() {
-        if attempt > 0 {
-            eprintln!("change not in the library view yet; retrying the sync…");
-        }
-        tokio::time::sleep(*delay).await;
-        super::sync(ctx, false, false, false).await?;
-        let mut all_present = true;
-        for asin in asins {
-            if db
-                .item_doc(asin.clone(), marketplace.to_owned())
-                .await?
-                .is_none()
-            {
-                all_present = false;
-                break;
-            }
-        }
-        if all_present {
-            return Ok(());
-        }
-    }
-    eprintln!(
-        "warning: the change has not reached the library view yet — \
-         run `audible library sync` again in a moment"
-    );
-    Ok(())
+    super::sync::poll_until_reflected(ctx, sync, marketplace, asins, "the change", |doc| {
+        doc.is_some()
+    })
+    .await
 }
 
 #[cfg(test)]

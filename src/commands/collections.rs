@@ -455,16 +455,6 @@ async fn noun_remove(
     Ok(())
 }
 
-/// Delays before each `--sync` delta attempt: the mutation 202 is
-/// "accepted" — the library index follows asynchronously (verified live:
-/// an immediate delta reported 0 changes, one a few seconds later carried
-/// the `is_archived` flip; the app polls `/1.0/library` the same way).
-const SYNC_ATTEMPT_DELAYS: [std::time::Duration; 3] = [
-    std::time::Duration::from_secs(2),
-    std::time::Duration::from_secs(5),
-    std::time::Duration::from_secs(10),
-];
-
 /// After an archive mutation: run delta syncs until the local item docs
 /// reflect the new `is_archived` state (`--sync`, bounded retries because
 /// the server indexes the change asynchronously), or point at the sync
@@ -483,38 +473,17 @@ async fn sync_or_hint(
     asins: &[String],
     expect_archived: bool,
 ) -> Result<()> {
-    if !sync {
-        eprintln!("note: run `audible library sync` to reflect the change in the local library");
-        return Ok(());
-    }
-    let db = ctx.open_library_db().await?;
-    for (attempt, delay) in SYNC_ATTEMPT_DELAYS.iter().enumerate() {
-        if attempt > 0 {
-            eprintln!("change not in the library view yet; retrying the sync…");
-        }
-        tokio::time::sleep(*delay).await;
-        crate::commands::library::sync(ctx, false, false, false).await?;
-        let mut reflected = true;
-        for asin in asins {
-            let doc = db.item_doc(asin.clone(), marketplace.to_owned()).await?;
-            // Items without a library doc (e.g. archived podcast parents
-            // outside the items table) cannot be verified — treat as done.
-            if let Some(doc) = doc
-                && archived_in_doc(&doc) != Some(expect_archived)
-            {
-                reflected = false;
-                break;
-            }
-        }
-        if reflected {
-            return Ok(());
-        }
-    }
-    eprintln!(
-        "warning: the archive change has not reached the library view yet — \
-         run `audible library sync` again in a moment"
-    );
-    Ok(())
+    crate::commands::library::poll_until_reflected(
+        ctx,
+        sync,
+        marketplace,
+        asins,
+        "the archive change",
+        // Items without a library doc (e.g. archived podcast parents
+        // outside the items table) cannot be verified — treat as done.
+        |doc| doc.is_none_or(|doc| archived_in_doc(doc) == Some(expect_archived)),
+    )
+    .await
 }
 
 /// The `is_archived` value of a stored library item doc, if present.

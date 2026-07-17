@@ -601,6 +601,58 @@ fn is_stale(last_sync_utc: Option<&str>, max_age: std::time::Duration) -> bool {
     age > max_age
 }
 
+/// Delays before each bounded reflection attempt: the server indexes
+/// membership/archive mutations asynchronously (within seconds).
+const REFLECT_ATTEMPT_DELAYS: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(10),
+];
+
+/// Runs bounded delta syncs until `reflected` accepts every item's stored
+/// doc (audit 2026-07-17, D4 — the membership and archive pollers were
+/// two copies of this loop). Each attempt waits first (the server indexes
+/// mutations asynchronously), then delta-syncs, then checks the predicate
+/// over each item's stored doc (`None` = no doc). `what` words the final
+/// warning. Without `--sync`, prints the standard hint and returns.
+pub(crate) async fn poll_until_reflected(
+    ctx: &Ctx,
+    sync_requested: bool,
+    marketplace: &str,
+    asins: &[String],
+    what: &str,
+    reflected: impl Fn(Option<&str>) -> bool,
+) -> Result<()> {
+    if !sync_requested {
+        eprintln!("note: run `audible library sync` to reflect the change in the local library");
+        return Ok(());
+    }
+    let db = ctx.open_library_db().await?;
+    for (attempt, delay) in REFLECT_ATTEMPT_DELAYS.iter().enumerate() {
+        if attempt > 0 {
+            eprintln!("change not in the library view yet; retrying the sync…");
+        }
+        tokio::time::sleep(*delay).await;
+        sync(ctx, false, false, false).await?;
+        let mut all_reflected = true;
+        for asin in asins {
+            let doc = db.item_doc(asin.clone(), marketplace.to_owned()).await?;
+            if !reflected(doc.as_deref()) {
+                all_reflected = false;
+                break;
+            }
+        }
+        if all_reflected {
+            return Ok(());
+        }
+    }
+    eprintln!(
+        "warning: {what} has not reached the library view yet — \
+         run `audible library sync` again in a moment"
+    );
+    Ok(())
+}
+
 /// Runs a delta sync before a read when `auto_sync = delta` and the
 /// data is older than `sync_max_age` (archived architecture §8). Staleness
 /// is judged **per selected marketplace**: a fresh `de` sync must not let

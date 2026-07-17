@@ -453,7 +453,7 @@ mod membership;
 mod sync;
 
 pub use sync::{SyncOptions, SyncSummary, sync_library};
-pub(crate) use sync::{maybe_auto_sync, sync};
+pub(crate) use sync::{maybe_auto_sync, poll_until_reflected, sync};
 
 use changes::{changes, changes_prune};
 use list::{export, list, list_borrowed, list_missing, list_remote, search};
