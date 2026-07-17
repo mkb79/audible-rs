@@ -104,7 +104,7 @@ impl super::Command for LibraryCommand {
                             .require_equals(true)
                             .value_delimiter(',')
                             .default_missing_value("audio")
-                            .value_parser(["audio", "chapter", "pdf", "cover", "annotation", "all"])
+                            .value_parser(["audio", "chapter", "pdf", "cover", "all"])
                             .conflicts_with("remote")
                             .help_heading("Selection")
                             .help(
@@ -187,7 +187,7 @@ impl super::Command for LibraryCommand {
                             .require_equals(true)
                             .value_delimiter(',')
                             .default_missing_value("audio")
-                            .value_parser(["audio", "chapter", "pdf", "cover", "annotation", "all"])
+                            .value_parser(["audio", "chapter", "pdf", "cover", "all"])
                             .help(
                                 "Only episodes lacking a download record of these kinds \
                                  (no value: audio; `all` covers every kind)",
