@@ -283,10 +283,11 @@ async fn library_pdf_flag(ctx: &Ctx, marketplace: &str, asin: &str) -> Option<bo
     Some(flag)
 }
 
-/// Downloads each requested cover size to `<base>.cover_<size>.jpg`. The
-/// URL comes from the stored library item's `product_images` when the
-/// size was synced, else from a catalog lookup. Per-size skip honours the
-/// overwrite policy.
+/// Downloads each requested cover size to `<base>.cover_<size>.jpg`. Every size
+/// derives from the same source images, so those are resolved once per item
+/// rather than once per size: the stored document if there is one, and the
+/// catalog at most once, only for what the stored one cannot answer (AUD-209).
+/// Per-size skip honours the overwrite policy.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn download_covers(
     ctx: &Ctx,
@@ -300,14 +301,40 @@ pub(super) async fn download_covers(
     no_db_write: bool,
 ) -> Result<Vec<String>> {
     let mut written = Vec::new();
+    let stored = stored_images(ctx, marketplace, asin).await;
+    // `None` = the catalog has not been asked; `Some(None)` = asked, no images.
+    let mut fetched: Option<Option<ImageMap>> = None;
+
     for size in sizes {
         if !force && !no_db_write && variant_recorded(ctx, marketplace, asin, "cover", size).await {
             eprintln!("skipping cover {size} — already recorded (use --force)");
             continue;
         }
 
-        let Some(url) = cover_url(ctx, client, marketplace, asin, size).await? else {
-            eprintln!("no cover at size {size} for this title");
+        let mut url = stored
+            .as_ref()
+            .and_then(|images| derive_cover_url(images, size));
+        if url.is_none() {
+            if fetched.is_none() {
+                fetched = Some(
+                    request_cover_images(client, marketplace, asin, COVER_ANCHOR_SIZES).await?,
+                );
+            }
+            url = fetched
+                .as_ref()
+                .and_then(Option::as_ref)
+                .and_then(|images| derive_cover_url(images, size));
+        }
+
+        let Some(url) = url else {
+            // Two different facts, and only the second is about the title: say
+            // which one it is instead of blaming the title for both (AUD-209).
+            if has_images(stored.as_ref()) || has_images(fetched.as_ref().and_then(Option::as_ref))
+            {
+                eprintln!("cover {size}: no URL could be derived for this title");
+            } else {
+                eprintln!("no cover images for this title");
+            }
             continue;
         };
         let dest = join_relative(dir, &format!("{base}.cover_{size}.jpg"));
@@ -334,44 +361,42 @@ pub(super) async fn download_covers(
     Ok(written)
 }
 
-/// Resolves a cover URL for `asin` at `size`: derived from the stored
-/// `product_images` (no API call), else a catalog lookup.
-async fn cover_url(
-    ctx: &Ctx,
-    client: &crate::api::client::Client,
-    marketplace: &str,
-    asin: &str,
-    size: &str,
-) -> Result<Option<String>> {
-    if let Some(url) = cover_url_from_library(ctx, marketplace, asin, size).await {
-        return Ok(Some(url));
-    }
-    Ok(request_cover_url(client, marketplace, asin, size).await?)
-}
-
 /// Sizes at or below this resolve to a different, smaller source image than
 /// larger ones do; a URL for such a size cannot serve a bigger one — it would
 /// silently stay small (AUD-208).
 const SMALL_MASTER_MAX: u32 = 500;
 
-/// The cover URL for `size`, derived from the stored `product_images` without
-/// any request: the size is part of the URL, so restating it is enough
-/// (AUD-208). `None` falls through to the catalog.
-async fn cover_url_from_library(
-    ctx: &Ctx,
-    marketplace: &str,
-    asin: &str,
-    size: &str,
-) -> Option<String> {
-    let doc = stored_doc(ctx, marketplace, asin).await?;
-    let images = doc.get("product_images")?.as_object()?;
+/// What the catalog is asked for when there is no stored document to derive
+/// from: one size per source image — the same two [`anchor_url`] picks out of
+/// the set a sync stores, so both routes yield the same URL. Asking for these
+/// instead of the size actually wanted is what lets one request answer every
+/// size, including `native` — which is our word, not an API value (AUD-209).
+const COVER_ANCHOR_SIZES: &str = "500,1215";
 
+/// A `product_images` map: size key → URL.
+type ImageMap = serde_json::Map<String, serde_json::Value>;
+
+/// The stored `product_images` for an asin. `None` for anything the library has
+/// no document for, and for documents carrying no images at all.
+async fn stored_images(ctx: &Ctx, marketplace: &str, asin: &str) -> Option<ImageMap> {
+    let doc = stored_doc(ctx, marketplace, asin).await?;
+    doc.get("product_images")?.as_object().cloned()
+}
+
+/// The cover URL for `size` out of a set of source images, without any further
+/// request: the size is part of the URL, so restating it is enough (AUD-208).
+fn derive_cover_url(images: &ImageMap, size: &str) -> Option<String> {
     // An exact hit is the API's own URL for that size — take it as-is.
     if let Some(url) = images.get(size).and_then(serde_json::Value::as_str) {
         return Some(url.to_owned());
     }
-
     rewrite_size_marker(anchor_url(images, wants_large_master(size)?)?, size)
+}
+
+/// Whether any source image is on hand — what separates "this size could not be
+/// derived" from "the title has no cover at all" (AUD-209).
+fn has_images(images: Option<&ImageMap>) -> bool {
+    images.is_some_and(|images| !images.is_empty())
 }
 
 /// Whether a size needs the larger source image — `native` and anything above
@@ -391,10 +416,7 @@ fn wants_large_master(size: &str) -> Option<bool> {
 ///
 /// A large size needs a large source: with only small ones stored, `None`
 /// (→ catalog) beats silently handing back a small image.
-fn anchor_url(
-    images: &serde_json::Map<String, serde_json::Value>,
-    wants_large: bool,
-) -> Option<&str> {
+fn anchor_url(images: &ImageMap, wants_large: bool) -> Option<&str> {
     let sizes = || {
         images
             .iter()
@@ -579,5 +601,101 @@ mod tests {
         assert_eq!(wants_large_master("500"), Some(false));
         assert_eq!(wants_large_master("252"), Some(false));
         assert_eq!(wants_large_master("nonsense"), None);
+    }
+
+    /// What the catalog returns for [`COVER_ANCHOR_SIZES`] — built from the
+    /// constant itself, so narrowing it breaks these tests instead of quietly
+    /// leaving a class of sizes without an anchor.
+    fn anchor_images() -> ImageMap {
+        let entries: Vec<(&str, &str)> = COVER_ANCHOR_SIZES
+            .split(',')
+            .map(|size| {
+                let large = size.parse::<u32>().expect("numeric anchor") > SMALL_MASTER_MAX;
+                (size, if large { "LARGESRC01" } else { "SMALLSRC01" })
+            })
+            .collect();
+        images(&entries)
+    }
+
+    /// The fallback is only as good as its anchors: one per source image, or a
+    /// whole class of sizes has none to derive from (AUD-209).
+    #[test]
+    fn the_anchor_set_covers_both_sources() {
+        let anchors = anchor_images();
+        assert!(
+            anchor_url(&anchors, true).is_some(),
+            "no large-source anchor"
+        );
+        assert!(
+            anchor_url(&anchors, false).is_some(),
+            "no small-source anchor"
+        );
+    }
+
+    /// Asking the catalog for the anchors instead of the size wanted is what
+    /// lets one request answer every size — `native` included, which the API has
+    /// no word for and which therefore had no fallback at all (AUD-209).
+    #[test]
+    fn derives_every_size_from_the_catalog_anchors() {
+        let anchors = anchor_images();
+
+        // The case that started this: `native` for an episode, which has no
+        // stored document to derive from.
+        assert_eq!(
+            derive_cover_url(&anchors, "native").unwrap(),
+            "https://m.media-amazon.com/images/I/LARGESRC01.jpg"
+        );
+        // A size neither synced nor asked of the catalog.
+        assert_eq!(
+            derive_cover_url(&anchors, "700").unwrap(),
+            "https://m.media-amazon.com/images/I/LARGESRC01._SL700_.jpg"
+        );
+        // A small size still comes off the small source, as the API does it.
+        assert_eq!(
+            derive_cover_url(&anchors, "252").unwrap(),
+            "https://m.media-amazon.com/images/I/SMALLSRC01._SL252_.jpg"
+        );
+        // An exact hit is the API's own URL — untouched.
+        assert_eq!(
+            derive_cover_url(&anchors, "500").unwrap(),
+            "https://m.media-amazon.com/images/I/SMALLSRC01._SL500_.jpg"
+        );
+    }
+
+    /// The anchors are what the stored set resolves to anyway, so both routes
+    /// answer identically: an episode gets the same URL as an item (AUD-209).
+    #[test]
+    fn the_catalog_and_stored_routes_agree() {
+        let synced = images(&[
+            ("252", "SMALLSRC01"),
+            ("408", "SMALLSRC01"),
+            ("500", "SMALLSRC01"),
+            ("558", "LARGESRC01"),
+            ("900", "LARGESRC01"),
+            ("1215", "LARGESRC01"),
+        ]);
+        let anchors = anchor_images();
+
+        for size in ["native", "252", "500", "700", "2000"] {
+            assert_eq!(
+                derive_cover_url(&synced, size),
+                derive_cover_url(&anchors, size),
+                "size {size} derives differently depending on the route"
+            );
+        }
+    }
+
+    /// "This size could not be derived" and "the title has no cover" are
+    /// different facts, and only the second is about the title (AUD-209).
+    #[test]
+    fn having_images_is_not_the_same_as_resolving_a_size() {
+        assert!(!has_images(None));
+        assert!(!has_images(Some(&images(&[]))));
+
+        // Images on hand, but this size cannot be derived from them — a
+        // derivation failure, not an absent cover.
+        let small_only = images(&[("252", "SMALLSRC01"), ("500", "SMALLSRC01")]);
+        assert!(has_images(Some(&small_only)));
+        assert!(derive_cover_url(&small_only, "native").is_none());
     }
 }

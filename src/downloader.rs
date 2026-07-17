@@ -1203,29 +1203,31 @@ fn decode_annotations(status: reqwest::StatusCode, body: &[u8]) -> Option<serde_
     serde_json::from_slice(body).ok()
 }
 
-/// Fetches the cover image URL for `asin` at `size` (pixels) from the
-/// catalog. Used as a fallback when the size was not synced into the
-/// library (`product_images` in the stored item). Returns `None` when
-/// the catalog has no image at that size.
-pub async fn request_cover_url(
+/// Fetches `asin`'s cover source images from the catalog at the given
+/// `image_sizes`. Used when there is no stored library document to derive from:
+/// child episodes, and asins outside the library.
+///
+/// The caller asks for the sizes it can derive from, not the size it wants, so
+/// one request answers every size (AUD-209) — which sizes those are is the
+/// caller's rule to know. Returns `None` when the catalog has no images at all.
+pub async fn request_cover_images(
     client: &Client,
     country_code: &str,
     asin: &str,
-    size: &str,
-) -> Result<Option<String>, ApiError> {
+    image_sizes: &str,
+) -> Result<Option<serde_json::Map<String, serde_json::Value>>, ApiError> {
     let response = client
         .request(Method::GET, format!("/1.0/catalog/products/{asin}"))
         .country_code(country_code)
         .auth(AuthMode::Auto)
         .query("response_groups", "media")
-        .query("image_sizes", size)
+        .query("image_sizes", image_sizes)
         .send()
         .await?;
     let payload: serde_json::Value = response.json().await?;
     Ok(payload
         .get("product")
         .and_then(|product| product.get("product_images"))
-        .and_then(|images| images.get(size))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned))
+        .and_then(serde_json::Value::as_object)
+        .cloned())
 }
