@@ -292,15 +292,15 @@ impl super::Command for DownloadCommand {
 
         // Parsed up front: `--missing` resolves the item source from the
         // requested artifact kinds (items lacking any of them).
-        let mut base_targets = parse_kinds(matches.get_one::<String>("kind").expect("default"))?;
+        let base_targets = parse_kinds(matches.get_one::<String>("kind").expect("default"))?;
 
-        // Decrypt (AUD-27): the flag overrides the settings bundle. Enabling
-        // it implies the audio artifact (we need the aaxc to decrypt).
-        let decrypt_on = matches.get_flag("decrypt")
-            || ctx.settings_view().map(|v| v.decrypt()).unwrap_or(false);
-        if decrypt_on {
-            base_targets.insert(Artifact::Audio);
-        }
+        // Decrypt (AUD-27): the flag overrides the settings bundle. It applies
+        // to the audio this run downloads and never widens `--kind` (AUD-212).
+        let decrypt_on = resolve_decrypt(
+            base_targets.contains(&Artifact::Audio),
+            matches.get_flag("decrypt"),
+            ctx.settings_view().map(|v| v.decrypt()).unwrap_or(false),
+        )?;
         let keep_source = if matches.get_flag("keep_source") {
             true
         } else if matches.get_flag("remove_source") {
@@ -686,6 +686,28 @@ fn parse_cover_sizes(sizes: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Whether this run decrypts: `--decrypt` overrides the settings bundle, and
+/// the answer is scoped to the audio the run actually downloads.
+///
+/// Decryption never *widens* the selection (AUD-212). A configured `decrypt`
+/// is a standing preference about audio the user downloads, not an instruction
+/// to download audio — letting it reach into `--kind` meant `--kind cover`
+/// silently fetched and decrypted whole audiobooks.
+///
+/// `--decrypt` with an audio-less `--kind` is the one case with no sensible
+/// answer: it asks to decrypt something the run will not fetch. Both silent
+/// readings are a guess — download unasked-for audio, or drop the flag without
+/// a word — so it is rejected and the user decides.
+fn resolve_decrypt(audio_selected: bool, decrypt: bool, configured: bool) -> Result<bool> {
+    if decrypt && !audio_selected {
+        bail!(
+            "--decrypt needs the audio artifact, which --kind does not select; \
+             add `audio` to --kind, or drop --decrypt"
+        );
+    }
+    Ok(audio_selected && (decrypt || configured))
+}
+
 /// Splits a CLI CSV value (`--cover-size 500,900`) into trimmed items.
 fn split_csv(value: &str) -> Vec<String> {
     value
@@ -1022,5 +1044,35 @@ mod tests {
         assert!(parse_cover_sizes(&v(&["0"])).is_err());
         assert!(parse_cover_sizes(&v(&["abc"])).is_err());
         assert!(parse_cover_sizes(&[]).is_err());
+    }
+
+    /// A configured `decrypt` must not reach into `--kind`: it says what to do
+    /// with audio the run downloads, not that audio should be downloaded
+    /// (AUD-212).
+    #[test]
+    fn a_configured_decrypt_never_widens_the_selection() {
+        let decrypts = |audio, configured| resolve_decrypt(audio, false, configured).unwrap();
+
+        // Audio is selected — the settings bundle decides, as before.
+        assert!(decrypts(true, true));
+        assert!(!decrypts(true, false));
+
+        // Audio is NOT selected (`--kind cover`): the config is inert. This is
+        // the bug — it used to pull the whole audiobook in and decrypt it.
+        assert!(!decrypts(false, true));
+
+        // The flag still overrides a bundle that says no.
+        assert!(resolve_decrypt(true, true, false).unwrap());
+    }
+
+    /// `--decrypt` with an audio-less `--kind` asks to decrypt what the run
+    /// will not fetch. Both silent readings guess; the user is asked instead.
+    #[test]
+    fn decrypt_without_audio_selected_is_rejected() {
+        let error = resolve_decrypt(false, true, false).unwrap_err();
+        let message = error.to_string();
+        // The message must name the way out, not just the refusal.
+        assert!(message.contains("--kind"), "{message}");
+        assert!(message.contains("audio"), "{message}");
     }
 }
