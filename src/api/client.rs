@@ -136,6 +136,12 @@ pub enum ApiError {
         /// — quote it when reporting the failure to Amazon (AUD-29).
         request_id: String,
     },
+    /// An annotation response was 2xx but its non-empty body was not
+    /// parseable JSON (a proxy/HTML error page, a transient fault). A
+    /// failure — never "no annotations", which would be recorded and
+    /// skip the item's real bookmarks forever.
+    #[error("annotation response for {0:?} was 2xx but not parseable JSON")]
+    AnnotationResponse(String),
     /// A metadata request returned no chapter information.
     #[error("metadata request for {0:?} returned no chapter_info")]
     ChapterInfo(String),

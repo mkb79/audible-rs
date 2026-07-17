@@ -569,16 +569,35 @@ mod tests {
     fn decode_annotations_treats_no_annotations_as_none() {
         use reqwest::StatusCode;
         // 404: the title has no annotations.
-        assert!(decode_annotations(StatusCode::NOT_FOUND, b"").is_none());
-        assert!(decode_annotations(StatusCode::NOT_FOUND, b"Not Found").is_none());
+        assert!(matches!(
+            decode_annotations(StatusCode::NOT_FOUND, b""),
+            AnnotationBody::None
+        ));
+        assert!(matches!(
+            decode_annotations(StatusCode::NOT_FOUND, b"Not Found"),
+            AnnotationBody::None
+        ));
         // Empty / whitespace body on a 2xx.
-        assert!(decode_annotations(StatusCode::OK, b"").is_none());
-        assert!(decode_annotations(StatusCode::OK, b"  \n ").is_none());
-        // Non-JSON body is best-effort "none", never a crash.
-        assert!(decode_annotations(StatusCode::OK, b"<html>nope</html>").is_none());
+        assert!(matches!(
+            decode_annotations(StatusCode::OK, b""),
+            AnnotationBody::None
+        ));
+        assert!(matches!(
+            decode_annotations(StatusCode::OK, b"  \n "),
+            AnnotationBody::None
+        ));
+        // A non-empty non-JSON 2xx is a FAILURE, not "none" — recording it
+        // as none would permanently skip the item's real bookmarks (A14).
+        assert!(matches!(
+            decode_annotations(StatusCode::OK, b"<html>nope</html>"),
+            AnnotationBody::Unparseable
+        ));
         // Valid JSON is the annotation payload.
-        let payload = decode_annotations(StatusCode::OK, br#"{"md5":"x","payload":{}}"#)
-            .expect("valid JSON decodes");
+        let AnnotationBody::Payload(payload) =
+            decode_annotations(StatusCode::OK, br#"{"md5":"x","payload":{}}"#)
+        else {
+            panic!("valid JSON decodes");
+        };
         assert_eq!(payload["md5"], "x");
     }
 
@@ -1206,20 +1225,38 @@ pub async fn request_annotations(
     let response = response.error_for_status()?;
     let status = response.status();
     let bytes = response.bytes().await?;
-    Ok(decode_annotations(status, &bytes))
+    match decode_annotations(status, &bytes) {
+        AnnotationBody::Payload(doc) => Ok(Some(doc)),
+        AnnotationBody::None => Ok(None),
+        AnnotationBody::Unparseable => Err(ApiError::AnnotationResponse(asin.to_owned())),
+    }
 }
 
-/// Decides what an annotation response means, free of IO so it can be
-/// unit-tested: a `404`, an empty/whitespace body, or an unparseable body
-/// all mean "no annotations" (`None`); valid JSON is the annotation payload.
-fn decode_annotations(status: reqwest::StatusCode, body: &[u8]) -> Option<serde_json::Value> {
+/// What an annotation response body means (free of IO for unit tests).
+#[derive(Debug)]
+enum AnnotationBody {
+    /// `404` or an empty/whitespace body: genuinely no annotations.
+    None,
+    /// Valid JSON: the annotation payload.
+    Payload(serde_json::Value),
+    /// 2xx with a non-empty body that is not JSON (a proxy/HTML error
+    /// page, a transient fault). A **failure**, never "no annotations" —
+    /// recording it as `none` made `annotations sync --missing` skip the
+    /// item's real bookmarks forever (audit 2026-07-17, A14).
+    Unparseable,
+}
+
+fn decode_annotations(status: reqwest::StatusCode, body: &[u8]) -> AnnotationBody {
     if status == reqwest::StatusCode::NOT_FOUND {
-        return None;
+        return AnnotationBody::None;
     }
     if body.iter().all(u8::is_ascii_whitespace) {
-        return None;
+        return AnnotationBody::None;
     }
-    serde_json::from_slice(body).ok()
+    match serde_json::from_slice(body) {
+        Ok(doc) => AnnotationBody::Payload(doc),
+        Err(_) => AnnotationBody::Unparseable,
+    }
 }
 
 /// Fetches `asin`'s cover source images from the catalog at the given

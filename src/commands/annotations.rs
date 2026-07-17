@@ -159,6 +159,12 @@ async fn sync(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
         }
     }
     eprintln!("annotations: {ok} synced · {none} none · {failed} failed");
+    // Exit-code honesty (its siblings download/library sync bail the same
+    // way): a run with failures must not report success — an agent job or
+    // cron would otherwise treat a total network failure as code 0.
+    if failed > 0 {
+        bail!("{failed} item(s) failed to sync annotations");
+    }
     Ok(())
 }
 
