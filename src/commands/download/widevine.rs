@@ -86,26 +86,8 @@ pub(super) fn write_wvkey(path: &Path, key: &ContentKey) -> Result<()> {
         "key": hex::encode(&*key.key),
     })
     .to_string();
-    write_private(path, json.as_bytes()).with_context(|| format!("writing {}", path.display()))
-}
-
-#[cfg(unix)]
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(bytes)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, bytes)
+    super::write_private(path, json.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// The full Widevine audio path for one title: license → MPD → content key
