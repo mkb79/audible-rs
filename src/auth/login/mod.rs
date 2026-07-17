@@ -207,14 +207,27 @@ pub fn username_login_supported(locale: &Locale) -> bool {
     matches!(locale.country_code, "de" | "us" | "uk")
 }
 
+/// The OAuth authorization-code query parameter the maplanding redirect
+/// carries. One home for the three login paths (audit 2026-07-17, D6):
+/// the pasted-URL path here, the internal follow path, and the reverse
+/// proxy — each had its own copy of the name + find/non-empty rule.
+pub(crate) const AUTH_CODE_PARAM: &str = "openid.oa2.authorization_code";
+
+/// The non-empty `AUTH_CODE_PARAM` value among decoded query pairs, if any.
+/// The shared core behind all three login extractors.
+pub(crate) fn auth_code_from_pairs<'a>(
+    pairs: impl Iterator<Item = (std::borrow::Cow<'a, str>, std::borrow::Cow<'a, str>)>,
+) -> Option<String> {
+    pairs
+        .filter(|(key, _)| key == AUTH_CODE_PARAM)
+        .map(|(_, value)| value.into_owned())
+        .find(|code| !code.is_empty())
+}
+
 /// Extracts the `openid.oa2.authorization_code` from the pasted redirect URL.
 pub fn extract_authorization_code(redirect: &str) -> Result<String, LoginError> {
     let url = reqwest::Url::parse(redirect.trim()).map_err(|_| LoginError::InvalidRedirect)?;
-    url.query_pairs()
-        .find(|(key, _)| key == "openid.oa2.authorization_code")
-        .map(|(_, value)| value.into_owned())
-        .filter(|code| !code.is_empty())
-        .ok_or(LoginError::NoAuthorizationCode)
+    auth_code_from_pairs(url.query_pairs()).ok_or(LoginError::NoAuthorizationCode)
 }
 
 /// Registers the device with Amazon (`POST /auth/register`) using the OAuth

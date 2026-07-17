@@ -7,6 +7,7 @@
 //! `db check`, `db reset` (archived architecture §12).
 
 use super::prompt::confirm;
+use super::strings;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
@@ -233,19 +234,11 @@ impl super::Command for DbCommand {
         match matches.subcommand() {
             Some(("downloads", sub)) => match sub.subcommand() {
                 Some(("list", list)) => {
-                    let asins: Vec<String> = list
-                        .get_many::<String>("asin")
-                        .map(|v| v.cloned().collect())
-                        .unwrap_or_default();
-                    let titles: Vec<String> = list
-                        .get_many::<String>("title")
-                        .map(|v| v.cloned().collect())
-                        .unwrap_or_default();
                     let has_source = list.contains_id("asin") || list.contains_id("title");
                     downloads_list(
                         ctx,
-                        asins,
-                        titles,
+                        strings(list, "asin"),
+                        strings(list, "title"),
                         has_source,
                         list.get_one::<String>("kind").cloned(),
                         list.get_one::<String>("variant").cloned(),
@@ -266,19 +259,11 @@ impl super::Command for DbCommand {
                     .await
                 }
                 Some(("remove", remove)) => {
-                    let asins: Vec<String> = remove
-                        .get_many::<String>("asin")
-                        .map(|v| v.cloned().collect())
-                        .unwrap_or_default();
-                    let titles: Vec<String> = remove
-                        .get_many::<String>("title")
-                        .map(|v| v.cloned().collect())
-                        .unwrap_or_default();
                     let has_source = remove.contains_id("asin") || remove.contains_id("title");
                     downloads_remove(
                         ctx,
-                        asins,
-                        titles,
+                        strings(remove, "asin"),
+                        strings(remove, "title"),
                         has_source,
                         remove.get_one::<String>("kind").cloned(),
                         remove.get_one::<String>("format").cloned(),
@@ -296,14 +281,8 @@ impl super::Command for DbCommand {
                 Some(("remove", remove)) => {
                     library_remove(
                         ctx,
-                        remove
-                            .get_many::<String>("asin")
-                            .map(|v| v.cloned().collect())
-                            .unwrap_or_default(),
-                        remove
-                            .get_many::<String>("title")
-                            .map(|v| v.cloned().collect())
-                            .unwrap_or_default(),
+                        strings(remove, "asin"),
+                        strings(remove, "title"),
                         remove.get_flag("yes"),
                     )
                     .await

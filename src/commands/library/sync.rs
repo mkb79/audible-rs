@@ -161,17 +161,11 @@ pub async fn sync_library(
                     sequence: entry.sequence,
                 })
                 .collect();
+            let (title, subtitle) = model::title_subtitle(&item);
             upserts.push(UpsertItem {
                 asin: asin.to_owned(),
-                title: item
-                    .get("title")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                subtitle: item
-                    .get("subtitle")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
+                title,
+                subtitle,
                 full_title,
                 doc: item.to_string(),
                 series,
@@ -323,19 +317,13 @@ async fn resolve_episodes(
             tracing::warn!(asin, "skipping episode without title");
             return;
         };
+        let (title, subtitle) = model::title_subtitle(&item);
         episodes.insert(
             asin.to_owned(),
             crate::db::UpsertEpisode {
                 asin: asin.to_owned(),
-                title: item
-                    .get("title")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                subtitle: item
-                    .get("subtitle")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
+                title,
+                subtitle,
                 full_title,
                 doc: item.to_string(),
             },
@@ -422,23 +410,14 @@ async fn fetch_episode_asins(
         .send()
         .await?;
     let body: serde_json::Value = response.error_for_status()?.json().await?;
-    let Some(relationships) = body
-        .get("product")
-        .and_then(|product| product.get("relationships"))
-        .and_then(serde_json::Value::as_array)
-    else {
+    let Some(product) = body.get("product") else {
         return Ok(Vec::new());
     };
-    Ok(relationships
-        .iter()
+    Ok(model::child_relationships(product)
         .filter(|rel| {
-            rel.get("relationship_to_product")
+            rel.get("relationship_type")
                 .and_then(serde_json::Value::as_str)
-                == Some("child")
-                && rel
-                    .get("relationship_type")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("episode")
+                == Some("episode")
         })
         .filter_map(|rel| {
             rel.get("asin")

@@ -753,7 +753,7 @@ async fn run_interactive(ctx: &Ctx, args: ApiArgs) -> Result<()> {
         .interact_on(&term)?;
     let normalized = normalize_api_path(&raw_path);
 
-    let auth_modes = ["auto", "signing", "token", "cookies"];
+    let auth_modes = AuthMode::LABELS;
     let auth_idx = dialoguer::Select::with_theme(&theme)
         .with_prompt("Auth mode")
         .items(auth_modes)
@@ -1044,7 +1044,7 @@ mod tests {
 
     #[test]
     fn auth_mode_str_round_trips() {
-        for label in ["auto", "signing", "token", "cookies"] {
+        for label in AuthMode::LABELS {
             let mode: AuthMode = label.parse().unwrap();
             assert_eq!(auth_mode_str(mode), label);
         }

@@ -98,11 +98,7 @@ impl super::Command for CollectionsCommand {
     }
 
     async fn run(&self, ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
-        let strings = |m: &clap::ArgMatches, id: &str| -> Vec<String> {
-            m.get_many::<String>(id)
-                .map(|v| v.cloned().collect())
-                .unwrap_or_default()
-        };
+        use crate::commands::strings;
         match matches.subcommand() {
             Some(("list", _)) => list_lists(ctx).await,
             Some((name, sub)) => {
@@ -435,18 +431,7 @@ async fn noun_remove(
     // D7: a named selection that resolves to nothing fails.
     crate::commands::items::require_nonempty(&targets, "titles")?;
 
-    let meta = collection_meta(client, &marketplace, noun.collection_id).await?;
-    let mut request = client
-        .request(
-            Method::DELETE,
-            format!("/1.0/collections/{}/items", noun.collection_id),
-        )
-        .country_code(&marketplace)
-        .query("state_token", &meta.state_token);
-    for asin in &targets {
-        request = request.query("asins", asin);
-    }
-    request.send().await?.error_for_status()?;
+    delete_collection_items(client, &marketplace, noun.collection_id, &targets).await?;
     for asin in &targets {
         eprintln!("removed {asin} from {}", noun.phrase);
     }
@@ -609,19 +594,33 @@ pub(crate) async fn remove_from_archive(
     if targets.is_empty() {
         return Ok(targets);
     }
-    let meta = collection_meta(client, marketplace, ARCHIVE.collection_id).await?;
+    delete_collection_items(client, marketplace, ARCHIVE.collection_id, &targets).await?;
+    Ok(targets)
+}
+
+/// The batched collection-item DELETE (audit 2026-07-17, D6): fetch the
+/// collection's `state_token` and issue `DELETE …/items` with repeated
+/// `asins=` params. One home for `collections … remove` and the archive
+/// removal used by `library add` (re-adding a title unarchives it).
+async fn delete_collection_items(
+    client: &Client,
+    marketplace: &str,
+    collection_id: &str,
+    asins: &[String],
+) -> Result<()> {
+    let meta = collection_meta(client, marketplace, collection_id).await?;
     let mut request = client
         .request(
             Method::DELETE,
-            format!("/1.0/collections/{}/items", ARCHIVE.collection_id),
+            format!("/1.0/collections/{collection_id}/items"),
         )
         .country_code(marketplace)
         .query("state_token", &meta.state_token);
-    for asin in &targets {
+    for asin in asins {
         request = request.query("asins", asin);
     }
     request.send().await?.error_for_status()?;
-    Ok(targets)
+    Ok(())
 }
 
 /// Resolves `remove` inputs to collection ASINs: explicit ASINs must be

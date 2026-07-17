@@ -273,8 +273,9 @@ pub(crate) fn maplanding_redirect_policy() -> reqwest::redirect::Policy {
     })
 }
 
-/// The OAuth query parameter that carries the authorization code.
-const AUTH_CODE_PARAM: &str = "openid.oa2.authorization_code";
+/// The OAuth query parameter that carries the authorization code (one
+/// home in the login module root, D6).
+use super::AUTH_CODE_PARAM;
 
 /// Optional debugging aid: when `AUDIBLE_LOGIN_DUMP_DIR` is set, write each
 /// sign-in page's HTML there so a user can attach them to a bug report when
@@ -300,10 +301,7 @@ fn dump_page(step: usize, label: &str, text: &str) {
 
 /// Extracts `openid.oa2.authorization_code` from a (redirected) URL.
 pub(crate) fn auth_code(url: &Url) -> Option<String> {
-    url.query_pairs()
-        .find(|(key, _)| key == AUTH_CODE_PARAM)
-        .map(|(_, value)| value.into_owned())
-        .filter(|code| !code.is_empty())
+    super::auth_code_from_pairs(url.query_pairs())
 }
 
 #[cfg(test)]

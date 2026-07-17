@@ -351,11 +351,7 @@ impl super::Command for LibraryCommand {
     }
 
     async fn run(&self, ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
-        let strings = |m: &clap::ArgMatches, id: &str| -> Vec<String> {
-            m.get_many::<String>(id)
-                .map(|v| v.cloned().collect())
-                .unwrap_or_default()
-        };
+        use crate::commands::strings;
         let limit = |m: &clap::ArgMatches| match *m.get_one::<u32>("limit").expect("default") {
             0 => u32::MAX,
             n => n,

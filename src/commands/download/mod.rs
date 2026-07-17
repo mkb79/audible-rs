@@ -600,10 +600,7 @@ async fn resolve_source(
     audio_request_kinds: Vec<String>,
     include_podcasts: bool,
 ) -> Result<(Vec<String>, ExternalDocs)> {
-    let asins: Vec<String> = matches
-        .get_many::<String>("asin")
-        .map(|values| values.cloned().collect())
-        .unwrap_or_default();
+    let asins: Vec<String> = crate::commands::strings(matches, "asin");
 
     // Scope the database handle so it is dropped before the download
     // helpers open their own connections.
@@ -665,10 +662,7 @@ async fn resolve_source(
         .await?
     };
 
-    let titles: Vec<String> = matches
-        .get_many::<String>("title")
-        .map(|values| values.cloned().collect())
-        .unwrap_or_default();
+    let titles: Vec<String> = crate::commands::strings(matches, "title");
     let resolved = crate::commands::items::resolve_asins(
         &db,
         marketplace,

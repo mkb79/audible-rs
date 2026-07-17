@@ -1126,12 +1126,9 @@ fn parse_widevine_grant(
             version: cref["version"].as_str().map(str::to_owned),
             sku: cref["sku"].as_str().map(str::to_owned),
             content_size,
-            // `pdf_url` sits under content_metadata (like the aaxc path), with a
-            // top-level fallback.
-            pdf_url: metadata["pdf_url"]
-                .as_str()
-                .or_else(|| license["pdf_url"].as_str())
-                .map(str::to_owned),
+            // Same `pdf_url` rule as the aaxc path (content_metadata,
+            // top-level fallback) — one home, D6.
+            pdf_url: crate::models::content::pdf_url_from_license(license, Some(metadata)),
         })),
         // A Mpeg fallback (podcasts / asset-less titles) — a plain MP3 URL.
         Some("Mpeg") => Ok(WidevineGrant::Mpeg(MpegGrant {

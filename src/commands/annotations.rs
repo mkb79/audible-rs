@@ -108,14 +108,8 @@ async fn sync(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
     let marketplaces = ctx.marketplaces()?;
     let save = matches.get_flag("save");
 
-    let many = |key| -> Vec<String> {
-        matches
-            .get_many::<String>(key)
-            .map(|values| values.cloned().collect())
-            .unwrap_or_default()
-    };
-    let asins = many("asin");
-    let titles = many("title");
+    let asins = crate::commands::strings(matches, "asin");
+    let titles = crate::commands::strings(matches, "title");
     let all = matches.get_flag("all");
     let missing = matches.get_flag("missing");
     if asins.is_empty() && titles.is_empty() && !all && !missing {

@@ -546,11 +546,7 @@ fn rewrite_html(html: &str, amazon_base: &str, proxy_prefix: &str) -> String {
 
 /// Extracts `openid.oa2.authorization_code` from a query string, if present.
 fn code_from_query(query: Option<&str>) -> Option<String> {
-    let query = query?;
-    url::form_urlencoded::parse(query.as_bytes())
-        .find(|(key, _)| key == "openid.oa2.authorization_code")
-        .map(|(_, value)| value.into_owned())
-        .filter(|code| !code.is_empty())
+    super::auth_code_from_pairs(url::form_urlencoded::parse(query?.as_bytes()))
 }
 
 /// Rewrites a redirect `Location` onto the proxy: an absolute Amazon URL or a

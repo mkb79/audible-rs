@@ -40,13 +40,8 @@ pub(super) fn info_command() -> clap::Command {
 
 /// `download info` — one table row per artifact kind and audio format.
 pub(super) async fn info(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
-    let strings = |id: &str| -> Vec<String> {
-        matches
-            .get_many::<String>(id)
-            .map(|v| v.cloned().collect())
-            .unwrap_or_default()
-    };
-    show(ctx, strings("asin"), strings("title")).await
+    use crate::commands::strings;
+    show(ctx, strings(matches, "asin"), strings(matches, "title")).await
 }
 
 async fn show(ctx: &Ctx, asins: Vec<String>, titles: Vec<String>) -> Result<()> {

@@ -259,10 +259,7 @@ fn show_audit(ctx: &Ctx, tail: Option<usize>, caller: Option<&str>) -> Result<()
 /// `agent token create` — mint an app token, store its hash, print it once.
 fn token_create(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()> {
     let store = crate::session::tokens::TokenStore::new(ctx.config_dir());
-    let scopes: Vec<String> = args
-        .get_many::<String>("scopes")
-        .map(|v| v.cloned().collect())
-        .unwrap_or_default();
+    let scopes: Vec<String> = crate::commands::strings(args, "scopes");
     let account = args.get_one::<String>("account").cloned();
     let ttl = args
         .get_one::<String>("ttl")

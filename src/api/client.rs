@@ -59,6 +59,13 @@ pub enum AuthMode {
     Cookies,
 }
 
+impl AuthMode {
+    /// The mode labels in canonical order — one home (audit 2026-07-17,
+    /// D6): the interactive `api` picker and its round-trip test each had
+    /// their own copy of this list.
+    pub const LABELS: [&'static str; 4] = ["auto", "signing", "token", "cookies"];
+}
+
 impl FromStr for AuthMode {
     type Err = String;
 

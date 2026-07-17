@@ -87,11 +87,7 @@ impl DownloadLicense {
                     .and_then(|r| r.get("content_size_in_bytes"))
                     .and_then(Value::as_u64)
             }),
-            pdf_url: metadata
-                .and_then(|m| m.get("pdf_url"))
-                .or_else(|| license.get("pdf_url"))
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            pdf_url: pdf_url_from_license(license, metadata),
             has_voucher: license.get("license_response").is_some(),
             voucher_raw: str_at(license, &["license_response"]),
             denial_message: license
@@ -174,6 +170,19 @@ impl DownloadLicense {
             raw,
         })
     }
+}
+
+/// The companion-PDF URL of a licenserequest response (audit 2026-07-17,
+/// D6): `content_metadata.pdf_url`, else the `content_license` top-level
+/// `pdf_url`. One home for the aaxc [`DownloadLicense::from_response`] and
+/// the Widevine grant parser, which each walked it. `license` is the
+/// `content_license` object; `metadata` is its `content_metadata`.
+pub fn pdf_url_from_license(license: &Value, metadata: Option<&Value>) -> Option<String> {
+    metadata
+        .and_then(|m| m.get("pdf_url"))
+        .or_else(|| license.get("pdf_url"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 /// A decrypted aaxc voucher: the content `key`/`iv` (hex) plus the full

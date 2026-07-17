@@ -94,10 +94,7 @@ pub(crate) struct CatalogDetails {
 impl CatalogDetails {
     /// `Title: Subtitle` (or just the title).
     pub(crate) fn full_title(&self) -> String {
-        match &self.subtitle {
-            Some(subtitle) => format!("{}: {subtitle}", self.title),
-            None => self.title.clone(),
-        }
+        crate::models::library::join_title_subtitle(&self.title, self.subtitle.as_deref())
     }
 }
 
