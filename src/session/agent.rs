@@ -41,9 +41,40 @@ pub fn token_path(ctx: &Ctx) -> PathBuf {
 }
 
 /// One unlocked account session and its last-use instant (idle eviction).
+/// `last_used` is atomic (millis since the backend's epoch) so the hot
+/// read path can bump it without a write lock — eviction must measure
+/// idleness, not session age (audit 2026-07-17, A10: a backend polling
+/// every 30 s was still evicted at `idle_timeout` after creation, and a
+/// `prompt`-source account could then never re-unlock headless).
 struct Session {
     ctx: Arc<Ctx>,
-    last_used: Instant,
+    last_used_ms: std::sync::atomic::AtomicU64,
+}
+
+impl Session {
+    fn new(ctx: Arc<Ctx>, epoch: Instant) -> Self {
+        let session = Session {
+            ctx,
+            last_used_ms: std::sync::atomic::AtomicU64::new(0),
+        };
+        session.touch(epoch);
+        session
+    }
+
+    /// Marks the session as used now.
+    fn touch(&self, epoch: Instant) {
+        self.last_used_ms.store(
+            epoch.elapsed().as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// How long ago the session was last used.
+    fn idle_for(&self, epoch: Instant) -> Duration {
+        let last =
+            Duration::from_millis(self.last_used_ms.load(std::sync::atomic::Ordering::Relaxed));
+        epoch.elapsed().saturating_sub(last)
+    }
 }
 
 /// State of an async job (AUD-119).
@@ -70,6 +101,8 @@ type Jobs = Arc<RwLock<HashMap<String, JobEntry>>>;
 /// every per-account `Ctx` is built from.
 struct AgentBackend {
     config_dir: PathBuf,
+    /// Base instant for the sessions' atomic last-use stamps.
+    epoch: Instant,
     admin_token: String,
     invoke_exe: PathBuf,
     /// Built-in command names for `/v1/invoke`/`/v1/jobs`, from the
@@ -123,22 +156,20 @@ impl Backend for AgentBackend {
         let name = probe.account_name()?;
 
         if let Some(session) = self.sessions.read().await.get(&name) {
+            // Every use keeps the session alive — this fast path is the
+            // agent's normal serving path, so skipping the bump here
+            // evicted sessions that were in active use (A10).
+            session.touch(self.epoch);
             return Ok(Arc::clone(&session.ctx));
         }
         let mut sessions = self.sessions.write().await;
         // Re-check: another task may have inserted it meanwhile.
         if let Some(session) = sessions.get_mut(&name) {
-            session.last_used = Instant::now();
+            session.touch(self.epoch);
             return Ok(Arc::clone(&session.ctx));
         }
         let ctx = Arc::new(self.build_ctx(Some(&name))?);
-        sessions.insert(
-            name,
-            Session {
-                ctx: Arc::clone(&ctx),
-                last_used: Instant::now(),
-            },
-        );
+        sessions.insert(name, Session::new(Arc::clone(&ctx), self.epoch));
         Ok(ctx)
     }
 
@@ -183,13 +214,10 @@ impl Backend for AgentBackend {
         let ctx = self.build_ctx(account)?;
         let name = ctx.account_name()?;
         ctx.unlock_with_password(password).await?;
-        self.sessions.write().await.insert(
-            name.clone(),
-            Session {
-                ctx: Arc::new(ctx),
-                last_used: Instant::now(),
-            },
-        );
+        self.sessions
+            .write()
+            .await
+            .insert(name.clone(), Session::new(Arc::new(ctx), self.epoch));
         Ok(name)
     }
 
@@ -338,10 +366,9 @@ impl AgentBackend {
 
     /// Drops sessions idle longer than the timeout.
     async fn evict_idle(&self) {
-        let now = Instant::now();
         let mut sessions = self.sessions.write().await;
         sessions.retain(|name, session| {
-            let keep = now.duration_since(session.last_used) < self.idle_timeout;
+            let keep = session.idle_for(self.epoch) < self.idle_timeout;
             if !keep {
                 tracing::info!(account = name, "evicting idle session");
             }
@@ -378,6 +405,7 @@ pub async fn serve(ctx: &Ctx, builtins: Vec<String>) -> Result<()> {
         .unwrap_or_else(|_| Duration::from_secs(900));
     let backend = Arc::new(AgentBackend {
         config_dir: ctx.config_dir().to_owned(),
+        epoch: Instant::now(),
         admin_token,
         invoke_exe: std::env::current_exe().context("could not resolve the own binary")?,
         builtins,
@@ -513,6 +541,7 @@ mod tests {
     fn backend(ctx: &Ctx, idle: Duration) -> AgentBackend {
         AgentBackend {
             config_dir: ctx.config_dir().to_owned(),
+            epoch: Instant::now(),
             admin_token: "T".into(),
             invoke_exe: PathBuf::from("/bin/true"),
             builtins: vec!["library".to_owned()],
@@ -550,6 +579,35 @@ mod tests {
         backend.session(Some("a")).await.unwrap();
         assert_eq!(backend.sessions.read().await.len(), 1);
         tokio::time::sleep(Duration::from_millis(40)).await;
+        backend.evict_idle().await;
+        assert_eq!(backend.sessions.read().await.len(), 0);
+    }
+
+    /// A10: eviction measures idleness, not age. A session that is used
+    /// continuously (the read fast path — the agent's normal serving
+    /// path) must survive past `idle_timeout`; before the fix it was
+    /// evicted at `idle_timeout` after creation regardless of use.
+    #[tokio::test]
+    async fn actively_used_sessions_survive_eviction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let backend = backend(&ctx, Duration::from_millis(60));
+        backend.session(Some("a")).await.unwrap();
+
+        // Keep using the session well past the idle timeout.
+        for _ in 0..6 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            backend.session(Some("a")).await.unwrap();
+            backend.evict_idle().await;
+            assert_eq!(
+                backend.sessions.read().await.len(),
+                1,
+                "an in-use session must never be evicted"
+            );
+        }
+
+        // Once genuinely idle, it still goes.
+        tokio::time::sleep(Duration::from_millis(80)).await;
         backend.evict_idle().await;
         assert_eq!(backend.sessions.read().await.len(), 0);
     }
