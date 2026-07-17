@@ -220,7 +220,7 @@ pub(super) async fn reorganize(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()>
             // moment it enters the library. Without one, nothing can re-derive
             // a name, so the file keeps the one it was given and only follows
             // the download directory.
-            let paths = match template_context(ctx, marketplace, &entry.asin).await {
+            let paths = match template_context(ctx, marketplace, &entry.asin).await? {
                 Some(values) => planned_paths(
                     &entry.asin,
                     &entry.kind,
@@ -268,7 +268,7 @@ pub(super) async fn reorganize(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()>
             });
         }
         for (asin, path) in db.reorg_annotations(marketplace.clone()).await? {
-            let Some(values) = template_context(ctx, marketplace, &asin).await else {
+            let Some(values) = template_context(ctx, marketplace, &asin).await? else {
                 skipped += 1;
                 continue;
             };

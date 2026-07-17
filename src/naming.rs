@@ -96,7 +96,9 @@ pub(crate) fn resolve_base(
 /// current resolved settings. Falls back to the ASIN when the item is not in the
 /// local database (no metadata to name it by).
 pub(crate) async fn base_filename(ctx: &Ctx, marketplace: &str, asin: &str) -> Result<String> {
-    let Some(values) = template_context(ctx, marketplace, asin).await else {
+    // The bare-ASIN fallback is only for titles the database genuinely does
+    // not know; a database failure propagates (see `template_context`).
+    let Some(values) = template_context(ctx, marketplace, asin).await? else {
         return Ok(asin.to_owned());
     };
     let (mode, max_len, template) = template_settings(ctx);
@@ -150,14 +152,20 @@ pub(crate) fn sidecar_path(file: &Path) -> Option<PathBuf> {
 }
 
 /// Collects the scalar variable values for a `custom` filename template from
-/// the stored item document (plus context). `None` when the item is not in the
-/// local database. Keys match [`crate::config::filename_template::TEMPLATE_VARS`].
+/// the stored item document (plus context). `Ok(None)` when the item is
+/// genuinely not in the local database; a database failure is an **error**,
+/// never "unknown" — folding the two together permanently named files by
+/// their bare ASIN (or refiled them as external) after one transient
+/// SQLite error. Keys match [`crate::config::filename_template::TEMPLATE_VARS`].
 pub(crate) async fn template_context(
     ctx: &Ctx,
     marketplace: &str,
     asin: &str,
-) -> Option<std::collections::HashMap<&'static str, String>> {
-    let db = ctx.open_library_db().await.ok()?;
+) -> Result<Option<std::collections::HashMap<&'static str, String>>> {
+    let db = ctx
+        .open_library_db()
+        .await
+        .context("could not consult the library database for file naming")?;
     // Books live in `items`; podcast episodes in `episodes`. Fall back to the
     // episode doc so episodes are named/reorganized by title, not bare ASIN
     // (AUD-100); `parent_asin` lets us group them under their show.
@@ -170,18 +178,25 @@ pub(crate) async fn template_context(
     let (doc_str, parent_asin) = match db
         .item_doc_including_deleted(asin.to_owned(), marketplace.to_owned())
         .await
+        .context("could not consult the library database for file naming")?
     {
-        Ok(Some(doc)) => (doc, None),
-        _ => {
-            let (doc, parent) = db
+        Some(doc) => (doc, None),
+        None => {
+            match db
                 .episode_doc_including_deleted(asin.to_owned(), marketplace.to_owned())
                 .await
-                .ok()??;
-            (doc, Some(parent))
+                .context("could not consult the library database for file naming")?
+            {
+                Some((doc, parent)) => (doc, Some(parent)),
+                None => return Ok(None),
+            }
         }
     };
-    let doc: serde_json::Value = serde_json::from_str(&doc_str).ok()?;
-    Some(values_from_doc(ctx, &db, marketplace, asin, &doc, parent_asin).await)
+    let doc: serde_json::Value = serde_json::from_str(&doc_str)
+        .with_context(|| format!("the stored document for {asin} is not valid JSON"))?;
+    Ok(Some(
+        values_from_doc(ctx, &db, marketplace, asin, &doc, parent_asin).await,
+    ))
 }
 
 /// The naming variables held in one document, whatever its source.
