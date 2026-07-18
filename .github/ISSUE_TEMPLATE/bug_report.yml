@@ -1,0 +1,63 @@
+name: Bug report
+description: Something does not work the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Before you submit:
+
+        - **Security issues:** please do NOT report them here — use
+          [private vulnerability reporting](https://github.com/mkb79/audible-rs/security/advisories/new) instead.
+        - **Credentials and personal data:** never paste tokens, auth files,
+          cookies or real account names. Replace real book titles/ASINs from
+          your library with invented ones (e.g. `B0EXAMPLE1`) if they are not
+          essential to the bug.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you run, and what went wrong?
+      placeholder: |
+        Command: audible library sync -m us
+        Result: ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `audible --version`
+      placeholder: audible-rs 0.1.0-alpha.7
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: e.g. Debian 12, macOS 15, Windows 11
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / output
+      description: |
+        Re-run with `-v` (or `-vv`) for more detail. Credentials never appear
+        in logs at any verbosity, but please still double-check what you paste.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and found no duplicate.
+          required: true
+        - label: This report contains no credentials and no personal account/library data.
+          required: true
