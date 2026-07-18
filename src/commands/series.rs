@@ -10,8 +10,8 @@ use crate::db::Db;
 use crate::models::library as model;
 use crate::output::Output;
 
-use super::catalog;
-use super::library::maybe_auto_sync;
+use crate::catalog;
+use crate::library_sync::maybe_auto_sync;
 
 /// `audible series`.
 pub struct SeriesCommand;

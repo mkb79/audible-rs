@@ -14,7 +14,7 @@ use crate::db::Db;
 use crate::downloader::request_annotations;
 use crate::output::Output;
 
-use super::library::maybe_auto_sync;
+use crate::library_sync::maybe_auto_sync;
 use crate::naming::{base_filename, download_dir};
 
 /// How many annotation fetches run concurrently.

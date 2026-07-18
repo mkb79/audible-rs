@@ -11,7 +11,7 @@ use anyhow::{Result, bail};
 use crate::config::ctx::Ctx;
 use crate::output::Output;
 
-use super::maybe_auto_sync;
+use crate::library_sync::maybe_auto_sync;
 
 /// Lists the stored episodes of one followed show, newest first. The
 /// show is matched by ASIN or unique title substring across the selected

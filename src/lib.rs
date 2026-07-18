@@ -13,12 +13,15 @@ pub mod models;
 pub mod naming;
 
 pub mod activation;
+pub mod catalog;
+pub mod collections;
 pub mod commands;
 pub mod config;
 pub mod crypto;
 pub mod db;
 pub mod downloader;
 pub(crate) mod fsutil;
+pub mod library_sync;
 pub mod output;
 pub mod plugins;
 pub mod session;

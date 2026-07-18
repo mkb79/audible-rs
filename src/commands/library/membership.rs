@@ -21,7 +21,7 @@ use anyhow::{Result, bail};
 use reqwest::Method;
 use serde_json::{Value, json};
 
-use crate::commands::{catalog, collections, items};
+use crate::commands::{catalog, items};
 use crate::config::ctx::Ctx;
 
 /// The membership kind, from the shared taxonomy — selects the wording
@@ -112,7 +112,7 @@ pub(super) async fn add(
     // Authenticated eligibility (customer_rights) — refuse buy-only up
     // front instead of letting the PUT fail; plus the local library so an
     // already-held title is skipped rather than re-added.
-    let eligibility = catalog::eligibility(client, &marketplace, &asins).await?;
+    let eligibility = crate::catalog::eligibility(client, &marketplace, &asins).await?;
     let db = ctx.open_library_db().await?;
 
     let mut added = Vec::new();
@@ -260,7 +260,7 @@ pub(super) async fn remove(
     // nothing is archived. (The DELETE also works on an archived item and the
     // server clears the archive itself, so this is defensive/explicit.)
     let all: Vec<String> = targets.iter().map(|(asin, _, _)| asin.clone()).collect();
-    let cleared = collections::remove_from_archive(client, &marketplace, &all).await?;
+    let cleared = crate::collections::remove_from_archive(client, &marketplace, &all).await?;
     for asin in &cleared {
         eprintln!("removed {asin} from the archive");
     }

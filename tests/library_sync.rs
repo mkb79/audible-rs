@@ -3,8 +3,8 @@
 
 use audible_rs::api::client::Client;
 use audible_rs::auth::Authenticator;
-use audible_rs::commands::library::{DEFAULT_RESPONSE_GROUPS, SyncOptions, sync_library};
 use audible_rs::db::Db;
+use audible_rs::library_sync::{DEFAULT_RESPONSE_GROUPS, SyncOptions, sync_library};
 use reqwest::Url;
 use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
