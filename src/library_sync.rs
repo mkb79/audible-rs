@@ -190,10 +190,7 @@ pub async fn sync_library(
                 continue;
             }
             if options.resolve_podcasts && model::is_parent_podcast(&item) {
-                let announced = item
-                    .get("episode_count")
-                    .and_then(serde_json::Value::as_u64);
-                podcast_parents.push((asin.to_owned(), announced));
+                podcast_parents.push((asin.to_owned(), announced_episode_count(&item)));
             }
             let Some(full_title) = model::build_full_title(&item) else {
                 tracing::warn!(asin, "skipping library item without title");
@@ -327,13 +324,25 @@ pub async fn sync_library(
     Ok(summary)
 }
 
+/// The parent's announced episode count, tolerant of the wire shape (a
+/// JSON number or a numeric string). `None` means **unknown**, not zero —
+/// the resolver must then treat the capped library listing as incomplete
+/// (A3): gating the relationships fallback on a present count soft-deleted
+/// every stored episode the ~10-newest listing did not carry.
+fn announced_episode_count(item: &serde_json::Value) -> Option<u64> {
+    let value = item.get("episode_count")?;
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+}
+
 /// Fetches all episodes of one podcast parent and replaces the stored
 /// episode set. The library listing (`/1.0/library?parent_asin=…`) is
 /// capped at the newest ~10; when it falls short of the announced
-/// `episode_count`, the complete list comes from the parent product's
-/// catalog relationships (`relationships_v2`, one request), with episode
-/// metadata batched by ASIN. Library documents win for episodes present
-/// in both.
+/// `episode_count` — or no usable count is announced at all — the
+/// complete list comes from the parent product's catalog relationships
+/// (`relationships_v2`, one request), with episode metadata batched by
+/// ASIN. Library documents win for episodes present in both.
 async fn resolve_episodes(
     client: &Client,
     db: &Db,
@@ -399,8 +408,11 @@ async fn resolve_episodes(
     // The library listing is capped (10 newest); the complete episode list
     // comes from the parent product's relationships, with details batched by
     // ASIN. The `/catalog/products?parent_asin` page pagination is NOT used —
-    // it silently caps below `episode_count` (AUD-49).
-    if announced.is_some_and(|count| count as usize > episodes.len()) {
+    // it silently caps below `episode_count` (AUD-49). An **unknown** count
+    // must take this path too (A3): the capped listing would otherwise pass
+    // as complete and `apply_episodes` soft-deletes every stored episode
+    // the ~10-newest window did not carry.
+    if announced.is_none_or(|count| count as usize > episodes.len()) {
         tracing::info!(
             parent_asin,
             announced,
@@ -580,6 +592,29 @@ mod tests {
 
     use super::*;
     use std::time::Duration;
+
+    /// A3 (audit 2026-07-18): a missing or garbled `episode_count` must
+    /// read as **unknown** (`None`) — which the resolver treats as
+    /// "listing incomplete, fetch the relationships" — while numeric and
+    /// numeric-string shapes parse.
+    #[test]
+    fn announced_count_tolerates_the_wire_shapes() {
+        let count = |doc: serde_json::Value| announced_episode_count(&doc);
+        assert_eq!(count(serde_json::json!({"episode_count": 100})), Some(100));
+        assert_eq!(
+            count(serde_json::json!({"episode_count": "100"})),
+            Some(100)
+        );
+        assert_eq!(
+            count(serde_json::json!({"episode_count": " 7 "})),
+            Some(7),
+            "whitespace-padded string counts parse"
+        );
+        assert_eq!(count(serde_json::json!({"title": "Example Show"})), None);
+        assert_eq!(count(serde_json::json!({"episode_count": null})), None);
+        assert_eq!(count(serde_json::json!({"episode_count": "many"})), None);
+        assert_eq!(count(serde_json::json!({"episode_count": -3})), None);
+    }
 
     #[test]
     fn staleness_decision() {
