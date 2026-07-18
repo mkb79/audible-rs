@@ -120,9 +120,53 @@ fn header(response: &reqwest::Response, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Upper bound on a server-suggested `Retry-After` delay. Also bounds the
+/// `from_secs_f64` conversion, which panics on huge values.
+const MAX_RETRY_AFTER_SECS: f64 = 60.0;
+
 fn retry_after(response: &reqwest::Response) -> Option<Duration> {
-    header(response, "Retry-After")?
+    parse_retry_after(&header(response, "Retry-After")?)
+}
+
+/// Parses a numeric `Retry-After` value. The header is server/proxy input:
+/// negative, NaN, infinite or absurdly large values must fall back to the
+/// computed backoff (`None`) or be capped — never reach the panicking
+/// `Duration::from_secs_f64` unchecked. (HTTP-date values fail the parse
+/// and use the backoff, as before.)
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    value
+        .trim()
         .parse::<f64>()
         .ok()
-        .map(Duration::from_secs_f64)
+        .filter(|secs| secs.is_finite() && *secs >= 0.0)
+        .map(|secs| Duration::from_secs_f64(secs.min(MAX_RETRY_AFTER_SECS)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every value a proxy/CDN can send must yield a bounded delay or
+    /// `None` (→ computed backoff) — `"-1"`, `"NaN"`, `"inf"` and
+    /// `"1e300"` all panicked in `Duration::from_secs_f64` before.
+    #[test]
+    fn retry_after_survives_adversarial_values() {
+        for hostile in ["-1", "NaN", "inf", "-inf", "", "soon", "Fri, 31 Dec"] {
+            assert_eq!(parse_retry_after(hostile), None, "{hostile:?}");
+        }
+        // Finite but absurd: capped, never slept (and never a panic).
+        assert_eq!(parse_retry_after("1e300"), Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn retry_after_honors_and_caps_valid_values() {
+        assert_eq!(parse_retry_after("5"), Some(Duration::from_secs(5)));
+        assert_eq!(
+            parse_retry_after(" 2.5 "),
+            Some(Duration::from_secs_f64(2.5))
+        );
+        assert_eq!(parse_retry_after("0"), Some(Duration::ZERO));
+        // A well-formed but absurd delay (10 days) is capped, not slept.
+        assert_eq!(parse_retry_after("864000"), Some(Duration::from_secs(60)));
+    }
 }
