@@ -243,12 +243,29 @@ async fn content_metadata(
 ) -> Result<(Value, MetadataDrm)> {
     match content_metadata_drm(client, marketplace, asin, "Adrm").await {
         Ok(value) => Ok((value, MetadataDrm::Adrm)),
+        // Only a definitive server answer may flip the verdict to
+        // Widevine: a transient fault (connect, timeout, transfer) with a
+        // succeeding Widevine retry used to mislabel a normal aax title
+        // as "widevine only" (A7). The download path gates its fallback
+        // on the specific 000307 rejection; the metadata request cannot
+        // see the body's error code, so the gate here is "the server
+        // rejected Adrm" vs "the network hiccuped".
+        Err(adrm_error) if is_transient_fault(&adrm_error) => Err(adrm_error),
         Err(adrm_error) => {
-            tracing::debug!(asin, %adrm_error, "Adrm metadata failed; probing Widevine");
+            tracing::debug!(asin, %adrm_error, "Adrm metadata rejected; probing Widevine");
             let value = content_metadata_drm(client, marketplace, asin, "Widevine").await?;
             Ok((value, MetadataDrm::Widevine))
         }
     }
+}
+
+/// Whether the error is a transport-level fault (connect, timeout, body
+/// transfer/decode) rather than a definitive HTTP-status answer.
+fn is_transient_fault(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .any(|error| !error.is_status())
 }
 
 async fn content_metadata_drm(
