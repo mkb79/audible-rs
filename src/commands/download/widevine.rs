@@ -287,7 +287,11 @@ pub(super) async fn download_audio_widevine(
                 .await?;
             written.clear();
         }
-        written.push(("audio".into(), out.display().to_string()));
+        // The m4b is the decrypted artifact — same label as the aaxc
+        // path, so the batch summary's `decrypted` counter moves and the
+        // table does not show two `audio` rows with --keep-source. (The
+        // DB row already said `variant = decrypted`.)
+        written.push(("decrypted".into(), out.display().to_string()));
     }
     Ok((written, pdf_url))
 }
