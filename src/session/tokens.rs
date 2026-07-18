@@ -77,28 +77,11 @@ impl TokenStore {
         }
     }
 
-    /// Writes all records back (0600).
+    /// Writes all records back (0600 from the first byte).
     fn save(&self, records: &[TokenRecord]) -> Result<()> {
         let json = serde_json::to_vec_pretty(records)?;
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).write(true).truncate(true);
-        // Created private from the first byte — no umask window.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&self.path)
+        crate::fsutil::write_private(&self.path, &json)
             .with_context(|| format!("could not write {}", self.path.display()))?;
-        std::io::Write::write_all(&mut file, &json)
-            .with_context(|| format!("could not write {}", self.path.display()))?;
-        // `mode` only applies on create; repair a pre-existing file too.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
-        }
         *self.cache.lock().expect("token cache") = None; // force a reload
         Ok(())
     }

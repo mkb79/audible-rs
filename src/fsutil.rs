@@ -1,6 +1,7 @@
 //! Small filesystem primitives shared by the auth and config writers
 //! (audit 2026-07-17, B5): atomic persist with a per-writer temp name and
-//! fsync, plus a cross-process write lock.
+//! fsync, a cross-process write lock, and the owner-only writers for
+//! secret-bearing files and directories (audit 2026-07-18, B1+C5).
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -73,6 +74,62 @@ fn sync_parent_dir(path: &Path) {
     let _ = path;
 }
 
+/// Writes `bytes` to `path` owner-only (`0o600`) from the first byte: the
+/// mode rides on the create itself, so a secret-bearing file (passphrase
+/// store, key sidecar, token file) is never observable world-readable —
+/// not even between create and a later chmod. A pre-existing file keeps
+/// its inode mode on open and is re-tightened afterwards (it may predate
+/// the rule). On Windows the mode is a no-op — secret files rest on
+/// user-profile isolation, not an ACL (AUD-198).
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_private_opts(path, bytes, true)
+}
+
+/// [`write_private`] that refuses to overwrite: the create fails when the
+/// file already exists (`create_new` — no TOCTOU window between an
+/// exists-check and the write).
+pub(crate) fn write_private_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_private_opts(path, bytes, false)
+}
+
+fn write_private_opts(path: &Path, bytes: &[u8], overwrite: bool) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    if overwrite {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Creates `dir` (and missing parents) and sets it owner-only (`0o700`),
+/// idempotently. An existing `dir` is re-tightened too — installs
+/// predating the rule pick it up on the next write. Only `dir` itself is
+/// tightened; created parents keep the umask. Mode is a no-op on
+/// non-Unix (AUD-198).
+pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 /// The cross-process write lock guarding a file's read-modify-write
 /// cycle: `<file>.lock` next to the target. Callers hold the guard from
 /// read to rename — without it, concurrent CLI + agent edits silently
@@ -124,5 +181,48 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         assert_ne!(unique_tmp_path(&path), unique_tmp_path(&path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_creates_owner_only_files() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.voucher");
+        write_private(&path, b"{\"key\":\"k\",\"iv\":\"i\"}").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "secret file must never be world-readable");
+        // Overwriting an existing (say, pre-fix 0644) file tightens it.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, b"{}").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "rewrite must restore owner-only permissions");
+    }
+
+    #[test]
+    fn write_private_new_refuses_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alice.auth");
+        write_private_new(&path, b"first").unwrap();
+        let error = write_private_new(&path, b"second").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_private_dir_tightens_new_and_existing_dirs() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let fresh = tmp.path().join("audible");
+        create_private_dir(&fresh).unwrap();
+        let mode = std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "a fresh config dir must be owner-only");
+        // A pre-existing world-traversable dir (install predating the
+        // rule) is re-tightened on the next call.
+        std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        create_private_dir(&fresh).unwrap();
+        let mode = std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "an existing dir must be re-tightened");
     }
 }

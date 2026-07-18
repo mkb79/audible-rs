@@ -977,29 +977,6 @@ fn parse_kinds(list: &str) -> Result<BTreeSet<Artifact>> {
 /// the URL's expiry mid-transfer.
 const LICENSE_URL_EXPIRY_MARGIN_SECS: i64 = 300;
 
-/// Writes a secret-bearing sidecar (`.voucher` key/iv, `.wvkey` content key)
-/// owner-only from the first byte, like the auth file — never through the
-/// umask, which would leave the decryption key world-readable on a
-/// multi-user host.
-#[cfg(unix)]
-pub(super) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(bytes)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-pub(super) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1010,22 +987,6 @@ mod tests {
             parse_kinds("all").unwrap(),
             Artifact::ALL.into_iter().collect::<BTreeSet<_>>()
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn write_private_creates_owner_only_files() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("book.voucher");
-        write_private(&path, b"{\"key\":\"k\",\"iv\":\"i\"}").unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "key sidecar must never be world-readable");
-        // Overwriting an existing (say, pre-fix 0644) sidecar tightens it.
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        write_private(&path, b"{}").unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "rewrite must restore owner-only permissions");
     }
 
     #[test]

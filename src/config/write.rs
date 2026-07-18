@@ -302,7 +302,10 @@ pub fn edit_file(
     edit: impl FnOnce(&str) -> Result<String, ConfigError>,
 ) -> Result<(), ConfigError> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        // The config dir holds auth files and the passwords store —
+        // owner-only (0700); an existing world-traversable dir from an
+        // install predating the rule is tightened here too.
+        crate::fsutil::create_private_dir(dir)?;
     }
     // The cross-process lock spans the whole read-modify-write: the CLI
     // and the agent may edit concurrently (`config set` vs `allow-host`),

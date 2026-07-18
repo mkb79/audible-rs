@@ -86,7 +86,7 @@ pub(super) fn write_wvkey(path: &Path, key: &ContentKey) -> Result<()> {
         "key": hex::encode(&*key.key),
     })
     .to_string();
-    super::write_private(path, json.as_bytes())
+    crate::fsutil::write_private(path, json.as_bytes())
         .with_context(|| format!("writing {}", path.display()))
 }
 

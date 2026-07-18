@@ -141,22 +141,21 @@ fn read_or_empty(path: &Path) -> Result<String> {
     }
 }
 
-/// Writes `content` to `path` with owner-only (`0o600`) permissions (parent
-/// dirs created). On Windows the mode is a no-op — the `passwords` file rests on
-/// user-profile isolation, not an ACL (AUD-198).
+/// Writes `content` to `path` owner-only (`0o600`) **from the first byte**
+/// ([`crate::fsutil::write_private`] — the file holds cleartext
+/// passphrases, so it must never be observable through the umask, not
+/// even between create and chmod). A missing parent dir is created
+/// owner-only (`0o700`); an existing parent is left as it is — a custom
+/// `passwords` location outside the config dir keeps its owner's choice.
 fn write_0600(path: &Path, content: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
+    if let Some(parent) = path.parent()
+        && !parent.is_dir()
+    {
+        crate::fsutil::create_private_dir(parent)
             .with_context(|| format!("could not create {}", parent.display()))?;
     }
-    fs::write(path, content).with_context(|| format!("could not write {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("could not set 0600 on {}", path.display()))?;
-    }
-    Ok(())
+    crate::fsutil::write_private(path, content.as_bytes())
+        .with_context(|| format!("could not write {}", path.display()))
 }
 
 /// Warns if the file is readable by group or other (Unix only).

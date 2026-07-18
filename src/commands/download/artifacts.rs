@@ -129,7 +129,7 @@ fn write_keyfile(client: &crate::api::client::Client, license: &DownloadLicense,
     let body = serde_json::json!({ "key": voucher.key, "iv": voucher.iv });
     // Owner-only from the first byte: the sidecar holds the decrypted
     // content key, the same secrecy class as the auth file.
-    if let Err(error) = super::write_private(
+    if let Err(error) = crate::fsutil::write_private(
         dest,
         &serde_json::to_vec_pretty(&body).expect("strings serialize"),
     ) {
