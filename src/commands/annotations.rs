@@ -195,6 +195,10 @@ async fn fetch_one(
                 return "failed";
             }
             if save {
+                // The user asked for the sidecar explicitly — a failed
+                // write or path record is a failure (summary + exit code),
+                // not a log line that -q hides. The stored annotation
+                // itself is fine; a re-run with --save retries the file.
                 match save_annot(ctx, marketplace, asin, &doc).await {
                     Ok(dest) => {
                         if let Err(error) = db
@@ -205,10 +209,14 @@ async fn fetch_one(
                             )
                             .await
                         {
-                            tracing::warn!(%error, asin, "could not record .annot path");
+                            eprintln!("{asin}: could not record the .annot path: {error:#}");
+                            return "failed";
                         }
                     }
-                    Err(error) => tracing::warn!(%error, asin, "could not write .annot file"),
+                    Err(error) => {
+                        eprintln!("{asin}: could not write the .annot file: {error:#}");
+                        return "failed";
+                    }
                 }
             }
             "ok"
