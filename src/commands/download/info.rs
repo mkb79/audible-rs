@@ -182,10 +182,7 @@ fn facts(value: &Value) -> AssetFacts {
         codecs,
         image_sizes,
         pdf_available: crate::models::library::pdf_available(value),
-        offline_right: value
-            .get("customer_rights")
-            .and_then(|rights| rights.get("is_consumable_offline"))
-            .and_then(Value::as_bool),
+        offline_right: crate::models::library::is_consumable_offline(value),
         delivery_type: value
             .get("content_delivery_type")
             .and_then(Value::as_str)

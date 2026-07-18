@@ -113,6 +113,12 @@ pub enum ApiError {
     /// material.
     #[error("auth mode {0:?} is not available for this account")]
     AuthModeUnavailable(AuthMode),
+    /// A licenserequest answered 200 with an explicit denial
+    /// (`status_code: "Denied"`). One wording home for both license
+    /// flavors (AUD-104): the aaxc and the Widevine path surface the
+    /// server's reason identically.
+    #[error("license denied: {0}")]
+    LicenseDenied(String),
     /// The account has no refresh token to renew the access token with.
     #[error("no refresh token available to refresh the access token")]
     NoRefreshToken,

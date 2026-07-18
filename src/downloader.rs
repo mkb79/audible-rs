@@ -758,6 +758,30 @@ mod tests {
     }
 
     #[test]
+    fn widevine_denial_surfaces_the_server_reason() {
+        // A 200 with an explicit denial (e.g. a lapsed subscription right,
+        // AUD-104) carries no drm_type — it must surface the server's
+        // message, not fail the grant parse as "unexpected response".
+        let payload = serde_json::json!({
+            "content_license": {
+                "status_code": "Denied",
+                "message": "License not granted to customer [x] for asin [B01]",
+            }
+        });
+        let Err(ApiError::LicenseDenied(message)) = parse_widevine_grant(&payload, "B01") else {
+            panic!("expected a license denial");
+        };
+        assert!(message.contains("not granted"));
+        // Without a denial the parse still classifies by drm_type — an
+        // unknown shape stays the generic response error.
+        let odd = serde_json::json!({"content_license": {"status_code": "Granted"}});
+        assert!(matches!(
+            parse_widevine_grant(&odd, "B01"),
+            Err(ApiError::LicenseResponse(_))
+        ));
+    }
+
+    #[test]
     fn part_path_appends_suffix() {
         assert_eq!(
             part_path(Path::new("/a/Book.aaxc")),
@@ -1159,6 +1183,17 @@ fn parse_widevine_grant(
     asin: &str,
 ) -> Result<WidevineGrant, ApiError> {
     let license = &payload["content_license"];
+    // An explicit denial (e.g. a lapsed subscription right) comes back as
+    // HTTP 200 with `status_code: "Denied"` and no drm_type — surface the
+    // server's reason like the aaxc path does (AUD-104) instead of failing
+    // the grant parse as an "unexpected response".
+    if license["status_code"].as_str() == Some("Denied") {
+        let message = license["message"]
+            .as_str()
+            .unwrap_or("no reason given")
+            .to_owned();
+        return Err(ApiError::LicenseDenied(message));
+    }
     let metadata = &license["content_metadata"];
     // The content_reference fields share the aaxc path's parser (D9), so
     // the Widevine grant gets the same top-level-`acr` fallback and cannot

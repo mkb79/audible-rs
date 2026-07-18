@@ -115,13 +115,22 @@ pub(super) async fn list_missing(
             query_limit,
             offset,
             include_archived,
+            // Lapsed titles are never "missing" — they cannot be downloaded
+            // (AUD-104; skipped like archived ones, which is also silent).
+            false,
         )
         .await?
     };
     if rows.is_empty() {
         if page > 1 {
             let total = db
-                .count_books_missing_downloads(marketplaces, kinds, item_kinds, include_archived)
+                .count_books_missing_downloads(
+                    marketplaces,
+                    kinds,
+                    item_kinds,
+                    include_archived,
+                    false,
+                )
                 .await?;
             return Err(crate::commands::empty_page_error(page, limit, total));
         }
