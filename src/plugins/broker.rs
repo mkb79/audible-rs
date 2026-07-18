@@ -108,6 +108,11 @@ impl Backend for Ephemeral {
         Ok(Arc::clone(&self.ctx))
     }
 
+    async fn probe(&self) -> Result<Arc<Ctx>> {
+        // The invoking Ctx already carries the parsed config.
+        Ok(Arc::clone(&self.ctx))
+    }
+
     fn invoke_exe(&self) -> PathBuf {
         self.invoke_exe.clone()
     }

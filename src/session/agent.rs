@@ -174,6 +174,13 @@ impl Backend for AgentBackend {
             })
     }
 
+    async fn probe(&self) -> Result<Arc<Ctx>> {
+        // The cached config, no account resolution (A5): config-level
+        // endpoints must answer on a multi-account config without
+        // `default_account`.
+        Ok(Arc::new(self.build_ctx(None)?))
+    }
+
     async fn session(&self, account: Option<&str>) -> Result<Arc<Ctx>> {
         // A per-account Ctx (its own client cell = its own unlocked
         // session); the account name is resolved through the same rules

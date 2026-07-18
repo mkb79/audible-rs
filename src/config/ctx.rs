@@ -18,6 +18,29 @@ use super::resolve::SettingsView;
 use super::schema::{Account, Config, PasswordSource};
 use super::{passwords, paths, resolve};
 
+/// A `prompt`-source account whose passphrase cannot be asked for
+/// headlessly (audit 2026-07-17, E5). Typed — not a bare message — so the
+/// `/v1` router can recognize it in an anyhow chain and answer 423
+/// (Locked) instead of a generic 500 (audit 2026-07-18, A7).
+#[derive(Debug)]
+pub struct AccountLocked {
+    /// The locked account's name.
+    pub account: String,
+}
+
+impl std::fmt::Display for AccountLocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "account {:?} is locked (password_source = prompt) — unlock it with \
+             `audible account unlock -a {}`",
+            self.account, self.account
+        )
+    }
+}
+
+impl std::error::Error for AccountLocked {}
+
 /// The three global selectors (`-a/-s/-m`), as passed from the CLI.
 #[derive(Debug, Clone, Default)]
 pub struct Selectors {
@@ -242,12 +265,13 @@ impl Ctx {
                 let term = console::Term::stderr();
                 // Headless callers (the agent's session map) cannot answer
                 // a prompt — fail with the actionable state instead of a
-                // cryptic read error (audit 2026-07-17, E5).
+                // cryptic read error (audit 2026-07-17, E5). Typed so the
+                // `/v1` router can answer 423 instead of a 500.
                 if !term.is_term() {
-                    anyhow::bail!(
-                        "account {account_name:?} is locked (password_source = prompt) — \
-                         unlock it with `audible account unlock -a {account_name}`"
-                    );
+                    return Err(AccountLocked {
+                        account: account_name,
+                    }
+                    .into());
                 }
                 term.write_str(&format!("Password for account {account_name:?}: "))?;
                 let password = SecretString::from(term.read_secure_line()?);

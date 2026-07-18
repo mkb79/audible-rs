@@ -118,6 +118,17 @@ async fn job_viewer(
     selection: &Selection,
 ) -> std::result::Result<Option<String>, Box<Response<BoxedBody>>> {
     if effective_account(auth, selection)?.is_none() {
+        // Fail-closed (audit 2026-07-18, B3): without an account there is
+        // no axis to validate a marketplace/settings selector against —
+        // refuse it instead of silently ignoring it (an unknown value
+        // must never look accepted).
+        if selection.marketplace.is_some() || selection.settings.is_some() {
+            return Err(Box::new(reply(
+                StatusCode::BAD_REQUEST,
+                &json!({"error": "a marketplace/settings selector on the jobs view \
+                                  requires an account selector"}),
+            )));
+        }
         return Ok(None);
     }
     let ctx = select_session(backend, auth, selection).await?;
@@ -198,6 +209,13 @@ pub trait Backend: Send + Sync + 'static {
     /// Ephemeral: always the invoking `Ctx` (ignores `account`). Agent:
     /// the session map (lazily unlocking via `password_source`).
     async fn session(&self, account: Option<&str>) -> Result<Arc<Ctx>>;
+
+    /// A context carrying the parsed config **without resolving any
+    /// account** — for config-level endpoints (`/v1/accounts`), which
+    /// must answer on a multi-account config with no `default_account`
+    /// (audit 2026-07-18, A5: resolving a session there turned the
+    /// discovery endpoint into a 500 in exactly the setup it exists for).
+    async fn probe(&self) -> Result<Arc<Ctx>>;
 
     /// Whether callers may select account/marketplace per request
     /// (AUD-123). The ephemeral broker refuses — a plugin runs strictly
@@ -515,7 +533,10 @@ async fn dispatch(
             if !has("api") {
                 return Ok(deny("api"));
             }
-            let body = read_json_body(request).await?;
+            let body = match read_json_body(request).await {
+                Ok(body) => body,
+                Err(refusal) => return Ok(*refusal),
+            };
             api_request(backend, body, auth, selection, has("hosts"), trusted).await
         }
         (&Method::GET, "/v1/config/resolved") => {
@@ -534,14 +555,20 @@ async fn dispatch(
             if !has("invoke") {
                 return Ok(deny("invoke"));
             }
-            let body = read_json_body(request).await?;
+            let body = match read_json_body(request).await {
+                Ok(body) => body,
+                Err(refusal) => return Ok(*refusal),
+            };
             invoke_command(backend, body, auth, selection).await
         }
         (&Method::POST, "/v1/jobs") => {
             if !has("invoke") {
                 return Ok(deny("invoke"));
             }
-            let body = read_json_body(request).await?;
+            let body = match read_json_body(request).await {
+                Ok(body) => body,
+                Err(refusal) => return Ok(*refusal),
+            };
             start_job(backend, body, auth, selection).await
         }
         (&Method::GET, "/v1/jobs") => {
@@ -592,7 +619,10 @@ async fn admin_route(
 ) -> Result<Response<BoxedBody>> {
     match (method, rest) {
         (&Method::POST, "unlock") => {
-            let body = read_json_body(request).await?;
+            let body = match read_json_body(request).await {
+                Ok(body) => body,
+                Err(refusal) => return Ok(*refusal),
+            };
             let Some(passphrase) = body.get("passphrase").and_then(Value::as_str) else {
                 return Ok(reply(
                     StatusCode::BAD_REQUEST,
@@ -612,7 +642,10 @@ async fn admin_route(
             }
         }
         (&Method::POST, "lock") => {
-            let body = read_json_body(request).await?;
+            let body = match read_json_body(request).await {
+                Ok(body) => body,
+                Err(refusal) => return Ok(*refusal),
+            };
             let account = body.get("account").and_then(Value::as_str);
             let all = body.get("all").and_then(Value::as_bool).unwrap_or(false);
             let dropped = backend.lock(account, all).await?;
@@ -634,16 +667,52 @@ fn bearer(request: &Request<hyper::body::Incoming>) -> Option<&str> {
         .headers()
         .get(hyper::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
+        .and_then(bearer_token)
 }
 
-async fn read_json_body(request: Request<hyper::body::Incoming>) -> Result<Value> {
-    let body = http_body_util::Limited::new(request.into_body(), MAX_BODY_BYTES)
+/// The token of an `Authorization` header value. The scheme compares
+/// case-insensitively (RFC 7235) — web clients routinely send `bearer`.
+fn bearer_token(value: &str) -> Option<&str> {
+    let (scheme, token) = value.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("Bearer")
+        .then_some(token.trim_ascii_start())
+}
+
+/// Reads and parses the JSON request body, or a ready **client-fault**
+/// reply: 413 past the size cap, 400 for an unreadable or non-JSON body —
+/// never a 500, the caller sent it (audit 2026-07-18, A7).
+#[allow(clippy::result_large_err)]
+async fn read_json_body<B>(
+    request: Request<B>,
+) -> std::result::Result<Value, Box<Response<BoxedBody>>>
+where
+    B: hyper::body::Body,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let collected = http_body_util::Limited::new(request.into_body(), MAX_BODY_BYTES)
         .collect()
         .await
-        .map_err(|error| anyhow::anyhow!("could not read the request body: {error}"))?
-        .to_bytes();
-    serde_json::from_slice(&body).context("request body is not valid JSON")
+        .map_err(|error| {
+            let (status, message) = if error.is::<http_body_util::LengthLimitError>() {
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!("request body exceeds {MAX_BODY_BYTES} bytes"),
+                )
+            } else {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("could not read the request body: {error}"),
+                )
+            };
+            Box::new(reply(status, &json!({ "error": message })))
+        })?;
+    serde_json::from_slice(&collected.to_bytes()).map_err(|error| {
+        Box::new(reply(
+            StatusCode::BAD_REQUEST,
+            &json!({"error": format!("request body is not valid JSON: {error}")}),
+        ))
+    })
 }
 
 /// `POST /v1/api/request` — one Audible API call through the selected
@@ -699,7 +768,22 @@ async fn api_request(
             &json!({"error": "api requests take exactly one marketplace"}),
         ));
     }
-    let client = ctx.client().await?;
+    let client = match ctx.client().await {
+        Ok(client) => client,
+        // A locked `prompt`-source account is the caller's state, not a
+        // server fault: 423 with the actionable unlock message (A7).
+        Err(error)
+            if error
+                .chain()
+                .any(|cause| cause.is::<crate::config::ctx::AccountLocked>()) =>
+        {
+            return Ok(reply(
+                StatusCode::LOCKED,
+                &json!({"error": format!("{error:#}")}),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
 
     // Audit context (AUD-122): every external attempt — refused or
     // served — records its target host, so the log shows where the
@@ -728,7 +812,17 @@ async fn api_request(
     } else {
         let marketplace = match selection.marketplace.clone() {
             Some(marketplace) => marketplace,
-            None => ctx.marketplace_single()?,
+            // A multi-valued default selection ("one marketplace
+            // required") is resolvable by the caller — 400, not 500 (A7).
+            None => match ctx.marketplace_single() {
+                Ok(marketplace) => marketplace,
+                Err(error) => {
+                    return Ok(reply(
+                        StatusCode::BAD_REQUEST,
+                        &json!({"error": format!("{error:#}")}),
+                    ));
+                }
+            },
         };
         let normalized = crate::api::normalize_api_path(&path);
         client
@@ -826,11 +920,31 @@ fn external_request<'c>(
             ),
         ));
     };
-    let mode = entry
-        .auth
-        .parse::<crate::api::client::AuthMode>()
-        .unwrap_or(crate::api::client::AuthMode::Signing);
+    let Some(mode) = external_auth_mode(&entry.auth) else {
+        // A server-side misconfiguration, but never a silent substitution
+        // (audit 2026-07-18, B4): the configured mode is used verbatim or
+        // the request fails naming the fix.
+        return Err(refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "the allowed_hosts entry for {host:?} has an invalid auth mode {:?} \
+                 (valid: auto, signing, token)",
+                entry.auth
+            ),
+        ));
+    };
     Ok(client.request_absolute(method.clone(), parsed).auth(mode))
+}
+
+/// The validated auth mode of an `allowed_hosts` entry: `auto`, `signing`
+/// or `token` only (AUD-120 — cookies are domain-bound and never an
+/// external-host mode), `None` for anything unparseable.
+fn external_auth_mode(configured: &str) -> Option<crate::api::client::AuthMode> {
+    use crate::api::client::AuthMode;
+    match configured.parse::<AuthMode>() {
+        Ok(mode @ (AuthMode::Auto | AuthMode::Signing | AuthMode::Token)) => Some(mode),
+        _ => None,
+    }
 }
 
 /// `POST /v1/invoke` — runs one **built-in** command via self-exec and
@@ -1033,8 +1147,10 @@ async fn config_resolved(
 /// only, never values.
 async fn accounts(backend: &dyn Backend) -> Result<Response<BoxedBody>> {
     use crate::config::schema::DEFAULT_SETTINGS_NAME;
-    // Any session works; the config is identical across them.
-    let ctx = backend.session(None).await?;
+    // Config-level data only — never resolve a session here: a
+    // multi-account config without `default_account` must still get its
+    // account list (A5; this is the discovery endpoint for that setup).
+    let ctx = backend.probe().await?;
     let config = ctx.config();
     let default = config.default_account.as_deref();
     let list: Vec<Value> = config
@@ -1103,6 +1219,12 @@ mod tests {
                     account: account.map(str::to_owned),
                     ..Default::default()
                 },
+            )?))
+        }
+        async fn probe(&self) -> Result<Arc<Ctx>> {
+            Ok(Arc::new(Ctx::with_dir(
+                self.config_dir.clone(),
+                crate::config::ctx::Selectors::default(),
             )?))
         }
         fn invoke_exe(&self) -> PathBuf {
@@ -1210,6 +1332,104 @@ mod tests {
                 .as_deref(),
             Some("smoke")
         );
+
+        // B3 (audit 2026-07-18): a marketplace/settings selector without
+        // an account has no axis to validate against — 400, never a 200
+        // that silently ignored it.
+        for selection in [
+            select(None, Some("zz"), None),
+            select(None, None, Some("zz")),
+        ] {
+            let refused = job_viewer(&backend, &auth(None), &selection)
+                .await
+                .expect_err("selector without account must refuse");
+            assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    /// RFC 7235: the `Bearer` scheme compares case-insensitively.
+    #[test]
+    fn bearer_scheme_is_case_insensitive() {
+        for value in ["Bearer tok", "bearer tok", "BEARER tok", "Bearer  tok"] {
+            assert_eq!(bearer_token(value), Some("tok"), "{value:?}");
+        }
+        assert_eq!(bearer_token("Basic tok"), None);
+        assert_eq!(bearer_token("Bearer"), None);
+    }
+
+    /// B4 (audit 2026-07-18): an `allowed_hosts` auth mode is used
+    /// verbatim or refused — never silently substituted; cookies are
+    /// domain-bound and never an external-host mode (AUD-120).
+    #[test]
+    fn external_auth_mode_never_substitutes() {
+        use crate::api::client::AuthMode;
+        assert_eq!(external_auth_mode("auto"), Some(AuthMode::Auto));
+        assert_eq!(external_auth_mode("signing"), Some(AuthMode::Signing));
+        assert_eq!(external_auth_mode("token"), Some(AuthMode::Token));
+        for invalid in ["tokn", "cookies", "", "SIGNING "] {
+            assert_eq!(external_auth_mode(invalid), None, "{invalid:?}");
+        }
+    }
+
+    /// A7 (audit 2026-07-18): body faults are the caller's — 413 past the
+    /// cap, 400 for non-JSON, never a 500.
+    #[tokio::test]
+    async fn read_json_body_reports_client_faults() {
+        let request = |bytes: Vec<u8>| {
+            Request::builder()
+                .body(Full::new(Bytes::from(bytes)))
+                .unwrap()
+        };
+        let refused = read_json_body(request(vec![b'x'; MAX_BODY_BYTES + 1]))
+            .await
+            .expect_err("oversized body must refuse");
+        assert_eq!(refused.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let refused = read_json_body(request(b"not json".to_vec()))
+            .await
+            .expect_err("non-JSON body must refuse");
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+
+        let body = read_json_body(request(b"{\"path\": \"/1.0/library\"}".to_vec()))
+            .await
+            .expect("valid JSON parses");
+        assert_eq!(body["path"], "/1.0/library");
+    }
+
+    /// A5 (audit 2026-07-18): the discovery endpoint answers on a
+    /// multi-account config without `default_account` — the exact setup
+    /// it exists for; resolving a session there was a 500.
+    #[tokio::test]
+    async fn accounts_answers_without_default_account() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "version = 1\n\n\
+             [accounts.alice]\nauth_file = \"alice.auth\"\n\
+             marketplaces = [\"de\"]\ndefault_marketplaces = [\"de\"]\n\n\
+             [accounts.bob]\nauth_file = \"bob.auth\"\n\
+             marketplaces = [\"us\"]\ndefault_marketplaces = [\"us\"]\n",
+        )
+        .unwrap();
+        let backend = TestBackend {
+            config_dir: tmp.path().to_path_buf(),
+        };
+        // The old path resolved an account, which fails on this config
+        // (the agent backend resolves eagerly inside `session`) …
+        let session = backend.session(None).await.unwrap();
+        assert!(session.account_name().is_err());
+        // … the endpoint answers regardless, listing both accounts.
+        let response = accounts(&backend).await.expect("accounts endpoint answers");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: Value = serde_json::from_slice(&bytes).unwrap();
+        let names: Vec<&str> = payload["accounts"]
+            .as_array()
+            .expect("accounts array")
+            .iter()
+            .filter_map(|entry| entry["name"].as_str())
+            .collect();
+        assert_eq!(names, ["alice", "bob"]);
     }
 
     /// AUD-125 fail-closed matrix: 403 for a bound token asking for
@@ -1335,6 +1555,9 @@ mod tests {
     impl Backend for AuditingBackend {
         fn authenticate(&self, _token: &str, _trusted: bool) -> Option<Auth> {
             None
+        }
+        async fn probe(&self) -> Result<Arc<Ctx>> {
+            anyhow::bail!("not used")
         }
         async fn session(&self, _account: Option<&str>) -> Result<Arc<Ctx>> {
             anyhow::bail!("not used")
