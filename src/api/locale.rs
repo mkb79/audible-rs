@@ -82,6 +82,29 @@ pub fn find(country_code: &str) -> Option<Locale> {
         .copied()
 }
 
+/// The known country codes, comma-separated — the canonical example list
+/// for "unknown marketplace" errors (audit 2026-07-18, D10: five sites
+/// carried their own, already-drifted example strings).
+pub fn known_country_codes() -> String {
+    LOCALES
+        .iter()
+        .map(|locale| locale.country_code)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Resolves a country code to its locale, or a uniform "unknown
+/// marketplace" message naming every valid code. Callers map the message
+/// into their own error type.
+pub fn require(country_code: &str) -> Result<Locale, String> {
+    find(country_code).ok_or_else(|| {
+        format!(
+            "unknown marketplace {country_code:?} (valid: {})",
+            known_country_codes()
+        )
+    })
+}
+
 /// Looks up a marketplace by its TLD/domain (case-insensitive) — the reverse
 /// of [`Locale::domain`] (`com` → us, `co.uk` → uk, `com.au` → au). Used to map
 /// a request host back to a country code for the cookie exchange.

@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 
 use crate::config::ctx::Ctx;
 use crate::models::content::{DownloadLicense, Voucher};
@@ -229,9 +229,8 @@ pub(super) async fn download_pdf(
         return Ok(None);
     }
 
-    let Some(locale) = crate::api::locale::find(marketplace) else {
-        bail!("unknown marketplace {marketplace:?}");
-    };
+    let locale =
+        crate::api::locale::require(marketplace).map_err(|error| anyhow::anyhow!(error))?;
     let url = format!(
         "https://www.audible.{}/companion-file/{asin}",
         locale.domain

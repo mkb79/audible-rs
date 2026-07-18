@@ -257,7 +257,10 @@ pub async fn install(
         #[cfg(not(unix))]
         bail!("--symlink installs are unix-only; install as a copy instead");
     } else {
-        std::fs::copy(&source, &target)
+        // Async copy on the async path (E2; the class E5 fixed for `db
+        // restore`) — a Tier-A plugin can be a multi-MiB binary.
+        tokio::fs::copy(&source, &target)
+            .await
             .with_context(|| format!("could not copy to {}", target.display()))?;
     }
     Ok(Installed {

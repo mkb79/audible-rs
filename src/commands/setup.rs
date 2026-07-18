@@ -120,7 +120,7 @@ fn setup(ctx: &Ctx) -> Result<()> {
     let overwrite = ask_choice(
         "Re-download already fetched artifacts",
         &["skip", "force"],
-        &enum_str(&default.overwrite)?.unwrap_or_else(|| "skip".to_owned()),
+        &crate::commands::enum_str(&default.overwrite).unwrap_or_else(|| "skip".to_owned()),
     )?;
 
     let include_podcasts = ask_yes_no(
@@ -162,7 +162,7 @@ fn setup(ctx: &Ctx) -> Result<()> {
     let filename_mode = ask_choice(
         "Filename mode",
         &["ascii", "unicode", "asin_ascii", "asin_unicode", "custom"],
-        &enum_str(&default.filename_mode)?.unwrap_or_else(|| "ascii".to_owned()),
+        &crate::commands::enum_str(&default.filename_mode).unwrap_or_else(|| "ascii".to_owned()),
     )?;
 
     // Custom mode needs a template; ask for it and verify it right away so an
@@ -222,7 +222,8 @@ fn setup(ctx: &Ctx) -> Result<()> {
             Some(ask_choice(
                 "Decrypt tool",
                 &["auto", "aaxclean", "ffmpeg"],
-                &enum_str(&default.decrypt_backend)?.unwrap_or_else(|| "auto".to_owned()),
+                &crate::commands::enum_str(&default.decrypt_backend)
+                    .unwrap_or_else(|| "auto".to_owned()),
             )?),
         )
     } else {
@@ -234,7 +235,7 @@ fn setup(ctx: &Ctx) -> Result<()> {
     let auto_sync = ask_choice(
         "Library auto-sync before local reads",
         &["delta", "none"],
-        &enum_str(&Some(config.db.auto_sync))?.expect("auto_sync always set"),
+        &crate::commands::enum_str(&Some(config.db.auto_sync)).expect("auto_sync always set"),
     )?;
     // Without auto-sync there is no age to compare against.
     let sync_max_age = if auto_sync == "none" {
@@ -359,14 +360,6 @@ fn apply_answers(
         }
     }
     Ok(content)
-}
-
-/// Snake-case string form of a config enum (matches the TOML values).
-fn enum_str<T: serde::Serialize>(value: &Option<T>) -> Result<Option<String>> {
-    Ok(match value {
-        Some(value) => serde_json::to_value(value)?.as_str().map(|s| s.to_owned()),
-        None => None,
-    })
 }
 
 #[cfg(test)]

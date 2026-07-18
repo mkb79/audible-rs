@@ -237,14 +237,6 @@ fn default_true() -> bool {
     true
 }
 
-/// Current Unix time in seconds (fractional), for cookie-TTL comparisons.
-fn now_unix() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
-
 /// Freshness of the website cookies that apply to a request host, used to
 /// decide whether a lazy cookie exchange is needed before sending.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -810,10 +802,7 @@ impl Authenticator {
     /// from being sent — there is no 401-driven retry, so a request on a
     /// one-second-valid token would just fail once.
     pub fn access_token_expired(&self) -> bool {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock before unix epoch")
-            .as_secs_f64();
+        let now = crate::timefmt::now_unix();
         match (&self.access_token, self.expires) {
             (Some(_), Some(expires)) => now >= expires - TOKEN_REFRESH_MARGIN_SECS,
             _ => true,
@@ -940,7 +929,7 @@ impl Authenticator {
         }
         // Stale if any matched bucket's exchange TTL is missing (never
         // exchanged) or has lapsed.
-        let now = now_unix();
+        let now = crate::timefmt::now_unix();
         let stale = matched.iter().any(|(domain, _)| {
             self.cookie_ttls
                 .get(*domain)
@@ -1091,10 +1080,7 @@ mod tests {
     /// margin of expiry, so it is never sent about to expire.
     #[test]
     fn access_token_expired_honors_the_refresh_margin() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64();
+        let now = crate::timefmt::now_unix();
         let with_expiry = |expires: f64| {
             Authenticator::from_value(serde_json::json!({
                 "country_code": "de",

@@ -21,14 +21,7 @@ impl super::Command for LibraryCommand {
     }
 
     fn clap(&self) -> clap::Command {
-        let limit = || {
-            Arg::new("limit")
-                .long("limit")
-                .value_name("N")
-                .default_value("50")
-                .value_parser(clap::value_parser!(u32))
-                .help("Maximum number of rows (0 = all)")
-        };
+        use crate::commands::{limit_arg, missing_kinds_arg, page_arg};
         clap::Command::new(self.name())
             .about("Work with your library (backed by a local database)")
             .subcommand_required(true)
@@ -69,20 +62,9 @@ impl super::Command for LibraryCommand {
                             .help("Bypass the database and list straight from the API"),
                     )
                     .arg(
-                        Arg::new("missing")
-                            .long("missing")
-                            .value_name("KINDS")
-                            .num_args(0..)
-                            .require_equals(true)
-                            .value_delimiter(',')
-                            .default_missing_value("audio")
-                            .value_parser(["audio", "chapter", "pdf", "cover", "all"])
+                        missing_kinds_arg("items")
                             .conflicts_with("remote")
-                            .help_heading("Selection")
-                            .help(
-                                "Only items lacking a download record of these kinds \
-                                 (no value: audio; `all` covers every kind)",
-                            ),
+                            .help_heading("Selection"),
                     )
                     .arg(
                         Arg::new("borrowed")
@@ -113,17 +95,8 @@ impl super::Command for LibraryCommand {
                             .conflicts_with("remote")
                             .help_heading("Selection"),
                     )
-                    .arg(limit())
-                    .arg(
-                        Arg::new("page")
-                            .long("page")
-                            .value_name("N")
-                            .default_value("1")
-                            .value_parser(clap::value_parser!(u32).range(1..))
-                            .help_heading("Pagination")
-                            .help("Show the N-th page of --limit rows"),
-                    )
-                    .mut_arg("limit", |arg| arg.help_heading("Pagination")),
+                    .arg(limit_arg().help_heading("Pagination"))
+                    .arg(page_arg().help_heading("Pagination")),
             )
             .subcommand(
                 clap::Command::new("search")
@@ -133,7 +106,7 @@ impl super::Command for LibraryCommand {
                                  syntax (quotes, *, OR/NOT) is respected (--like for \
                                  plain substring matching)",
                     ))
-                    .arg(limit())
+                    .arg(limit_arg())
                     .arg(
                         Arg::new("like")
                             .long("like")
@@ -151,29 +124,9 @@ impl super::Command for LibraryCommand {
                             .value_name("SHOW")
                             .help("The followed podcast, by ASIN or title substring"),
                     )
-                    .arg(
-                        Arg::new("missing")
-                            .long("missing")
-                            .value_name("KINDS")
-                            .num_args(0..)
-                            .require_equals(true)
-                            .value_delimiter(',')
-                            .default_missing_value("audio")
-                            .value_parser(["audio", "chapter", "pdf", "cover", "all"])
-                            .help(
-                                "Only episodes lacking a download record of these kinds \
-                                 (no value: audio; `all` covers every kind)",
-                            ),
-                    )
-                    .arg(limit())
-                    .arg(
-                        Arg::new("page")
-                            .long("page")
-                            .value_name("N")
-                            .default_value("1")
-                            .value_parser(clap::value_parser!(u32).range(1..))
-                            .help("Show the N-th page of --limit rows"),
-                    ),
+                    .arg(missing_kinds_arg("episodes"))
+                    .arg(limit_arg())
+                    .arg(page_arg()),
             )
             .subcommand(
                 clap::Command::new("export")
@@ -221,14 +174,7 @@ impl super::Command for LibraryCommand {
                             .help("Only this change"),
                     )
                     .arg(super::kind_arg("book"))
-                    .arg(
-                        Arg::new("limit")
-                            .long("limit")
-                            .value_name("N")
-                            .default_value("50")
-                            .value_parser(clap::value_parser!(u32))
-                            .help("Max rows, most recent first (0 = all)"),
-                    )
+                    .arg(limit_arg().help("Max rows, most recent first (0 = all)"))
                     .arg(
                         Arg::new("values")
                             .long("values")

@@ -43,22 +43,8 @@ impl super::Command for PodcastsCommand {
                             .value_name("ASIN|TITLE")
                             .help("Parent podcast, by ASIN or title substring"),
                     )
-                    .arg(
-                        Arg::new("limit")
-                            .long("limit")
-                            .value_name("N")
-                            .default_value("50")
-                            .value_parser(clap::value_parser!(u32))
-                            .help("Maximum number of rows (0 = all)"),
-                    )
-                    .arg(
-                        Arg::new("page")
-                            .long("page")
-                            .value_name("N")
-                            .default_value("1")
-                            .value_parser(clap::value_parser!(u32).range(1..))
-                            .help("Show the N-th page of --limit rows"),
-                    ),
+                    .arg(crate::commands::limit_arg())
+                    .arg(crate::commands::page_arg()),
             )
     }
 

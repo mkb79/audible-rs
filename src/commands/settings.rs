@@ -157,11 +157,9 @@ fn add(ctx: &Ctx, sub: &clap::ArgMatches) -> Result<()> {
         .iter()
         .filter_map(|(flag, key, _, _)| {
             sub.get_one::<String>(flag).map(|value| {
-                let items = value
-                    .split(',')
-                    .map(|s| s.trim().to_owned())
-                    .filter(|s| !s.is_empty())
-                    .collect();
+                // Same CSV rule as `setup` and the other flags — one home
+                // (D3); both feed the same `settings.<name>.<key>`.
+                let items = crate::commands::split_csv(value);
                 (format!("settings.{name}.{key}"), items)
             })
         })
@@ -203,8 +201,8 @@ fn list(ctx: &Ctx) -> Result<()> {
                     .as_ref()
                     .map(|dir| dir.display().to_string())
                     .unwrap_or_default(),
-                enum_str(&settings.filename_mode),
-                enum_str(&settings.overwrite),
+                crate::commands::enum_str(&settings.filename_mode).unwrap_or_default(),
+                crate::commands::enum_str(&settings.overwrite).unwrap_or_default(),
                 settings.cover_size.as_deref().unwrap_or_default().join(","),
                 settings
                     .chapter_type
@@ -236,14 +234,14 @@ fn show(ctx: &Ctx, name: &str) -> Result<()> {
     if let Some(dir) = &settings.download_dir {
         pairs.push(("download_dir".to_owned(), dir.display().to_string()));
     }
-    let filename_mode = enum_str(&settings.filename_mode);
+    let filename_mode = crate::commands::enum_str(&settings.filename_mode).unwrap_or_default();
     if !filename_mode.is_empty() {
         pairs.push(("filename_mode".to_owned(), filename_mode));
     }
     if let Some(template) = &settings.filename_template {
         pairs.push(("filename_template".to_owned(), template.clone()));
     }
-    let overwrite = enum_str(&settings.overwrite);
+    let overwrite = crate::commands::enum_str(&settings.overwrite).unwrap_or_default();
     if !overwrite.is_empty() {
         pairs.push(("overwrite".to_owned(), overwrite));
     }
@@ -285,15 +283,4 @@ fn set_default(ctx: &Ctx, name: &str) -> Result<()> {
     })?;
     eprintln!("default settings of account {account:?} is now {name:?}");
     Ok(())
-}
-
-/// Snake-case string form of a config enum field, empty when unset.
-fn enum_str<T: serde::Serialize>(value: &Option<T>) -> String {
-    match value {
-        Some(value) => serde_json::to_value(value)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .unwrap_or_default(),
-        None => String::new(),
-    }
 }

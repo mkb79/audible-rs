@@ -90,13 +90,8 @@ impl super::Command for ConfigCommand {
 }
 
 fn read_content(ctx: &Ctx) -> Result<String> {
-    match std::fs::read_to_string(ctx.config_file()) {
-        Ok(content) => Ok(content),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(format!("version = {}\n", crate::config::CONFIG_VERSION))
-        }
-        Err(error) => Err(error.into()),
-    }
+    // One seed home with the writers (D10).
+    Ok(crate::config::write::read_or_seed(&ctx.config_file())?)
 }
 
 fn get(ctx: &Ctx, key: &str) -> Result<()> {

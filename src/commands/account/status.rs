@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 use crate::config::ctx::Ctx;
 use crate::output::Output;
+use crate::timefmt::date_only;
 
 pub(super) async fn status(ctx: &Ctx) -> Result<()> {
     let client = ctx.client().await?;
@@ -188,13 +189,6 @@ impl Money {
             _ => String::new(),
         }
     }
-}
-
-/// The date portion of an ISO-8601 timestamp (`2026-07-15T…` → `2026-07-15`).
-fn date_only(timestamp: &str) -> &str {
-    timestamp
-        .split_once('T')
-        .map_or(timestamp, |(date, _)| date)
 }
 
 #[cfg(test)]

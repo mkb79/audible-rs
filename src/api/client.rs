@@ -479,10 +479,7 @@ impl Client {
         }
         .ok_or(ApiError::TokenRefreshResponse)?;
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock before unix epoch")
-            .as_secs_f64();
+        let now = crate::timefmt::now_unix();
         let token = SecretString::from(access_token);
         auth.apply_token_refresh(token.clone(), now + expires_in);
         tracing::info!("access token refreshed");
@@ -556,10 +553,7 @@ impl Client {
         let auth = self.auth.lock().await;
         let remaining_secs = match (auth.access_token().is_some(), auth.expires()) {
             (true, Some(expires)) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("system clock before unix epoch")
-                    .as_secs_f64();
+                let now = crate::timefmt::now_unix();
                 Some((expires - now) as i64)
             }
             _ => None,
@@ -633,10 +627,7 @@ impl Client {
         // exchanged cookies aren't re-exchanged on every request. The real
         // per-cookie `Expires` is kept as-is.
         let ttl_secs = cookies::parse_ttl(&payload).unwrap_or(cookies::DEFAULT_TTL_SECS);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock before unix epoch")
-            .as_secs_f64();
+        let now = crate::timefmt::now_unix();
         let ttl_expiry = now + ttl_secs as f64;
         let domains: Vec<String> = by_domain.keys().cloned().collect();
         for (domain, jar) in by_domain {

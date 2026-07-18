@@ -34,14 +34,10 @@ pub(crate) async fn sync(
     let client = ctx.client().await?;
     let db = ctx.open_library_db().await?;
 
-    // One sync per library at a time (fd-lock, D9).
-    let lock_path = db.path().with_extension("lock");
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)?;
-    let mut lock = fd_lock::RwLock::new(lock_file);
+    // One sync per library at a time — the explicit-sync/auto-sync
+    // mutual-exclusion pair shares the one `fsutil::write_lock` recipe
+    // (D9; audit 2026-07-18, D4).
+    let mut lock = crate::fsutil::write_lock(db.path())?;
     let _guard = lock
         .try_write()
         .map_err(|_| anyhow::anyhow!("another sync is already running for this library"))?;

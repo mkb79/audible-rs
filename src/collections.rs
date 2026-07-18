@@ -156,6 +156,38 @@ pub async fn remove_from_archive(
     Ok(targets)
 }
 
+/// The batched collection-item POST: fetch the collection's fresh
+/// `state_token` and add `asins` to it, returning the server's
+/// `num_items_added` (`None` when it did not report one). The wire home
+/// for `collections … add` (audit 2026-07-18, E1: the only raw
+/// `/1.0/collections` call left in the CLI layer); the iceboxed user
+/// collections (AUD-109) reuse it.
+pub async fn add_collection_items(
+    client: &Client,
+    marketplace: &str,
+    collection_id: &str,
+    asins: &[String],
+) -> Result<Option<u64>, CollectionsError> {
+    let meta = collection_meta(client, marketplace, collection_id).await?;
+    let reply: Value = client
+        .request(
+            Method::POST,
+            format!("/1.0/collections/{collection_id}/items"),
+        )
+        .country_code(marketplace)
+        .body(serde_json::json!({
+            "collection_id": collection_id,
+            "asins": asins,
+            "state_token": meta.state_token,
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(reply.get("num_items_added").and_then(Value::as_u64))
+}
+
 /// The batched collection-item DELETE (audit 2026-07-17, D6): fetch the
 /// collection's `state_token` and issue `DELETE …/items` with repeated
 /// `asins=` params. One home for `collections … remove` and the archive

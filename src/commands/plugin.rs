@@ -308,7 +308,7 @@ async fn download_https(url: &str, dest: &Path) -> Result<(u64, String)> {
     use sha2::{Digest as _, Sha256};
 
     let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(crate::api::client::CONNECT_TIMEOUT)
         .timeout(std::time::Duration::from_secs(300))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.url().scheme() == "https" {

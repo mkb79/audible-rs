@@ -673,9 +673,7 @@ pub(super) fn parse_marketplaces(raw: &str) -> Result<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     for token in raw.split(',').map(str::trim).filter(|t| !t.is_empty()) {
         let cc = token.to_ascii_lowercase();
-        if crate::api::locale::find(&cc).is_none() {
-            bail!("unknown marketplace {cc:?} (e.g. de, us, uk, fr, ca, it, au, in, jp, es, br)");
-        }
+        crate::api::locale::require(&cc).map_err(|error| anyhow::anyhow!(error))?;
         if !out.contains(&cc) {
             out.push(cc);
         }
