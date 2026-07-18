@@ -276,7 +276,11 @@ async fn route(
 
     // The config page and its submit endpoint.
     if parts.method == Method::GET && (rest.is_empty() || rest == "/") {
-        return Ok(html_owned(StatusCode::OK, landing_html(state, None)));
+        let in_progress = state.session.lock().await.is_some();
+        return Ok(html_owned(
+            StatusCode::OK,
+            landing_html(state, None, in_progress),
+        ));
     }
     if parts.method == Method::POST && rest == "/__start" {
         return start_session(body, state).await;
@@ -318,6 +322,7 @@ async fn start_session(
     // of truth (the CLI default only pre-checks the box).
     let mut username = false;
     let mut plain = false;
+    let mut restart = false;
     let trimmed_opt = |value: std::borrow::Cow<'_, str>| {
         let trimmed = value.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
@@ -328,6 +333,7 @@ async fn start_session(
             "device" => device = value.parse().unwrap_or(device),
             "username" => username = true,
             "plain" => plain = true,
+            "restart" => restart = true,
             "name" => name = trimmed_opt(value),
             "marketplaces" => marketplaces = trimmed_opt(value),
             "default_marketplaces" => default_marketplaces = trimmed_opt(value),
@@ -335,10 +341,34 @@ async fn start_session(
         }
     }
 
+    // A second submit while a sign-in runs used to replace the whole
+    // session (device + PKCE + upstream cookie jar): the first tab kept
+    // browsing on the new session and its completed sign-in then failed
+    // registration with a mismatched verifier — after the user
+    // successfully authenticated (audit 2026-07-18, A7). Only a form
+    // carrying the restart marker (rendered while a sign-in runs, so the
+    // page said what a submit does) may replace it; the accidental
+    // re-submit (back button, second tab) is refused with the choice.
+    let in_progress = state.session.lock().await.is_some();
+    if in_progress && !restart {
+        return Ok(html_owned(
+            StatusCode::CONFLICT,
+            landing_html(
+                state,
+                Some(
+                    "A sign-in is already in progress (another tab or an earlier \
+                     submit). Finish it there, or submit this page to restart — \
+                     restarting abandons the sign-in in progress.",
+                ),
+                true,
+            ),
+        ));
+    }
+
     let Some(locale) = locale::find(&marketplace) else {
         return Ok(html_owned(
             StatusCode::OK,
-            landing_html(state, Some("Please choose a marketplace.")),
+            landing_html(state, Some("Please choose a marketplace."), in_progress),
         ));
     };
     if username && !username_login_supported(&locale) {
@@ -347,6 +377,7 @@ async fn start_session(
             landing_html(
                 state,
                 Some("Audible-username login is only available for DE, US and UK."),
+                in_progress,
             ),
         ));
     }
@@ -563,7 +594,7 @@ fn rewrite_location(location: &str, amazon_base: &str, proxy_prefix: &str) -> St
 }
 
 /// The Amazon-styled config page (marketplace / device / name / pre-merger).
-fn landing_html(state: &ProxyState, error: Option<&str>) -> String {
+fn landing_html(state: &ProxyState, error: Option<&str>, in_progress: bool) -> String {
     let defaults = &state.defaults;
     let default_cc = defaults.country_code.as_deref().unwrap_or("de");
     let mut options = String::new();
@@ -597,7 +628,20 @@ fn landing_html(state: &ProxyState, error: Option<&str>) -> String {
     let default_marketplaces = html_escape(defaults.default_marketplaces.as_deref().unwrap_or(""));
     let error_block = match error {
         Some(message) => format!("<div class=\"err\">{}</div>", html_escape(message)),
+        None if in_progress => "<div class=\"err\">A sign-in is already in progress \
+             (another tab or an earlier submit). Finish it there — submitting this \
+             page restarts and abandons it.</div>"
+            .to_owned(),
         None => String::new(),
+    };
+    // Only a form rendered while a sign-in runs carries the restart marker:
+    // an accidental re-submit of the ORIGINAL form (back button, second
+    // tab) lacks it and is refused instead of silently stranding the
+    // sign-in in progress (audit 2026-07-18, A7).
+    let restart_field = if in_progress {
+        "<input type=\"hidden\" name=\"restart\" value=\"1\">"
+    } else {
+        ""
     };
     let action = format!("{}/__start", state.proxy_prefix);
 
@@ -631,7 +675,7 @@ fn landing_html(state: &ProxyState, error: Option<&str>) -> String {
 <body><div class="card">
  <h1><span class="brand">audible</span> sign in</h1>
  {error_block}
- <form method="post" action="{action}">
+ <form method="post" action="{action}">{restart_field}
   <label class="fld" for="marketplace">Marketplace <span class="help" tabindex="0" aria-label="help">?</span><span class="tip">Which Audible marketplace to register this device on. One registration works for your whole account, so pick the store you mainly use.</span></label>
   <select id="marketplace" name="marketplace">{options}</select>
 
@@ -729,8 +773,14 @@ mod tests {
             default_marketplaces: None,
             plain: true,
         });
-        let html = landing_html(&state, None);
+        let html = landing_html(&state, None, false);
         assert!(html.contains(r#"action="/tok/__start""#), "{html}");
+        // No sign-in running: the form carries no restart marker (an
+        // accidental re-submit must be refusable, A7).
+        assert!(!html.contains("name=\"restart\""), "{html}");
+        let html = landing_html(&state, None, true);
+        assert!(html.contains("name=\"restart\""), "{html}");
+        assert!(html.contains("already in progress"), "{html}");
         // The marketplaces field is offered and pre-filled; every option has a help tip.
         assert!(
             html.contains(r#"name="marketplaces" value="us,uk""#),
@@ -769,7 +819,7 @@ mod tests {
             default_marketplaces: None,
             plain: false,
         });
-        let html = landing_html(&state, Some("bad <x> & \"y\""));
+        let html = landing_html(&state, Some("bad <x> & \"y\""), false);
         assert!(html.contains("bad &lt;x&gt; &amp; &quot;y&quot;"), "{html}");
         // No default name -> empty value.
         assert!(html.contains(r#"name="name" value="""#), "{html}");
