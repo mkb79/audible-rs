@@ -269,6 +269,11 @@ pub(super) async fn search(
     limit: u32,
     fts: bool,
 ) -> Result<()> {
+    // An empty query reached FTS5 as `MATCH ''` and errored with a raw
+    // "fts5: syntax error" (audit 2026-07-18, A7).
+    if query.trim().is_empty() {
+        anyhow::bail!("the search query is empty");
+    }
     let db = ctx.open_library_db().await?;
     maybe_auto_sync(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;

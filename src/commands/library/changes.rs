@@ -12,7 +12,10 @@ pub(super) async fn changes(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()> {
     let filter = db::ChangeFilter {
         marketplaces: ctx.marketplaces()?,
         asin: args.get_one::<String>("asin").cloned(),
-        since: args.get_one::<String>("since").cloned(),
+        since: args
+            .get_one::<String>("since")
+            .map(|raw| normalize_since(raw))
+            .transpose()?,
         mode: args.get_one::<String>("mode").cloned(),
         change: args.get_one::<String>("change").cloned(),
         item_kinds: crate::commands::kind_filter(args),
@@ -109,6 +112,27 @@ pub(super) async fn changes_prune(ctx: &Ctx, older_than: Option<u32>) -> Result<
     Ok(())
 }
 
+/// Validates and normalizes `--since`: the value is compared **lexically**
+/// against the stored `YYYY-MM-DDTHH:MM:SSZ` timestamps, so free text
+/// silently filtered out everything (audit 2026-07-18, A7 — `2026-6-26`
+/// sorts before every zero-padded timestamp, exit 0, plus the misleading
+/// "recording starts after the initial sync" hint). Accepted: a full ISO
+/// timestamp (verbatim) or a date, normalized to its midnight timestamp.
+fn normalize_since(raw: &str) -> Result<String> {
+    let raw = raw.trim();
+    if crate::timefmt::parse_iso(raw).is_some() {
+        return Ok(raw.to_owned());
+    }
+    let date = time::macros::format_description!("[year]-[month]-[day]");
+    if time::Date::parse(raw, &date).is_ok() {
+        return Ok(format!("{raw}T00:00:00Z"));
+    }
+    anyhow::bail!(
+        "--since {raw:?} is not a recognized time — use YYYY-MM-DD or \
+         YYYY-MM-DDTHH:MM:SSZ"
+    )
+}
+
 /// Formats the `changed` JSON (`[{key,old,new}]`) for the `fields` column: the
 /// keys alone, or `key: old → new` (values compacted) when `values` is set.
 fn format_change_fields(changed: Option<&str>, values: bool) -> String {
@@ -190,6 +214,29 @@ pub(super) fn print_changes(
             for item in items {
                 eprintln!("      {}  {}", item.asin, item.full_title);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A7 (audit 2026-07-18): only values that compare correctly against
+    /// the stored zero-padded timestamps may pass — free text used to
+    /// lexically filter out every change and exit 0.
+    #[test]
+    fn since_is_validated_and_normalized() {
+        assert_eq!(
+            normalize_since("2026-06-26").unwrap(),
+            "2026-06-26T00:00:00Z"
+        );
+        assert_eq!(
+            normalize_since(" 2026-06-26T12:00:00Z ").unwrap(),
+            "2026-06-26T12:00:00Z"
+        );
+        for invalid in ["2026-6-26", "26.06.2026", "yesterday", ""] {
+            assert!(normalize_since(invalid).is_err(), "{invalid:?}");
         }
     }
 }
