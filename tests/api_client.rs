@@ -260,7 +260,13 @@ async fn deregister_surfaces_error_status() {
 }
 
 #[tokio::test]
-async fn auto_prefers_signing_and_falls_back_to_token() {
+async fn auto_is_token_first_off_the_sidecar() {
+    // AUD-195: `Auto` sends the access token for every host audible-rs calls
+    // except the CDE-Sidecar — including accounts that *have* signing
+    // material (this used to be signing-first). The one signed host,
+    // `cde-ta-g7g.*`, cannot be reached through the mock server (it resolves
+    // by name); its selection is pinned by the `host_requires_signing` unit
+    // test in the client module.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/1.0/library"))
@@ -283,11 +289,17 @@ async fn auto_prefers_signing_and_falls_back_to_token() {
         .await
         .unwrap();
 
-    let requests = server.received_requests().await.unwrap();
-    assert!(requests[0].headers.contains_key("x-adp-signature"));
-    assert!(!requests[0].headers.contains_key("x-amz-access-token"));
-    assert!(requests[1].headers.contains_key("x-amz-access-token"));
-    assert!(!requests[1].headers.contains_key("x-adp-signature"));
+    // Both carry the token and neither is signed — signing material or not.
+    for request in server.received_requests().await.unwrap() {
+        assert!(
+            request.headers.contains_key("x-amz-access-token"),
+            "Auto must send the access token off the sidecar"
+        );
+        assert!(
+            !request.headers.contains_key("x-adp-signature"),
+            "Auto must not sign off the sidecar"
+        );
+    }
 }
 
 #[tokio::test]

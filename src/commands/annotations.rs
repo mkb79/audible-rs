@@ -20,6 +20,22 @@ use crate::naming::{base_filename, download_dir};
 /// How many annotation fetches run concurrently.
 const SYNC_CONCURRENCY: usize = 10;
 
+/// Annotations come from the CDE-Sidecar, the one endpoint that rejects the
+/// access token and must be request-signed (AUD-195). Fail early with a
+/// clear message when the account carries no signing material, rather than
+/// letting every item fail with a raw "auth mode Signing is not available"
+/// error.
+fn ensure_can_sign(client: &crate::api::client::Client) -> Result<()> {
+    if !client.can_sign() {
+        bail!(
+            "annotations (bookmarks, notes, clips) need request-signing, but this account \
+             has no signing key (device registration material). Register the account with \
+             `audible account login` to obtain it."
+        );
+    }
+    Ok(())
+}
+
 /// `audible annotations`.
 pub struct AnnotationsCommand;
 
@@ -105,6 +121,7 @@ async fn sync(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
     let db = ctx.open_library_db().await?;
     maybe_auto_sync(ctx, &db).await?;
     let client = ctx.client().await?;
+    ensure_can_sign(client)?;
     let marketplaces = ctx.marketplaces()?;
     let save = matches.get_flag("save");
 
@@ -318,6 +335,7 @@ async fn show(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
 
     if matches.get_flag("refresh") {
         let client = ctx.client().await?;
+        ensure_can_sign(client)?;
         let save = matches.get_flag("save");
         let mut refreshed = false;
         for marketplace in &marketplaces {
