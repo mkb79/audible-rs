@@ -909,6 +909,19 @@ mod tests {
     }
 
     #[test]
+    fn annotation_base_is_pinned_to_the_auto_signing_override() {
+        // Lockstep (AUD-195): the sidecar host lives here (where annotation
+        // requests go) and in `api::client::host_requires_signing` (why
+        // `Auto` signs them). If one home changed without the other, `auto`
+        // would silently switch annotations to the access token and every
+        // fetch would 403 at runtime — this assertion turns that drift into
+        // a test failure instead.
+        let base = reqwest::Url::parse(ANNOTATION_BASE).expect("ANNOTATION_BASE is a valid URL");
+        let host = base.host_str().expect("ANNOTATION_BASE has a host");
+        assert!(crate::api::client::host_requires_signing(host));
+    }
+
+    #[test]
     fn parse_license_error_extracts_code_and_message() {
         let body = r#"{"error_code":"000307","message":"Unable to retrieve asset details"}"#;
         let (code, message) = parse_license_error(body);
@@ -982,9 +995,8 @@ async fn send_licenserequest(
     let mut request = client
         .request(Method::POST, format!("/1.0/content/{asin}/{endpoint}"))
         .country_code(country_code)
-        // Auto = signing when the account has signing material
-        // (refresh-free, the endpoint accepts it), the access token
-        // otherwise.
+        // Auto = the access token here: this content endpoint accepts it,
+        // and only the CDE-Sidecar forces signing (AUD-195).
         .auth(AuthMode::Auto);
     if app_headers {
         // X-Device-Type-Id from the registered device (falls back to the
@@ -1015,9 +1027,8 @@ async fn send_licenserequest(
 
 /// Requests a download license for `asin` via the Adrm path.
 ///
-/// Headers mirror the reference client; auth is the token mode (the
-/// access token is what the endpoint validates), with signing as the
-/// `Auto` fallback.
+/// Headers mirror the reference client; auth is `Auto`, which the access
+/// token serves here — the token is what the endpoint validates (AUD-195).
 pub async fn request_license(
     client: &Client,
     country_code: &str,
@@ -1330,8 +1341,9 @@ fn annotation_url(
     url
 }
 
-/// Fetches a title's annotations (the sidecar) as JSON. Signed like the
-/// app's request; needs no license, though `acr`/`version` refine the
+/// Fetches a title's annotations (the sidecar) as JSON. The CDE-Sidecar
+/// host rejects the access token, so `Auto` signs this request like the app
+/// does (AUD-195); it needs no license, though `acr`/`version` refine the
 /// query when available.
 ///
 /// Returns `None` when the title simply has no annotations: the endpoint

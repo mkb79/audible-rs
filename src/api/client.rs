@@ -40,11 +40,14 @@ pub(crate) const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// How a single request authenticates (archived architecture §7).
 ///
 /// Selected per request; without an explicit choice [`AuthMode::Auto`]
-/// applies: signing when the account has signing material, the access
-/// token otherwise (matching the Python reference's fallback).
+/// applies: the access token everywhere, except the one host that rejects
+/// it — the CDE-Sidecar (annotations), which `Auto` serves with signing
+/// (AUD-195).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AuthMode {
-    /// Signing if adp_token and device key are present, else the access token.
+    /// The access token, except for hosts that require signing (the
+    /// CDE-Sidecar) — see [`host_requires_signing`]. Token is refresh-based
+    /// and needs no device key, so it is the more robust default.
     #[default]
     Auto,
     /// RSA-SHA256 request signing (`x-adp-*` headers).
@@ -64,6 +67,18 @@ impl AuthMode {
     /// D6): the interactive `api` picker and its round-trip test each had
     /// their own copy of this list.
     pub const LABELS: [&'static str; 4] = ["auto", "signing", "token", "cookies"];
+}
+
+/// Whether `Auto` must serve `host` with request-signing because the host
+/// rejects the access token. Only the CDE-Sidecar (annotations: bookmarks,
+/// notes, clips, last-heard) has this hard dependency — the one endpoint
+/// the official app always signs (AUD-195, capture-verified). Matched by
+/// the `cde-ta-g7g.` label prefix so any marketplace TLD is covered; every
+/// other host audible-rs calls is fine with the token. Lockstep-tested
+/// against `downloader::ANNOTATION_BASE` (where those requests go), so the
+/// two homes cannot drift apart silently.
+pub(crate) fn host_requires_signing(host: &str) -> bool {
+    host.starts_with("cde-ta-g7g.")
 }
 
 impl FromStr for AuthMode {
@@ -278,6 +293,14 @@ impl Client {
         self.device_serial.as_deref()
     }
 
+    /// Whether the account carries the signing material (adp_token + device
+    /// key) needed for the `signing` auth mode. `annotations` pre-checks
+    /// this to fail with a clear message instead of a raw 403/unavailable
+    /// error (AUD-195): the CDE-Sidecar is the one signing-only feature.
+    pub fn can_sign(&self) -> bool {
+        self.signer.is_some()
+    }
+
     /// Starts a request for an API path (including an optional query
     /// string), e.g. `/1.0/library?num_results=50`.
     pub fn request(&self, method: Method, path: impl Into<String>) -> RequestBuilder<'_> {
@@ -312,9 +335,10 @@ impl Client {
         }
     }
 
-    /// Builds the auth headers for a request, resolving `Auto` to
-    /// signing when the account has signing material, the access token
-    /// otherwise. Shared by API requests and authenticated downloads.
+    /// Builds the auth headers for a request, resolving `Auto` to the
+    /// access token — except for a host that requires signing (the
+    /// CDE-Sidecar), which `Auto` serves with signing. Shared by API
+    /// requests and authenticated downloads.
     async fn auth_headers(
         &self,
         method: &str,
@@ -323,8 +347,11 @@ impl Client {
         requested: AuthMode,
         host: &str,
     ) -> Result<HeaderMap, ApiError> {
+        // Token-first (AUD-195): the access token works for everything
+        // audible-rs calls except the CDE-Sidecar (annotations), which
+        // rejects it with 403 and is the one host `Auto` must sign.
         let mode = match requested {
-            AuthMode::Auto if self.signer.is_some() => AuthMode::Signing,
+            AuthMode::Auto if host_requires_signing(host) => AuthMode::Signing,
             AuthMode::Auto => AuthMode::Token,
             explicit => explicit,
         };
@@ -959,5 +986,21 @@ mod tests {
                 .all(|c| c.is_ascii_digit() || ('A'..='F').contains(&c))
         );
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn only_the_cde_sidecar_forces_signing() {
+        // AUD-195: `Auto` resolves to signing exactly when this classifier
+        // returns true — the CDE-Sidecar host, across marketplace TLDs.
+        assert!(host_requires_signing("cde-ta-g7g.amazon.com"));
+        assert!(host_requires_signing("cde-ta-g7g.amazon.co.uk"));
+        // Everything else audible-rs calls stays token-first under `Auto`.
+        assert!(!host_requires_signing("api.audible.de"));
+        assert!(!host_requires_signing("api.amazon.com"));
+        assert!(!host_requires_signing("www.audible.com"));
+        // A look-alike must not match: the `.` after the label is what pins
+        // it, so a host that merely contains or extends the label does not.
+        assert!(!host_requires_signing("evil-cde-ta-g7g.attacker.com"));
+        assert!(!host_requires_signing("cde-ta-g7g-evil.amazon.com"));
     }
 }
