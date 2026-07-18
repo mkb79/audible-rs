@@ -50,7 +50,11 @@ pub const DEFAULT_RESPONSE_GROUPS: &str = "badge_types,is_archived,is_finished,i
 /// **Do not trim it** (AUD-208): the small entries and the large ones resolve to
 /// different source images, and the largest is the base every other size is
 /// derived from without a further request. Dropping it degrades covers silently.
-const DEFAULT_IMAGE_SIZES: &str = "900,1215,252,558,408,500";
+///
+/// One home (audit 2026-07-18, C4): `download info` held an order-scrambled
+/// inline copy, so a change here would have silently split the cover sizes it
+/// reports for catalog ASINs from the ones sync stores for library ASINs.
+pub(crate) const DEFAULT_IMAGE_SIZES: &str = "900,1215,252,558,408,500";
 
 /// Hard cap on concurrent resolution fetches (episode + catalog) across all
 /// marketplaces, shared via one semaphore — multiplexed over HTTP/2.
