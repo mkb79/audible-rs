@@ -262,7 +262,8 @@ pub(super) async fn widevine_fetch(ctx: &Ctx, url: &str) -> Result<()> {
     let wvd = crate::widevine::provider::fetch_wvd(url, &api_url, &signed).await?;
     crate::widevine::Device::from_wvd(&wvd).context("the provider did not return a valid .wvd")?;
     let path = ctx.config_dir().join(format!("{account}.wvd"));
-    write_private(&path, &wvd).with_context(|| format!("writing {}", path.display()))?;
+    crate::fsutil::write_private(&path, &wvd)
+        .with_context(|| format!("writing {}", path.display()))?;
     set_widevine_cdm(ctx, &account, &path)?;
     eprintln!(
         "fetched Widevine CDM ({} bytes) → {} and set widevine_cdm",
@@ -293,28 +294,6 @@ fn set_widevine_cdm(ctx: &Ctx, account: &str, path: &std::path::Path) -> Result<
         write::set(content, &key, &value)
     })?;
     Ok(())
-}
-
-/// Writes bytes to an owner-only (`0o600`) file (secrets: the `.wvd`). On
-/// Windows the mode is a no-op — the file rests on user-profile isolation, not
-/// an ACL (AUD-198).
-#[cfg(unix)]
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(bytes)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, bytes)
 }
 
 #[cfg(test)]

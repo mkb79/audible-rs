@@ -483,33 +483,15 @@ pub(super) async fn export(ctx: &Ctx, args: ExportArgs) -> Result<()> {
     Ok(())
 }
 
-/// Writes export content with owner-only permissions (`0o600`) on Unix; on
-/// Windows the mode is a no-op — the exported auth file rests on user-profile
-/// isolation, not an ACL (AUD-198). Without `force` the create fails when the
-/// file already exists (`create_new`, no TOCTOU window); with it, permissions
-/// are tightened afterwards too.
+/// Writes export content owner-only from the first byte (see
+/// [`crate::fsutil::write_private`]). Without `force` the create fails
+/// when the file already exists (`create_new`, no TOCTOU window).
 fn write_export_file(path: &std::path::Path, content: &[u8], force: bool) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true);
     if force {
-        options.create(true).truncate(true);
+        crate::fsutil::write_private(path, content)
     } else {
-        options.create_new(true);
+        crate::fsutil::write_private_new(path, content)
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    file.write_all(content)?;
-    file.flush()
 }
 
 /// `account unlock` — resolve the selected account's passphrase (from

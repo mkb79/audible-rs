@@ -556,15 +556,12 @@ async fn wait_for_shutdown() {
     }
 }
 
-/// Writes a file with 0600 permissions (owner read/write only).
+/// Writes a file owner-only from the first byte (the shared
+/// [`crate::fsutil::write_private`] — the previous local copy wrote
+/// first and chmodded after).
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    std::fs::write(path, bytes).with_context(|| format!("could not write {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+    crate::fsutil::write_private(path, bytes)
+        .with_context(|| format!("could not write {}", path.display()))
 }
 
 #[cfg(test)]

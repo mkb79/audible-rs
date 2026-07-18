@@ -623,7 +623,7 @@ pub(super) async fn finalize_account(
         Some(prompt_new_password()?)
     };
 
-    std::fs::create_dir_all(ctx.config_dir())
+    crate::fsutil::create_private_dir(ctx.config_dir())
         .with_context(|| format!("could not create {}", ctx.config_dir().display()))?;
     reg.auth
         .save_to(&target, password, KdfParams::default())
