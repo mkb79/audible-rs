@@ -217,11 +217,7 @@ impl Ctx {
         }
         let account_name = self.account_name()?;
         let account = resolve::account(&self.config, &account_name)?;
-        let auth_path = if account.auth_file.is_absolute() {
-            account.auth_file.clone()
-        } else {
-            self.config_dir.join(&account.auth_file)
-        };
+        let auth_path = self.auth_path(account);
         let auth = Authenticator::load_file(&auth_path, Some(password))
             .await
             .context("could not unlock the account with this passphrase")?;
@@ -229,6 +225,19 @@ impl Ctx {
         // Another task may have unlocked concurrently; that is fine.
         let _ = self.client.set(client);
         Ok(())
+    }
+
+    /// Resolves an account's auth-file path: an absolute `auth_file` as-is,
+    /// else relative to the config dir. One rule (audit 2026-07-18, D2) —
+    /// the loaders and the `account remove`/`logout` teardown must resolve
+    /// the **identical** file, or logout could delete a different file than
+    /// the loader opens.
+    pub fn auth_path(&self, account: &Account) -> PathBuf {
+        if account.auth_file.is_absolute() {
+            account.auth_file.clone()
+        } else {
+            self.config_dir.join(&account.auth_file)
+        }
     }
 
     /// The API client for the selected account, built once per process.
@@ -250,11 +259,7 @@ impl Ctx {
         let account_name = self.account_name()?;
         let account = resolve::account(&self.config, &account_name)?;
 
-        let auth_path = if account.auth_file.is_absolute() {
-            account.auth_file.clone()
-        } else {
-            self.config_dir.join(&account.auth_file)
-        };
+        let auth_path = self.auth_path(account);
 
         let password = resolve_password(&self.config_dir, &account_name, account).await?;
         let prompt_allowed = account.password_source == PasswordSource::Prompt;
