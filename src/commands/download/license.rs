@@ -2,7 +2,7 @@
 //! grants; fresh `licenserequest`s; persistence; and the `--license-only`
 //! report.
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 
 use crate::config::ctx::Ctx;
 use crate::models::content::DownloadLicense;
@@ -101,13 +101,16 @@ pub(super) async fn acquire_license(
 ) -> Result<DownloadLicense> {
     let license = request_license(client, marketplace, asin, quality).await?;
     if !license.is_granted() {
-        bail!(
-            "license denied: {}",
+        // The shared denial variant keeps the wording identical to the
+        // Widevine path's (`parse_widevine_grant`, AUD-104).
+        return Err(crate::api::client::ApiError::LicenseDenied(
             license
                 .denial_message
                 .as_deref()
                 .unwrap_or("no reason given")
-        );
+                .to_owned(),
+        )
+        .into());
     }
 
     // Intent key for format-aware reuse (AUD-93): a Mpeg grant keys as `mpeg`,

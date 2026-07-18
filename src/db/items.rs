@@ -4,7 +4,7 @@
 use rusqlite::OptionalExtension;
 
 use super::changes::{ChangeClass, ChangeRecording, classify_change};
-use super::{Db, DbError, in_placeholders, not_archived_clause, now_iso_utc};
+use super::{Db, DbError, consumable_clause, in_placeholders, not_archived_clause, now_iso_utc};
 
 /// Sync state for a specific marketplace row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -791,7 +791,10 @@ impl Db {
     /// Each row names the kinds that are actually missing and its
     /// marketplace. `kinds` are matched regardless of content format.
     /// Archived items (`is_archived` in the doc, AUD-110) are excluded
-    /// unless `include_archived`.
+    /// unless `include_archived`; items without a provable consumption
+    /// right (AUD-104) are excluded unless `include_lapsed` (no CLI
+    /// opt-out — a lapsed title cannot license; the flag exists so
+    /// `download --missing` can count what the filter skipped).
     ///
     /// A podcast show is a **roll-up**: it owns no download record (the record
     /// sits on the episode), so it counts as missing a kind while any of its
@@ -799,6 +802,7 @@ impl Db {
     /// downloaded (AUD-203; see [`super::missing_kind_predicate`]). The
     /// download twin [`Self::missing_download_asins`] expresses the same rule
     /// as leaves — the episodes themselves.
+    #[allow(clippy::too_many_arguments)]
     pub async fn books_missing_downloads(
         &self,
         marketplaces: Vec<String>,
@@ -807,6 +811,7 @@ impl Db {
         limit: u32,
         offset: u64,
         include_archived: bool,
+        include_lapsed: bool,
     ) -> Result<Vec<MissingDownloadsRow>, DbError> {
         let kinds_json = serde_json::to_string(&kinds).expect("strings serialize");
         let offset = offset.min(i64::MAX as u64) as i64;
@@ -821,7 +826,7 @@ impl Db {
                              FROM json_each(?) k
                              WHERE {}) AS missing
                      FROM v_books b
-                     WHERE b.marketplace IN ({}) {} {}
+                     WHERE b.marketplace IN ({}) {} {} {}
                  )
                  WHERE missing IS NOT NULL
                  ORDER BY purchase_date DESC, asin, marketplace
@@ -829,6 +834,7 @@ impl Db {
                 super::missing_kind_predicate(),
                 in_placeholders(marketplaces.len()),
                 not_archived_clause(include_archived),
+                consumable_clause(include_lapsed),
                 super::kind_clause("b.kind", &item_kinds)
             );
             let mut statement = conn.prepare_cached(&sql)?;
@@ -862,6 +868,7 @@ impl Db {
         kinds: Vec<String>,
         item_kinds: Vec<String>,
         include_archived: bool,
+        include_lapsed: bool,
     ) -> Result<u64, DbError> {
         let kinds_json = serde_json::to_string(&kinds).expect("strings serialize");
         self.call(move |conn| {
@@ -874,10 +881,11 @@ impl Db {
                    AND EXISTS (
                      SELECT 1 FROM json_each(?) k
                      WHERE {}
-                 ) {} {}",
+                 ) {} {} {}",
                 in_placeholders(marketplaces.len()),
                 super::missing_kind_predicate(),
                 not_archived_clause(include_archived),
+                consumable_clause(include_lapsed),
                 super::kind_clause("b.kind", &item_kinds)
             );
             let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(marketplaces.len() + 1);
@@ -1018,6 +1026,7 @@ impl Db {
         kinds: Vec<String>,
         audio_request_kinds: Vec<String>,
         include_archived: bool,
+        include_lapsed: bool,
         include_podcasts: bool,
     ) -> Result<Vec<String>, DbError> {
         let audio = kinds.iter().any(|kind| kind == "audio");
@@ -1089,9 +1098,10 @@ impl Db {
                             b.marketplace AS marketplace
                        FROM v_books b
                       WHERE b.marketplace IN ({mp_placeholders})
-                        AND ({}) {} {items_kind_clause}",
+                        AND ({}) {} {} {items_kind_clause}",
                 missing_expr("b.asin", "b.marketplace", "items"),
                 not_archived_clause(include_archived),
+                consumable_clause(include_lapsed),
             );
             if include_podcasts {
                 // A followed show's episodes. One that is also its own library
@@ -1103,7 +1113,7 @@ impl Db {
                             e.marketplace AS marketplace
                        FROM v_episodes e
                       WHERE e.marketplace IN ({mp_placeholders})
-                        AND ({}) {}
+                        AND ({}) {} {}
                         AND NOT EXISTS (
                             SELECT 1 FROM items i
                             WHERE i.asin = e.asin AND i.marketplace = e.marketplace
@@ -1111,6 +1121,7 @@ impl Db {
                         )",
                     missing_expr("e.asin", "e.marketplace", "episodes"),
                     super::episode_not_archived_clause(include_archived),
+                    super::episode_consumable_clause(include_lapsed),
                 ));
             }
             sql.push_str(" ) ORDER BY sort_date DESC, asin, marketplace");
@@ -1136,6 +1147,62 @@ impl Db {
                 .query_map(params.as_slice(), |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(asins)
+        })
+        .await
+    }
+
+    /// The memberships among `asins` that fail the consumption-right check
+    /// (AUD-104): active library items whose stored doc does not prove
+    /// `customer_rights.is_consumable` — full identity with the external
+    /// download check, `false` and absent both fail. Returned as
+    /// `(asin, full_title)`, deduplicated and sorted.
+    ///
+    /// An episode carries no `customer_rights` of its own, so it reports
+    /// its **parent show** (the membership that holds the right) — unless
+    /// the episode is itself a library item (individually owned), which
+    /// the items branch already judged by its own doc. ASINs the library
+    /// does not hold are ignored: they are the external check's business.
+    pub async fn lapsed_titles(
+        &self,
+        marketplace: String,
+        asins: Vec<String>,
+    ) -> Result<Vec<(String, String)>, DbError> {
+        let asins_json = serde_json::to_string(&asins).expect("strings serialize");
+        self.call(move |conn| {
+            let sql = format!(
+                "SELECT DISTINCT m.asin, m.full_title FROM (
+                     SELECT i.asin AS asin, i.full_title AS full_title, i.doc AS doc
+                       FROM json_each(?) sel
+                       JOIN items i ON i.asin = sel.value AND i.marketplace = ?
+                      WHERE i.is_deleted = 0
+                     UNION ALL
+                     SELECT p.asin, p.full_title, p.doc
+                       FROM json_each(?) sel
+                       JOIN episodes e ON e.asin = sel.value AND e.marketplace = ?
+                       JOIN items p ON p.asin = e.parent_asin AND p.marketplace = e.marketplace
+                      WHERE e.is_deleted = 0 AND p.is_deleted = 0
+                        AND NOT EXISTS (
+                            SELECT 1 FROM items own
+                            WHERE own.asin = e.asin AND own.marketplace = e.marketplace
+                              AND own.is_deleted = 0
+                        )
+                 ) m
+                 WHERE COALESCE(({}), 0) = 0
+                 ORDER BY m.asin",
+                // COALESCE, because this is the *negative* use of the
+                // predicate: an absent field yields SQL NULL, and `NOT
+                // (NULL = 1)` is NULL — which WHERE drops, silently passing
+                // a rights-less doc. Absent must fail like `false` does.
+                super::consumable_sql("m.doc")
+            );
+            let mut statement = conn.prepare_cached(&sql)?;
+            let rows = statement
+                .query_map(
+                    rusqlite::params![asins_json, marketplace, asins_json, marketplace],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
         })
         .await
     }
@@ -2203,6 +2270,7 @@ mod tests {
                 u32::MAX,
                 0,
                 true,
+                true,
             )
             .await
             .unwrap();
@@ -2225,6 +2293,7 @@ mod tests {
                 u32::MAX,
                 0,
                 true,
+                true,
             )
             .await
             .unwrap();
@@ -2240,6 +2309,7 @@ mod tests {
                 1,
                 1,
                 true,
+                true,
             )
             .await
             .unwrap();
@@ -2252,6 +2322,7 @@ mod tests {
                 vec![MP.to_owned()],
                 vec!["audio".into(), "cover".into()],
                 vec![],
+                true,
                 true
             )
             .await
@@ -2263,6 +2334,7 @@ mod tests {
                 vec![MP.to_owned()],
                 vec!["audio".into()],
                 vec![],
+                true,
                 true
             )
             .await
@@ -2424,6 +2496,7 @@ mod tests {
                 default_high(),
                 true,
                 true,
+                true,
             )
             .await
             .unwrap();
@@ -2437,6 +2510,7 @@ mod tests {
                 vec![MP.to_owned()],
                 vec!["audio".into()],
                 vec!["widevine-xhe-high".to_owned(), "mpeg".to_owned()],
+                true,
                 true,
                 true,
             )
@@ -2453,6 +2527,7 @@ mod tests {
                 default_high(),
                 true,
                 true,
+                true,
             )
             .await
             .unwrap();
@@ -2465,6 +2540,7 @@ mod tests {
                 vec!["us".to_owned()],
                 vec!["audio".into()],
                 default_high(),
+                true,
                 true,
                 true,
             )
@@ -2536,6 +2612,7 @@ mod tests {
                 u32::MAX,
                 0,
                 true,
+                true,
             )
             .await
             .unwrap();
@@ -2548,7 +2625,14 @@ mod tests {
 
         // The download sweep resolves to the same single leaf.
         let leaves = db
-            .missing_download_asins(vec![MP.to_owned()], vec!["pdf".into()], vec![], true, true)
+            .missing_download_asins(
+                vec![MP.to_owned()],
+                vec!["pdf".into()],
+                vec![],
+                true,
+                true,
+                true,
+            )
             .await
             .unwrap();
         assert_eq!(leaves, vec!["A1".to_owned()]);
@@ -2649,6 +2733,7 @@ mod tests {
                 u32::MAX,
                 0,
                 true,
+                true,
             )
             .await
             .unwrap();
@@ -2667,7 +2752,13 @@ mod tests {
             "show without episodes has nothing missing: {listed:?}"
         );
         let count = db
-            .count_books_missing_downloads(vec![MP.to_owned()], vec!["audio".into()], vec![], true)
+            .count_books_missing_downloads(
+                vec![MP.to_owned()],
+                vec!["audio".into()],
+                vec![],
+                true,
+                true,
+            )
             .await
             .unwrap();
         assert_eq!(count as usize, rows.len(), "count matches the roll-up rows");
@@ -2678,6 +2769,7 @@ mod tests {
                 vec![MP.to_owned()],
                 vec!["audio".into()],
                 vec![],
+                true,
                 true,
                 true,
             )
@@ -2692,6 +2784,7 @@ mod tests {
                 vec![MP.to_owned()],
                 vec!["audio".into()],
                 vec![],
+                true,
                 true,
                 false,
             )
@@ -2734,6 +2827,7 @@ mod tests {
                 vec![],
                 false,
                 true,
+                true,
             )
             .await
             .unwrap();
@@ -2743,6 +2837,7 @@ mod tests {
                 vec![MP.to_owned()],
                 vec!["audio".into()],
                 vec![],
+                true,
                 true,
                 true,
             )
@@ -2759,6 +2854,7 @@ mod tests {
                 u32::MAX,
                 0,
                 false,
+                true,
             )
             .await
             .unwrap();
@@ -2769,7 +2865,8 @@ mod tests {
                 vec![MP.to_owned()],
                 vec!["audio".into()],
                 vec![],
-                false
+                false,
+                true
             )
             .await
             .unwrap(),
@@ -2780,12 +2877,160 @@ mod tests {
                 vec![MP.to_owned()],
                 vec!["audio".into()],
                 vec![],
+                true,
                 true
             )
             .await
             .unwrap(),
             2
         );
+    }
+
+    /// Items without a provable consumption right are excluded from the
+    /// missing-download queries (AUD-104 — full identity with the external
+    /// check: an explicit `false` and an absent field both fail), and
+    /// `lapsed_titles` names the refused memberships, an episode as its
+    /// parent show.
+    #[tokio::test]
+    async fn missing_queries_skip_lapsed_rights_and_lapsed_titles_names_them() {
+        let (_dir, db) = open_temp().await;
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        // A1 consumable, A2 explicitly lapsed, A3 without customer_rights;
+        // P1 a lapsed show with episode E1, P2 a consumable show with F1.
+        let mut lapsed_item = item("A2", "Lapsed");
+        let mut doc: serde_json::Value = serde_json::from_str(&lapsed_item.doc).unwrap();
+        doc["customer_rights"]["is_consumable"] = serde_json::Value::Bool(false);
+        lapsed_item.doc = doc.to_string();
+        let no_rights = crate::db::test_util::upsert(
+            "A3",
+            serde_json::json!({
+                "asin": "A3", "title": "No rights", "purchase_date": "2024-01-01",
+            }),
+        );
+        let show = |asin: &str, consumable: bool| {
+            crate::db::test_util::upsert(
+                asin,
+                serde_json::json!({
+                    "asin": asin, "title": asin,
+                    "content_type": "Podcast",
+                    "content_delivery_type": "PodcastParent",
+                    "purchase_date": "2024-01-01",
+                    "customer_rights": {"is_consumable": consumable},
+                }),
+            )
+        };
+        db.apply_page(
+            MP.into(),
+            vec![
+                item("A1", "Active"),
+                lapsed_item,
+                no_rights,
+                show("P1", false),
+                show("P2", true),
+            ],
+            vec![],
+            default_log(),
+            None,
+        )
+        .await
+        .unwrap();
+        let recording = || ChangeRecording {
+            record: false,
+            mode: "delta",
+        };
+        db.apply_episodes(
+            MP.into(),
+            "P1".into(),
+            vec![episode("E1", "Eins")],
+            recording(),
+        )
+        .await
+        .unwrap();
+        db.apply_episodes(
+            MP.into(),
+            "P2".into(),
+            vec![episode("F1", "Eins")],
+            recording(),
+        )
+        .await
+        .unwrap();
+
+        // The sweep keeps only provably consumable leaves (an episode
+        // inherits its parent show's right).
+        let mut leaves = db
+            .missing_download_asins(
+                vec![MP.to_owned()],
+                vec!["audio".into()],
+                vec![],
+                true,
+                false,
+                true,
+            )
+            .await
+            .unwrap();
+        leaves.sort();
+        assert_eq!(leaves, vec!["A1".to_owned(), "F1".to_owned()]);
+
+        // Counting mode (`include_lapsed`) restores the full sweep — the
+        // difference is what `download --missing` reports as skipped.
+        let mut all = db
+            .missing_download_asins(
+                vec![MP.to_owned()],
+                vec!["audio".into()],
+                vec![],
+                true,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        all.sort();
+        assert_eq!(
+            all,
+            vec![
+                "A1".to_owned(),
+                "A2".to_owned(),
+                "A3".to_owned(),
+                "E1".to_owned(),
+                "F1".to_owned(),
+            ]
+        );
+
+        // The list twin filters identically (silently, like archived).
+        let rows = db
+            .books_missing_downloads(
+                vec![MP.to_owned()],
+                vec!["audio".into()],
+                vec![],
+                u32::MAX,
+                0,
+                true,
+                false,
+            )
+            .await
+            .unwrap();
+        let listed: Vec<&str> = rows.iter().map(|row| row.asin.as_str()).collect();
+        assert_eq!(listed, vec!["A1", "P2"]);
+
+        // `lapsed_titles` names the refused memberships: the lapsed item,
+        // the rights-less item, and the episode as its parent show. The
+        // consumable ones and an unknown ASIN are not its business.
+        let lapsed = db
+            .lapsed_titles(
+                MP.into(),
+                vec![
+                    "A1".into(),
+                    "A2".into(),
+                    "A3".into(),
+                    "E1".into(),
+                    "F1".into(),
+                    "X9".into(),
+                ],
+            )
+            .await
+            .unwrap();
+        let asins: Vec<&str> = lapsed.iter().map(|(asin, _)| asin.as_str()).collect();
+        assert_eq!(asins, vec!["A2", "A3", "P1"]);
     }
 
     #[test]

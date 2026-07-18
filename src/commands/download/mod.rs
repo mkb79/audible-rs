@@ -623,9 +623,30 @@ async fn resolve_source(
                 kind_values.clone(),
                 audio_request_kinds.clone(),
                 include_archived,
+                false,
                 include_podcasts,
             )
             .await?;
+        // Count what the always-on lapsed-right filter dropped (AUD-104):
+        // no opt-out flag — a lapsed title cannot license — but a silent
+        // shrink of the sweep would read as "everything is fetched".
+        let with_lapsed = db
+            .missing_download_asins(
+                vec![marketplace.to_owned()],
+                kind_values.clone(),
+                audio_request_kinds.clone(),
+                include_archived,
+                true,
+                include_podcasts,
+            )
+            .await?;
+        let lapsed = with_lapsed.len().saturating_sub(asins.len());
+        if lapsed > 0 {
+            eprintln!(
+                "skipped {lapsed} title(s) no longer covered by your subscription \
+                 (as of the last library sync); buying one makes it downloadable again"
+            );
+        }
         if !include_archived {
             let unfiltered = db
                 .missing_download_asins(
@@ -633,10 +654,11 @@ async fn resolve_source(
                     kind_values,
                     audio_request_kinds,
                     true,
+                    true,
                     include_podcasts,
                 )
                 .await?;
-            let skipped = unfiltered.len().saturating_sub(asins.len());
+            let skipped = unfiltered.len().saturating_sub(with_lapsed.len());
             if skipped > 0 {
                 eprintln!(
                     "skipped {skipped} archived title(s) (as of the last library sync); \
@@ -678,6 +700,26 @@ async fn resolve_source(
         },
     )
     .await?;
+
+    // Lapsed-right pre-check (AUD-104), full identity with the external
+    // check above: anything the stored doc does not prove consumable is
+    // refused before the first licenserequest — the request would only
+    // return the same verdict as a raw server denial. External ASINs have
+    // no library row and pass through here untouched (their right was
+    // already checked against the catalog); an episode is judged by its
+    // parent show's doc and reported as that show, once.
+    let lapsed = db
+        .lapsed_titles(marketplace.to_owned(), resolved.clone())
+        .await?;
+    if !lapsed.is_empty() {
+        for (asin, title) in &lapsed {
+            eprintln!(
+                "{asin} ({title}): in your library, but your subscription no longer \
+                 covers it — buying it makes it downloadable again"
+            );
+        }
+        bail!("{} selected title(s) cannot be downloaded", lapsed.len());
+    }
     Ok((resolved, external))
 }
 
@@ -790,7 +832,7 @@ async fn reconcile_external(
         let named = crate::models::library::build_full_title(doc)
             .map(|title| format!("{asin} ({title})"))
             .unwrap_or_else(|| asin.clone());
-        if crate::catalog::is_consumable(doc) != Some(true) {
+        if crate::models::library::is_consumable(doc) != Some(true) {
             eprintln!(
                 "{named}: not in your library, and your subscription does not cover it — \
                  buying it puts it in your library"

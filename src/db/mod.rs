@@ -193,6 +193,52 @@ fn episode_not_archived_clause(include_archived: bool) -> &'static str {
     }
 }
 
+/// Whether a document proves an active consumption right — the SQL twin of
+/// [`crate::models::library::is_consumable`] (the Rust source of truth),
+/// kept in lockstep by a functional test below. Full identity with the
+/// external-download check (AUD-104): only a provable right passes — an
+/// explicit `false` and an absent field both fail (`!= Some(true)` on the
+/// Rust side), so a lapsed subscription title never reaches a
+/// licenserequest. `doc_expr` must name a document column in scope.
+fn consumable_sql(doc_expr: &str) -> String {
+    format!("json_extract({doc_expr}, '$.customer_rights.is_consumable') = 1")
+}
+
+/// Excludes items whose subscription right has lapsed from a `v_books b`
+/// query (AUD-104) — empty when lapsed rows are wanted (callers pass
+/// `true` only to *count* what the always-on filter skips; there is no
+/// user-facing opt-out, a lapsed title cannot license). Twin of
+/// [`not_archived_clause`]; the predicate is [`consumable_sql`].
+fn consumable_clause(include_lapsed: bool) -> String {
+    if include_lapsed {
+        String::new()
+    } else {
+        format!(
+            "AND EXISTS (SELECT 1 FROM items i
+                         WHERE i.asin = b.asin AND i.marketplace = b.marketplace
+                           AND {})",
+            consumable_sql("i.doc")
+        )
+    }
+}
+
+/// The lapsed-right filter for a query over `v_episodes` aliased `e`: an
+/// episode carries no `customer_rights` of its own — it inherits its
+/// parent show's right, exactly like [`episode_not_archived_clause`]
+/// inherits the archive flag. Twin of [`consumable_clause`].
+fn episode_consumable_clause(include_lapsed: bool) -> String {
+    if include_lapsed {
+        String::new()
+    } else {
+        format!(
+            "AND EXISTS (SELECT 1 FROM items i
+                         WHERE i.asin = e.parent_asin AND i.marketplace = e.marketplace
+                           AND {})",
+            consumable_sql("i.doc")
+        )
+    }
+}
+
 /// Escapes `%`, `_` and the escape character itself in user text bound
 /// into a `LIKE '%' || ? || '%'` pattern — pair the pattern with
 /// `ESCAPE '\\'`. Without it a `--title 100%` filter matched every title
@@ -419,6 +465,31 @@ mod tests {
             pdf_available(&serde_json::json!({"pdf_url": null})),
             Some(false)
         );
+    }
+
+    /// The SQL right-check must classify exactly like the download paths'
+    /// Rust predicate `models::library::is_consumable(doc) == Some(true)` —
+    /// one truth, two homes (AUD-104). Full identity with the external
+    /// check: `false` AND absent both fail, only a provable right passes.
+    #[test]
+    fn consumable_sql_matches_rust_predicate() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let sql = format!("SELECT COALESCE(({}), 0)", consumable_sql("?"));
+        let docs = [
+            serde_json::json!({"customer_rights": {"is_consumable": true}}),
+            serde_json::json!({"customer_rights": {"is_consumable": false}}),
+            serde_json::json!({"customer_rights": {"is_consumable": null}}),
+            serde_json::json!({"customer_rights": {"other": 1}}),
+            serde_json::json!({"title": "no customer_rights at all"}),
+        ];
+        for doc in docs {
+            let text = doc.to_string();
+            let sql_says: bool = conn
+                .query_row(&sql, rusqlite::params![text], |row| row.get(0))
+                .unwrap();
+            let rust_says = crate::models::library::is_consumable(&doc) == Some(true);
+            assert_eq!(sql_says, rust_says, "SQL and Rust diverged on {text}");
+        }
     }
 
     #[test]

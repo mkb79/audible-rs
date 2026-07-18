@@ -1,6 +1,13 @@
 //! Library item payload helpers, ported from the Python reference
 //! branch `feature/db-library` (normalize/full-title/soft-delete
 //! decisions). Pure functions over JSON values.
+//!
+//! Named after the library item document, but several readers serve the
+//! **shared product-doc shape** — authenticated catalog products carry
+//! the same fields — and are deliberately called from `catalog` too
+//! (`item_kind`, `join_title_subtitle`, the `customer_rights` readers;
+//! AUD-104). The dependency always points here (`catalog → models`,
+//! never back): this module imports nothing but `std` and `serde_json`.
 
 use std::collections::BTreeSet;
 
@@ -173,6 +180,41 @@ pub fn pdf_available(doc: &Value) -> Option<bool> {
         (None, None) => None,
         (flag, url) => Some(flag.unwrap_or(false) || url.unwrap_or(false)),
     }
+}
+
+/// The account's right to consume this title, from the document's
+/// `customer_rights.is_consumable`. The field lives in the shared
+/// product-doc shape — library items and authenticated catalog products
+/// alike — which is why this reader lives here and not in `catalog`
+/// (AUD-104): the external-download check reads it off a catalog doc, the
+/// lapsed-right pre-check off the stored library doc. `None` when absent
+/// (e.g. an unauthenticated catalog doc — the field is the account's).
+///
+/// This is the one Rust source of truth for the right; the SQL twin lives
+/// in [`crate::db`] (`consumable_sql`) and the two are kept in lockstep by
+/// a functional test there. `download` treats anything not provably
+/// consumable (`!= Some(true)`) as not downloadable — before the first
+/// licenserequest.
+pub fn is_consumable(doc: &Value) -> Option<bool> {
+    doc.get("customer_rights")?.get("is_consumable")?.as_bool()
+}
+
+/// `customer_rights.is_consumable_indefinitely` — `true` = kept
+/// indefinitely (a purchase), `false` = a lapsing right (subscription
+/// loan). Same shared shape and `None` semantics as [`is_consumable`].
+pub fn is_consumable_indefinitely(doc: &Value) -> Option<bool> {
+    doc.get("customer_rights")?
+        .get("is_consumable_indefinitely")?
+        .as_bool()
+}
+
+/// `customer_rights.is_consumable_offline` — whether a download right
+/// exists at all (`download info` reports it). Same shared shape and
+/// `None` semantics as [`is_consumable`].
+pub fn is_consumable_offline(doc: &Value) -> Option<bool> {
+    doc.get("customer_rights")?
+        .get("is_consumable_offline")?
+        .as_bool()
 }
 
 /// Expands a series sequence into the volume numbers it covers:

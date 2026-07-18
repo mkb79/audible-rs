@@ -281,14 +281,6 @@ pub async fn documents(
     Ok(docs)
 }
 
-/// Whether the account may fetch this title, from a catalog document's
-/// `customer_rights` — the same signal [`Eligibility::is_consumable`] carries,
-/// for callers that already hold the document. `None` when unauthenticated:
-/// the field is the account's, so it is absent without one.
-pub fn is_consumable(doc: &Value) -> Option<bool> {
-    doc.get("customer_rights")?.get("is_consumable")?.as_bool()
-}
-
 /// Subscription eligibility for one ASIN, from the **authenticated**
 /// catalog doc's `customer_rights` (absent/null when unauthenticated).
 pub struct Eligibility {
@@ -345,18 +337,16 @@ pub async fn eligibility(
             Some(parsed) => parsed,
             None => continue,
         };
-        let rights = product.get("customer_rights");
-        let flag = |key: &str| {
-            rights
-                .and_then(|rights| rights.get(key))
-                .and_then(Value::as_bool)
-        };
         out.insert(
             asin.to_owned(),
             Eligibility {
                 full_title: details.full_title(),
-                is_consumable: flag("is_consumable"),
-                is_consumable_indefinitely: flag("is_consumable_indefinitely"),
+                // The `customer_rights` readers live in the models layer —
+                // the doc shape is shared with library items (AUD-104).
+                is_consumable: crate::models::library::is_consumable(product),
+                is_consumable_indefinitely: crate::models::library::is_consumable_indefinitely(
+                    product,
+                ),
                 kind: crate::models::library::item_kind(product),
             },
         );

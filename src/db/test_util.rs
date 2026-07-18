@@ -13,6 +13,10 @@ pub(crate) fn item(asin: &str, title: &str) -> UpsertItem {
             "purchase_date": "2024-01-01",
             "runtime_length_min": 123,
             "language": "german",
+            // Real library docs always carry customer_rights (pinned
+            // response groups); the missing-download queries filter on it
+            // (AUD-104), so the default fixture is a consumable title.
+            "customer_rights": {"is_consumable": true},
         })
         .to_string(),
         title: title.into(),
