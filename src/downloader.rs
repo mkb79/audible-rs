@@ -909,6 +909,19 @@ mod tests {
     }
 
     #[test]
+    fn annotation_base_is_pinned_to_the_auto_signing_override() {
+        // Lockstep (AUD-195): the sidecar host lives here (where annotation
+        // requests go) and in `api::client::host_requires_signing` (why
+        // `Auto` signs them). If one home changed without the other, `auto`
+        // would silently switch annotations to the access token and every
+        // fetch would 403 at runtime — this assertion turns that drift into
+        // a test failure instead.
+        let base = reqwest::Url::parse(ANNOTATION_BASE).expect("ANNOTATION_BASE is a valid URL");
+        let host = base.host_str().expect("ANNOTATION_BASE has a host");
+        assert!(crate::api::client::host_requires_signing(host));
+    }
+
+    #[test]
     fn parse_license_error_extracts_code_and_message() {
         let body = r#"{"error_code":"000307","message":"Unable to retrieve asset details"}"#;
         let (code, message) = parse_license_error(body);

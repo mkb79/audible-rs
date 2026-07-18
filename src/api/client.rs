@@ -74,8 +74,10 @@ impl AuthMode {
 /// notes, clips, last-heard) has this hard dependency — the one endpoint
 /// the official app always signs (AUD-195, capture-verified). Matched by
 /// the `cde-ta-g7g.` label prefix so any marketplace TLD is covered; every
-/// other host audible-rs calls is fine with the token.
-fn host_requires_signing(host: &str) -> bool {
+/// other host audible-rs calls is fine with the token. Lockstep-tested
+/// against `downloader::ANNOTATION_BASE` (where those requests go), so the
+/// two homes cannot drift apart silently.
+pub(crate) fn host_requires_signing(host: &str) -> bool {
     host.starts_with("cde-ta-g7g.")
 }
 
