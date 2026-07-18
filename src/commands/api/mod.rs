@@ -511,7 +511,7 @@ fn path_without_query(path: &str) -> &str {
 
 /// True for headers owned by the auth layer (`--auth`); these must not be set
 /// via `--header` or a user could break or leak the account's credentials.
-fn is_auth_managed_header(name: &str) -> bool {
+pub(super) fn is_auth_managed_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     matches!(
         lower.as_str(),

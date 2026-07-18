@@ -70,26 +70,69 @@ pub(super) async fn save(path: &Path, file: &RequestFile) -> Result<()> {
         .with_context(|| format!("could not write request file {}", path.display()))
 }
 
-/// Parses `key=value` strings into a map (last value for a key wins).
+/// Parses `key=value` strings into the file's `[query]` map. The map holds
+/// one value per key, but the send path keeps repeats as repeated
+/// parameters (`asins=A&asins=B`) — so a key appearing with **different**
+/// values must fail loudly here instead of silently saving a request that
+/// replays differently than the one sent (audit 2026-07-18, C1).
+/// Identical repeats collapse, like the send path's exact-duplicate rule.
 pub(super) fn parse_query_strings(strings: &[String]) -> Result<BTreeMap<String, String>> {
-    let mut map = BTreeMap::new();
+    let mut map: BTreeMap<String, String> = BTreeMap::new();
     for raw in strings {
         let (key, value) = raw
             .split_once('=')
-            .with_context(|| format!("query {raw:?} is not KEY=VALUE"))?;
-        map.insert(key.trim().to_owned(), value.to_owned());
+            .with_context(|| format!("query parameter {raw:?} is not KEY=VALUE"))?;
+        let key = key.trim();
+        match map.get(key) {
+            Some(existing) if existing != value => bail!(
+                "query key {key:?} appears with different values ({existing:?} and {value:?}) — \
+                 the request file stores one value per key and cannot represent repeated \
+                 parameters"
+            ),
+            _ => {
+                map.insert(key.to_owned(), value.to_owned());
+            }
+        }
     }
     Ok(map)
 }
 
-/// Parses `Name: value` strings into a map (last value for a name wins).
+/// Parses `Name: value` strings into the file's `[headers]` map, applying
+/// the send path's **policy** checks (auth-managed headers and
+/// `content-type` are refused — a file must never store a header the send
+/// would reject; audit 2026-07-18, C1). Name/value *syntax* is deliberately
+/// not validated here: headers may carry `{{var}}` placeholders, which
+/// only the post-substitution send can check. A name appearing with
+/// different values fails like a repeated query key.
 pub(super) fn parse_header_strings(strings: &[String]) -> Result<BTreeMap<String, String>> {
-    let mut map = BTreeMap::new();
+    let mut map: BTreeMap<String, String> = BTreeMap::new();
     for raw in strings {
         let (name, value) = raw
             .split_once(':')
             .with_context(|| format!("header {raw:?} is not \"Name: value\""))?;
-        map.insert(name.trim().to_owned(), value.trim().to_owned());
+        let name = name.trim();
+        let value = value.trim();
+        if name.is_empty() {
+            bail!("header {raw:?} has an empty name");
+        }
+        if super::is_auth_managed_header(name) {
+            bail!(
+                "header {name:?} is managed by --auth and cannot be stored in a request file; \
+                 use the file's `auth` field instead"
+            );
+        }
+        if name.eq_ignore_ascii_case("content-type") {
+            bail!("store the body content type in the file's `content_type` field, not a header");
+        }
+        match map.get(name) {
+            Some(existing) if existing != value => bail!(
+                "header {name:?} appears with different values ({existing:?} and {value:?}) — \
+                 the request file stores one value per header"
+            ),
+            _ => {
+                map.insert(name.to_owned(), value.to_owned());
+            }
+        }
     }
     Ok(map)
 }
@@ -218,6 +261,34 @@ mod tests {
     #[test]
     fn rejects_unknown_field() {
         assert!(toml::from_str::<RequestFile>("method = \"GET\"\nbogus = 1\n").is_err());
+    }
+
+    /// C1 (audit 2026-07-18): the saved file must describe the request
+    /// that was sent — repeated keys with different values (kept as
+    /// repeated parameters by the send path) and headers the send would
+    /// refuse fail the save instead of silently saving something else.
+    #[test]
+    fn save_parsers_match_the_send_contract() {
+        // Identical repeats collapse, like the send path …
+        let map = parse_query_strings(&["asins=A".into(), "asins=A".into()]).unwrap();
+        assert_eq!(map.get("asins").map(String::as_str), Some("A"));
+        // … but different values cannot be represented: loud error.
+        let error = parse_query_strings(&["asins=A".into(), "asins=B".into()]).unwrap_err();
+        assert!(error.to_string().contains("repeated"), "{error:#}");
+
+        let error = parse_header_strings(&["authorization: x".into()]).unwrap_err();
+        assert!(error.to_string().contains("--auth"), "{error:#}");
+        let error = parse_header_strings(&["Content-Type: text/xml".into()]).unwrap_err();
+        assert!(error.to_string().contains("content_type"), "{error:#}");
+        let error = parse_header_strings(&["Accept: a".into(), "Accept: b".into()]).unwrap_err();
+        assert!(error.to_string().contains("different values"), "{error:#}");
+        // Templated values pass — only the post-substitution send
+        // validates header syntax.
+        let map = parse_header_strings(&["Accept-Language: {{lang}}".into()]).unwrap();
+        assert_eq!(
+            map.get("Accept-Language").map(String::as_str),
+            Some("{{lang}}")
+        );
     }
 
     #[tokio::test]
