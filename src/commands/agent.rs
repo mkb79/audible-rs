@@ -200,13 +200,19 @@ async fn start_agent(ctx: &Ctx, foreground: bool) -> Result<()> {
     }
     let child = command.spawn().context("could not spawn the agent")?;
 
-    // Wait for the socket (or an early exit) — up to ~3s.
+    // Readiness = the daemon recorded its own PID, not merely that a
+    // socket file exists: after a crash the previous run's socket lingers
+    // and would read as up immediately, returning before the new daemon
+    // took its run lock and wrote its PID (a following `agent stop` would
+    // then read the stale PID). The spawned process IS the daemon (setsid,
+    // no re-exec), so its PID equals `child.id()`; serve writes that right
+    // after acquiring the lock.
+    let child_pid = child.id() as i32;
     let socket = agent::socket_path(ctx);
     for _ in 0..30 {
-        if socket.exists() {
+        if agent::read_pid(ctx) == Some(child_pid) {
             eprintln!(
-                "agent started (pid {}), socket {}",
-                child.id(),
+                "agent started (pid {child_pid}), socket {}",
                 socket.display()
             );
             return Ok(());

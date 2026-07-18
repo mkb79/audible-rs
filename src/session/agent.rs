@@ -42,6 +42,54 @@ fn agent_dir(ctx: &Ctx) -> PathBuf {
     super::runtime_dir(ctx).join("audible")
 }
 
+/// The running-agent lock file (`agent.lock`). The daemon holds an
+/// exclusive flock on it for its whole lifetime; that lock — not the
+/// recorded PID — is the liveness signal, because it dies with the
+/// process (SIGKILL included). A recycled PID can therefore never read
+/// as "running", and a crashed agent never blocks the next start
+/// (audit 2026-07-18, B5).
+fn run_lock_path(ctx: &Ctx) -> PathBuf {
+    agent_dir(ctx).join("agent.lock")
+}
+
+/// Acquires the running-agent lock; the returned file must stay open for
+/// the daemon's lifetime. Fails when a live daemon already holds it.
+fn acquire_run_lock_at(path: &Path) -> Result<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("could not open {}", path.display()))?;
+    if !try_flock(&file) {
+        bail!("an agent is already running (lock {})", path.display());
+    }
+    Ok(file)
+}
+
+/// Whether a live daemon holds the running-agent lock. Probing takes the
+/// lock when it is free (proving nobody holds it) and releases it with
+/// the probe fd on drop.
+fn run_lock_held_at(path: &Path) -> bool {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+    else {
+        // No lock file and no way to create one: no daemon dir → not running.
+        return false;
+    };
+    !try_flock(&file)
+}
+
+/// Non-blocking exclusive flock; `true` = acquired.
+fn try_flock(file: &std::fs::File) -> bool {
+    use std::os::fd::AsRawFd as _;
+    // SAFETY: flock on a valid owned fd has no memory effects.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+
 /// Stable socket path the CLI and external callers connect to.
 pub fn socket_path(ctx: &Ctx) -> PathBuf {
     agent_dir(ctx).join("agent.sock")
@@ -443,12 +491,16 @@ pub async fn serve(ctx: &Ctx, builtins: Vec<String>) -> Result<()> {
     let dir = agent_dir(ctx);
     super::create_private_dir(&dir)?;
 
-    if is_running(ctx) {
-        bail!(
-            "an agent is already running (pid file {})",
-            pid_path(ctx).display()
-        );
-    }
+    // The lock is the single "already running" arbiter — atomic (no
+    // check-then-write gap) and immune to recycled PIDs (B5). Held until
+    // this function returns.
+    let _run_lock = acquire_run_lock_at(&run_lock_path(ctx))?;
+
+    // Record our PID immediately after taking the lock: `agent stop` gates
+    // on the lock and then reads this file, so a crashed run's stale PID
+    // must be overwritten before the socket comes up (which is what
+    // `agent start` waits for).
+    write_private(&pid_path(ctx), std::process::id().to_string().as_bytes())?;
 
     let socket_path = socket_path(ctx);
     let _ = std::fs::remove_file(&socket_path); // stale socket of a crashed run
@@ -457,7 +509,6 @@ pub async fn serve(ctx: &Ctx, builtins: Vec<String>) -> Result<()> {
 
     let admin_token = hex::encode(rand::random::<[u8; 32]>());
     write_private(&token_path(ctx), admin_token.as_bytes())?;
-    write_private(&pid_path(ctx), std::process::id().to_string().as_bytes())?;
 
     let idle_timeout = crate::config::schema::parse_duration(&ctx.config().session.idle_timeout)
         .unwrap_or_else(|_| Duration::from_secs(900));
@@ -520,9 +571,11 @@ pub async fn serve(ctx: &Ctx, builtins: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-/// Whether a live agent process owns the PID file.
+/// Whether a live agent daemon holds the running-agent lock. The PID
+/// file is display metadata only — a recycled PID must never read as
+/// "running" (B5).
 pub fn is_running(ctx: &Ctx) -> bool {
-    read_pid(ctx).is_some_and(process_alive)
+    run_lock_held_at(&run_lock_path(ctx))
 }
 
 /// The PID recorded in the PID file (whether alive or not).
@@ -537,14 +590,17 @@ fn signal(pid: i32, sig: i32) -> bool {
     unsafe { libc::kill(pid, sig) == 0 }
 }
 
-fn process_alive(pid: i32) -> bool {
-    signal(pid, 0)
-}
-
 /// Asks a running agent to stop (SIGTERM). Returns the signalled PID.
 pub fn stop(ctx: &Ctx) -> Result<i32> {
-    let Some(pid) = read_pid(ctx).filter(|pid| process_alive(*pid)) else {
+    // Gate on the run lock, not on PID liveness: after a crash the
+    // recorded PID may belong to a recycled, unrelated process (B5) —
+    // that must read as "no agent", never receive a signal. While the
+    // lock is held, the PID file was written by its holder.
+    if !run_lock_held_at(&run_lock_path(ctx)) {
         bail!("no agent is running");
+    }
+    let Some(pid) = read_pid(ctx) else {
+        bail!("an agent holds the run lock but recorded no PID — stop it manually");
     };
     if !signal(pid, libc::SIGTERM) {
         bail!("could not signal the agent (pid {pid})");
@@ -574,6 +630,24 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B5 (audit 2026-07-18): the flock — not the recorded PID — is the
+    /// liveness signal. Held → running; dropped (any process exit, incl.
+    /// SIGKILL) → not running, no matter what the PID file says.
+    #[test]
+    fn run_lock_is_the_liveness_signal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("agent.lock");
+        assert!(!run_lock_held_at(&path), "fresh lock file: no daemon");
+        let held = acquire_run_lock_at(&path).unwrap();
+        assert!(run_lock_held_at(&path), "acquired: reads as running");
+        assert!(
+            acquire_run_lock_at(&path).is_err(),
+            "second daemon must be refused"
+        );
+        drop(held); // process exit / crash: the flock dies with the fd
+        assert!(!run_lock_held_at(&path), "released: reads as stopped");
+    }
 
     fn test_ctx(tmp: &Path) -> Ctx {
         let config_dir = tmp.join("cfg");
