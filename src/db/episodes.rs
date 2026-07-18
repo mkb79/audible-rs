@@ -359,17 +359,14 @@ impl Db {
                 "e.asin",
                 "e.marketplace",
             ));
+            let missing = super::missing_download_sql("e.asin", "e.marketplace", "k.value");
             let sql = format!(
                 "SELECT asin, full_title, release_date, missing FROM (
                      SELECT e.asin AS asin, e.full_title AS full_title,
                             CAST(e.release_date AS TEXT) AS release_date,
                             (SELECT group_concat(k.value)
                              FROM json_each(?1) k
-                             WHERE NOT EXISTS (
-                                 SELECT 1 FROM downloads d
-                                 WHERE d.asin = e.asin AND d.marketplace = e.marketplace
-                                   AND d.kind = k.value
-                             )
+                             WHERE {missing}
                              AND {possible}) AS missing
                      FROM v_episodes e
                      WHERE e.marketplace = ?2 AND e.parent_asin = ?3
@@ -412,16 +409,13 @@ impl Db {
                 "e.asin",
                 "e.marketplace",
             ));
+            let missing = super::missing_download_sql("e.asin", "e.marketplace", "k.value");
             let sql = format!(
                 "SELECT COUNT(*) FROM v_episodes e
                  WHERE e.marketplace = ?2 AND e.parent_asin = ?3
                    AND EXISTS (
                        SELECT 1 FROM json_each(?1) k
-                       WHERE NOT EXISTS (
-                           SELECT 1 FROM downloads d
-                           WHERE d.asin = e.asin AND d.marketplace = e.marketplace
-                             AND d.kind = k.value
-                       )
+                       WHERE {missing}
                        AND {possible}
                    )"
             );
