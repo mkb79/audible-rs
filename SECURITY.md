@@ -7,10 +7,10 @@ for helping keep it safe.
 
 ## Status
 
-This project is **pre-alpha** and has no released versions. Security
-fixes land on the `main` branch; there is no back-port or advisory
-process for older versions because none exist yet. This policy will be
-tightened once the project makes a tagged release.
+This project is in its **alpha** phase (pre-1.0, tagged pre-releases).
+Only the **latest release** is supported: security fixes land on the
+`main` branch and ship with the next release — there are no back-ports
+to older versions. This policy will be tightened as the project matures.
 
 ## Reporting a vulnerability
 
