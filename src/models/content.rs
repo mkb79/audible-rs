@@ -6,6 +6,59 @@ use base64::Engine as _;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+/// The `content_license.content_metadata.content_reference` fields shared
+/// by both license flavors — the aaxc [`DownloadLicense`] and the Widevine
+/// grant. One parser (audit 2026-07-18, D9): the two used to read these
+/// separately, and only the aaxc side gained the top-level `acr` fallback,
+/// so a server-side field move could silently weaken the Widevine A9
+/// `version_tag` gate.
+#[derive(Debug, Clone, Default)]
+pub struct ContentReference {
+    /// Audible Content Reference (identity for resume validation).
+    pub acr: Option<String>,
+    /// Content version.
+    pub version: Option<String>,
+    /// File version (aaxc only; the Widevine grant carries none).
+    pub file_version: Option<String>,
+    /// Stock-keeping unit.
+    pub sku: Option<String>,
+    /// Content format / codec (`AAX_22_64`, `MPEG`, …).
+    pub content_format: Option<String>,
+    /// Exact file size in bytes, if the server reported it.
+    pub content_size: Option<u64>,
+}
+
+impl ContentReference {
+    /// Parses the content reference out of a `content_license` object.
+    /// `acr` falls back to the license's top-level `acr` (the server has
+    /// put it in both places).
+    pub fn parse(license: &Value) -> Self {
+        let cref = license
+            .get("content_metadata")
+            .and_then(|metadata| metadata.get("content_reference"));
+        let field = |key: &str| {
+            cref.and_then(|reference| reference.get(key))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        Self {
+            acr: field("acr").or_else(|| {
+                license
+                    .get("acr")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            }),
+            version: field("version"),
+            file_version: field("file_version"),
+            sku: field("sku"),
+            content_format: field("content_format"),
+            content_size: cref
+                .and_then(|reference| reference.get("content_size_in_bytes"))
+                .and_then(Value::as_u64),
+        }
+    }
+}
+
 /// Outcome of a download license request.
 #[derive(Debug, Clone)]
 pub struct DownloadLicense {
@@ -62,6 +115,7 @@ impl DownloadLicense {
             cur.as_str().map(str::to_owned)
         };
 
+        let reference = ContentReference::parse(license);
         Some(Self {
             status_code: license
                 .get("status_code")
@@ -75,18 +129,12 @@ impl DownloadLicense {
                 .to_owned(),
             drm_type: str_at(license, &["drm_type"]),
             offline_url: metadata.and_then(|m| str_at(m, &["content_url", "offline_url"])),
-            content_format: metadata
-                .and_then(|m| str_at(m, &["content_reference", "content_format"])),
-            acr: str_at(license, &["acr"])
-                .or_else(|| metadata.and_then(|m| str_at(m, &["content_reference", "acr"]))),
-            version: metadata.and_then(|m| str_at(m, &["content_reference", "version"])),
-            file_version: metadata.and_then(|m| str_at(m, &["content_reference", "file_version"])),
-            sku: metadata.and_then(|m| str_at(m, &["content_reference", "sku"])),
-            content_size: metadata.and_then(|m| {
-                m.get("content_reference")
-                    .and_then(|r| r.get("content_size_in_bytes"))
-                    .and_then(Value::as_u64)
-            }),
+            content_format: reference.content_format,
+            acr: reference.acr,
+            version: reference.version,
+            file_version: reference.file_version,
+            sku: reference.sku,
+            content_size: reference.content_size,
             pdf_url: pdf_url_from_license(license, metadata),
             has_voucher: license.get("license_response").is_some(),
             voucher_raw: str_at(license, &["license_response"]),

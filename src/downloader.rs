@@ -1149,17 +1149,20 @@ fn parse_widevine_grant(
 ) -> Result<WidevineGrant, ApiError> {
     let license = &payload["content_license"];
     let metadata = &license["content_metadata"];
-    let cref = &metadata["content_reference"];
-    let content_size = cref["content_size_in_bytes"].as_u64();
+    // The content_reference fields share the aaxc path's parser (D9), so
+    // the Widevine grant gets the same top-level-`acr` fallback and cannot
+    // drift from it.
+    let reference = crate::models::content::ContentReference::parse(license);
+    let content_size = reference.content_size;
     match license["drm_type"].as_str() {
         Some("Widevine") => Ok(WidevineGrant::Widevine(WidevineLicense {
             mpd_url: license["license_response"]
                 .as_str()
                 .ok_or_else(|| ApiError::LicenseResponse(asin.to_owned()))?
                 .to_owned(),
-            acr: cref["acr"].as_str().map(str::to_owned),
-            version: cref["version"].as_str().map(str::to_owned),
-            sku: cref["sku"].as_str().map(str::to_owned),
+            acr: reference.acr,
+            version: reference.version,
+            sku: reference.sku,
             content_size,
             // Same `pdf_url` rule as the aaxc path (content_metadata,
             // top-level fallback) — one home, D6.
@@ -1171,7 +1174,9 @@ fn parse_widevine_grant(
                 .as_str()
                 .ok_or_else(|| ApiError::LicenseResponse(asin.to_owned()))?
                 .to_owned(),
-            content_format: cref["content_format"].as_str().unwrap_or("MPEG").to_owned(),
+            content_format: reference
+                .content_format
+                .unwrap_or_else(|| "MPEG".to_owned()),
             content_size,
         })),
         _ => Err(ApiError::LicenseResponse(asin.to_owned())),
@@ -1248,7 +1253,39 @@ pub async fn request_chapters(
     quality: &str,
     chapter_titles_type: &str,
 ) -> Result<serde_json::Value, ApiError> {
-    let response = client
+    let metadata = request_content_metadata(
+        client,
+        country_code,
+        asin,
+        CHAPTER_DRM_TYPE,
+        quality,
+        chapter_titles_type,
+    )
+    .await?;
+    metadata
+        .get("chapter_info")
+        .cloned()
+        .ok_or_else(|| ApiError::ChapterInfo(asin.to_owned()))
+}
+
+/// Fetches the license-free `content_metadata` object for `asin` from the
+/// `/1.0/content/{asin}/metadata` endpoint — one wire home (audit
+/// 2026-07-18, D6): `request_chapters` and `download info`'s DRM probe
+/// each assembled this request separately. The `drm_type` is the knob:
+/// `Adrm` yields the curated chapter titles (see [`request_chapters`]),
+/// a `Widevine` probe reveals a title with no aax asset. A non-success
+/// status is surfaced as [`ApiError::Http`] (so a caller can tell a
+/// server rejection from a transport fault); the response groups are a
+/// superset both callers read from.
+pub async fn request_content_metadata(
+    client: &Client,
+    country_code: &str,
+    asin: &str,
+    drm_type: &str,
+    quality: &str,
+    chapter_titles_type: &str,
+) -> Result<serde_json::Value, ApiError> {
+    let payload: serde_json::Value = client
         .request(Method::GET, format!("/1.0/content/{asin}/metadata"))
         .country_code(country_code)
         .auth(AuthMode::Auto)
@@ -1257,14 +1294,15 @@ pub async fn request_chapters(
             "last_position_heard,content_reference,chapter_info",
         )
         .query("quality", quality)
-        .query("drm_type", CHAPTER_DRM_TYPE)
+        .query("drm_type", drm_type)
         .query("chapter_titles_type", chapter_titles_type)
         .send()
+        .await?
+        .error_for_status()?
+        .json()
         .await?;
-    let payload: serde_json::Value = response.json().await?;
     payload
         .get("content_metadata")
-        .and_then(|metadata| metadata.get("chapter_info"))
         .cloned()
         .ok_or_else(|| ApiError::ChapterInfo(asin.to_owned()))
 }

@@ -16,7 +16,6 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
-use reqwest::Method;
 use serde_json::Value;
 
 use crate::api::client::Client;
@@ -209,7 +208,7 @@ async fn catalog_facts(
         marketplace,
         asins,
         "product_attrs,media",
-        Some("252,408,500,558,900,1215"),
+        Some(crate::library_sync::DEFAULT_IMAGE_SIZES),
         1,
     )
     .await?;
@@ -274,21 +273,16 @@ async fn content_metadata_drm(
     asin: &str,
     drm_type: &str,
 ) -> Result<Value> {
-    let body: Value = client
-        .request(Method::GET, format!("/1.0/content/{asin}/metadata"))
-        .country_code(marketplace)
-        .query("response_groups", "content_reference,chapter_info")
-        .query("quality", "High")
-        .query("drm_type", drm_type)
-        .query("chapter_titles_type", "Flat")
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    body.get("content_metadata")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("no content_metadata in the response"))
+    // The shared wire home (D6); the DRM probe passes its `drm_type`.
+    Ok(crate::downloader::request_content_metadata(
+        client,
+        marketplace,
+        asin,
+        drm_type,
+        "High",
+        "Flat",
+    )
+    .await?)
 }
 
 /// Builds the artifact rows (kind, detail, available, downloaded) for one
