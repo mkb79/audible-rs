@@ -618,10 +618,24 @@ fn truncate_label(label: &str, max: usize) -> String {
     format!("{start}…{end}")
 }
 
+/// Suffix of an in-progress partial download.
+const PART_SUFFIX: &str = ".part";
+/// Suffix of a partial's version marker (`<dest>.part.ver`, see
+/// [`version_marker_path`]).
+const VERSION_MARKER_SUFFIX: &str = ".part.ver";
+
 fn part_path(dest: &Path) -> PathBuf {
     let mut name = dest.file_name().unwrap_or_default().to_os_string();
-    name.push(".part");
+    name.push(PART_SUFFIX);
     dest.with_file_name(name)
+}
+
+/// Whether `name` is resume data of an in-progress `download`: the `.part`
+/// partial or its `.part.ver` version marker. The one home for the
+/// resume-suffix knowledge — `download orphans` consumes it, because resume
+/// data is reported but never deleted there.
+pub(crate) fn is_resume_artifact(name: &str) -> bool {
+    name.ends_with(PART_SUFFIX) || name.ends_with(VERSION_MARKER_SUFFIX)
 }
 
 /// Drops the query string (CloudFront signature) from a URL for logging.
@@ -632,6 +646,27 @@ fn redact_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Locks the resume writers to the predicate: whatever `part_path` and
+    /// `version_marker_path` produce must count as a resume artifact, and
+    /// final files or key sidecars must not.
+    #[test]
+    fn resume_artifacts_are_recognized() {
+        let dest = Path::new("/dl/Book.AAX_44_128.aaxc");
+        let part = part_path(dest);
+        let marker = version_marker_path(&part);
+        for path in [&part, &marker] {
+            let name = path.file_name().unwrap().to_string_lossy();
+            assert!(is_resume_artifact(&name), "{name}");
+        }
+        for name in [
+            "Book.AAX_44_128.aaxc",
+            "Book.AAX_44_128.voucher",
+            "Note.ver",
+        ] {
+            assert!(!is_resume_artifact(name), "{name}");
+        }
+    }
 
     #[test]
     fn decode_annotations_treats_no_annotations_as_none() {

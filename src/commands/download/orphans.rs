@@ -30,9 +30,10 @@ pub(super) fn orphans_command() -> clap::Command {
              references (leftovers of `db reset`, aborted runs, manual edits). The records \
              of ALL account databases in the configured db dir(s) count as references, so a \
              download dir shared across accounts never misclassifies the other account's \
-             files. `.part` resume files are in-progress artifacts — listed separately, \
-             never deleted. A `.voucher`/`.wvkey` key sidecar belongs to its audio record \
-             and is only an orphan when that record is gone.",
+             files. `.part` resume files and their `.part.ver` version markers are \
+             in-progress artifacts — listed separately, never deleted. A `.voucher`/`.wvkey` \
+             key sidecar belongs to its audio record and is only an orphan when that record \
+             is gone.",
         )
         .arg(
             Arg::new("remove")
@@ -47,8 +48,9 @@ pub(super) fn orphans_command() -> clap::Command {
 struct Scan {
     /// Unreferenced files: `(path, on-disk size)`, sorted by path.
     orphans: Vec<(PathBuf, Option<u64>)>,
-    /// `.part` resume files (in progress — reported, never deleted).
-    parts: Vec<PathBuf>,
+    /// Resume data of in-progress downloads — `.part` partials and their
+    /// `.part.ver` version markers (reported, never deleted).
+    resume: Vec<PathBuf>,
     /// All regular files seen under the download dir.
     total: usize,
 }
@@ -78,13 +80,13 @@ pub(super) async fn orphans(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()> {
     })
     .await??;
 
-    if !scan.parts.is_empty() {
+    if !scan.resume.is_empty() {
         eprintln!(
-            "{} in-progress .part file(s) skipped (resume data of `download`):",
-            scan.parts.len()
+            "{} resume file(s) skipped (in-progress `download` data, never deleted):",
+            scan.resume.len()
         );
-        for part in &scan.parts {
-            eprintln!("  {}", part.display());
+        for path in &scan.resume {
+            eprintln!("  {}", path.display());
         }
     }
 
@@ -237,7 +239,7 @@ fn insert_with_canonical(set: &mut HashSet<PathBuf>, path: PathBuf) {
 }
 
 /// Walks the download dir and classifies every regular file as referenced,
-/// `.part` resume file, or orphan. Never descends into a db dir and never
+/// resume data (`.part`/`.part.ver`), or orphan. Never descends into a db dir and never
 /// classifies database files themselves (in case `db.dir` sits inside the
 /// download dir). Symlinks are left alone entirely.
 fn scan_download_dir(
@@ -247,7 +249,7 @@ fn scan_download_dir(
 ) -> Result<Scan> {
     let mut scan = Scan {
         orphans: Vec::new(),
-        parts: Vec::new(),
+        resume: Vec::new(),
         total: 0,
     };
     let mut stack = vec![root.to_path_buf()];
@@ -276,8 +278,8 @@ fn scan_download_dir(
             if is_account_db_artifact(&name) {
                 continue;
             }
-            if name.ends_with(".part") {
-                scan.parts.push(path);
+            if crate::downloader::is_resume_artifact(&name) {
+                scan.resume.push(path);
                 continue;
             }
             if referenced.contains(&path) {
@@ -293,7 +295,7 @@ fn scan_download_dir(
         }
     }
     scan.orphans.sort();
-    scan.parts.sort();
+    scan.resume.sort();
     Ok(scan)
 }
 
@@ -348,8 +350,8 @@ mod tests {
 
     /// End-to-end over a real account database: recorded paths (downloads +
     /// annotations) and the derived key sidecar are referenced; everything
-    /// else under the download dir is an orphan, `.part` files are listed
-    /// separately.
+    /// else under the download dir is an orphan, resume data (`.part` and
+    /// its `.part.ver` marker) is listed separately and never an orphan.
     #[tokio::test]
     async fn scan_classifies_orphans_parts_and_sidecars() {
         let tmp = tempfile::tempdir().unwrap();
@@ -365,7 +367,9 @@ mod tests {
             &annot,
             &dl_dir.join("Stray.m4b"),              // orphan
             &dl_dir.join("Stray.AAC_44_131.wvkey"), // sidecar without a record → orphan
+            &dl_dir.join("Stray.ver"),              // bare .ver is no resume marker → orphan
             &dl_dir.join("Resume.aaxc.part"),       // in progress, never cleaned
+            &dl_dir.join("Resume.aaxc.part.ver"),   // its version marker, never cleaned
         ] {
             std::fs::write(path, b"x").unwrap();
         }
@@ -407,10 +411,17 @@ mod tests {
             .iter()
             .map(|(path, _)| path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(orphans, ["Stray.AAC_44_131.wvkey", "Stray.m4b"]);
-        assert_eq!(scan.parts.len(), 1);
-        assert!(scan.parts[0].ends_with("Resume.aaxc.part"));
-        assert_eq!(scan.total, 6);
+        assert_eq!(
+            orphans,
+            ["Stray.AAC_44_131.wvkey", "Stray.m4b", "Stray.ver"]
+        );
+        let resume: Vec<String> = scan
+            .resume
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(resume, ["Resume.aaxc.part", "Resume.aaxc.part.ver"]);
+        assert_eq!(scan.total, 8);
     }
 
     /// An unreadable account database aborts the scan instead of reporting
