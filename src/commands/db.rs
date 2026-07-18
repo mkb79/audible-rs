@@ -709,25 +709,43 @@ pub(crate) fn remove_if_present(path: &std::path::Path) -> bool {
 }
 
 /// `db downloads list` — all tracked downloads, optionally filtered.
-async fn downloads_list(
-    ctx: &Ctx,
+/// The asin/marketplace/kind/format/variant selection shared by
+/// `db downloads list` and `remove` (audit 2026-07-18, D1): the preview
+/// (`list`) and the destructive action (`remove`) must resolve the
+/// **identical** set — two copies of this pipeline would let a filter
+/// change delete a different set than was just shown. `remove` filters on
+/// `--format`; `list` has no such flag and passes `None`. Empty-result
+/// handling differs per caller (list notes, remove bails), so it stays
+/// with them.
+///
+/// Title resolution (the asin filter) is single-marketplace; an explicit
+/// `-m` also narrows the records (A15). Without either, the whole
+/// per-account database is in scope.
+/// The item selection for `db downloads list`/`remove`: `--asin`/`--title`
+/// (with `has_source` marking whether any was given) plus the column
+/// filters. `remove` uses `format`; `list` leaves it `None`.
+#[derive(Default)]
+struct DownloadSelection {
     asins: Vec<String>,
     titles: Vec<String>,
     has_source: bool,
     kind: Option<String>,
+    format: Option<String>,
     variant: Option<String>,
-) -> Result<()> {
-    let db = ctx.open_library_db().await?;
+}
 
-    // Title resolution (the asin filter) is single-marketplace; listing
-    // without a filter spans the whole per-account database.
-    let asin_filter: Option<std::collections::HashSet<String>> = if has_source {
+async fn select_downloads(
+    ctx: &Ctx,
+    db: &crate::db::Db,
+    selection: DownloadSelection,
+) -> Result<Vec<DownloadEntry>> {
+    let asin_filter: Option<std::collections::HashSet<String>> = if selection.has_source {
         let marketplace = ctx.marketplace_single()?;
         let resolved = crate::commands::items::resolve_asins(
-            &db,
+            db,
             &marketplace,
-            asins,
-            titles,
+            selection.asins,
+            selection.titles,
             crate::commands::items::PodcastMode::Episodes,
         )
         .await?;
@@ -738,8 +756,6 @@ async fn downloads_list(
         None
     };
 
-    // An explicit -m narrows the records too (A15); without one the
-    // listing keeps spanning the whole per-account database.
     let marketplace_filter = explicit_marketplaces(ctx)?;
     let mut entries = db.download_entries().await?;
     entries.retain(|entry| {
@@ -749,9 +765,41 @@ async fn downloads_list(
             && marketplace_filter
                 .as_ref()
                 .is_none_or(|set| set.contains(&entry.marketplace))
-            && kind.as_ref().is_none_or(|k| &entry.kind == k)
-            && variant.as_ref().is_none_or(|v| &entry.variant == v)
+            && selection.kind.as_ref().is_none_or(|k| &entry.kind == k)
+            && selection
+                .format
+                .as_ref()
+                .is_none_or(|f| &entry.content_format == f)
+            && selection
+                .variant
+                .as_ref()
+                .is_none_or(|v| &entry.variant == v)
     });
+    Ok(entries)
+}
+
+async fn downloads_list(
+    ctx: &Ctx,
+    asins: Vec<String>,
+    titles: Vec<String>,
+    has_source: bool,
+    kind: Option<String>,
+    variant: Option<String>,
+) -> Result<()> {
+    let db = ctx.open_library_db().await?;
+    let entries = select_downloads(
+        ctx,
+        &db,
+        DownloadSelection {
+            asins,
+            titles,
+            has_source,
+            kind,
+            variant,
+            ..Default::default()
+        },
+    )
+    .await?;
 
     if entries.is_empty() {
         eprintln!("no tracked downloads");
@@ -828,44 +876,24 @@ async fn downloads_remove(
 
     let db = ctx.open_library_db().await?;
 
-    let asin_filter: Option<std::collections::HashSet<String>> = if has_source {
-        let marketplace = ctx.marketplace_single()?;
-        let resolved = crate::commands::items::resolve_asins(
-            &db,
-            &marketplace,
+    // The same selection the user would preview with `db downloads list`
+    // (D1) — an explicit -m narrows what gets removed (A15): matching was
+    // by ASIN across the whole per-account database, so with the same
+    // title on de and us a `remove --asin X -m de --with-files` also
+    // deleted the us record and file, invisibly.
+    let matched = select_downloads(
+        ctx,
+        &db,
+        DownloadSelection {
             asins,
             titles,
-            crate::commands::items::PodcastMode::Episodes,
-        )
-        .await?;
-        // D7: a named selection that resolves to nothing fails.
-        crate::commands::items::require_nonempty(&resolved, "items")?;
-        Some(resolved.into_iter().collect())
-    } else {
-        None
-    };
-
-    // An explicit -m narrows what gets removed (A15): matching was by
-    // ASIN across the whole per-account database, so with the same title
-    // on de and us a `remove --asin X -m de --with-files` also deleted
-    // the us record and file, invisibly.
-    let marketplace_filter = explicit_marketplaces(ctx)?;
-    let matched: Vec<DownloadEntry> = db
-        .download_entries()
-        .await?
-        .into_iter()
-        .filter(|entry| {
-            asin_filter
-                .as_ref()
-                .is_none_or(|set| set.contains(&entry.asin))
-                && marketplace_filter
-                    .as_ref()
-                    .is_none_or(|set| set.contains(&entry.marketplace))
-                && kind.as_ref().is_none_or(|k| &entry.kind == k)
-                && format.as_ref().is_none_or(|f| &entry.content_format == f)
-                && variant.as_ref().is_none_or(|v| &entry.variant == v)
-        })
-        .collect();
+            has_source,
+            kind,
+            format,
+            variant,
+        },
+    )
+    .await?;
 
     if matched.is_empty() {
         // D7: remove always names its selection (a filter is required), so

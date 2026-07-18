@@ -199,13 +199,19 @@ fn book_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {
 /// The `v_books` column expressions, selected straight from `items` so an
 /// FTS join can map a matched `rowid` to its exact `(asin, marketplace)`
 /// row without a cross product on the (non-unique) asin.
-const ITEMS_BOOK_COLUMNS: &str = "i.marketplace, i.asin, i.full_title,
-     CAST(COALESCE(json_extract(i.doc, '$.purchase_date'),
-                   json_extract(i.doc, '$.library_status.date_added')) AS TEXT),
-     CAST(COALESCE(json_extract(i.doc, '$.runtime_length_min'),
-                   json_extract(i.doc, '$.duration_min')) AS TEXT),
-     CAST(COALESCE(json_extract(i.doc, '$.language'),
-                   json_extract(i.doc, '$.metadata.language')) AS TEXT)";
+/// The book columns for the FTS search path, built from the same document
+/// projections as `v_books` (audit 2026-07-18, D5) — the FTS join reads
+/// `items` directly (aliased `i`) to map a matched rowid, so it cannot use
+/// the view; the projections must nonetheless agree with it.
+fn items_book_columns() -> String {
+    format!(
+        "i.marketplace, i.asin, i.full_title, \
+         CAST({} AS TEXT), CAST({} AS TEXT), CAST({} AS TEXT)",
+        super::purchase_date_sql("i.doc"),
+        super::runtime_min_sql("i.doc"),
+        super::language_sql("i.doc"),
+    )
+}
 
 /// Converts an epoch state token (seconds or milliseconds) to ISO form,
 /// like the reference's `epoch_ms_to_iso`.
@@ -1036,14 +1042,11 @@ impl Db {
                         asin,
                         marketplace,
                     ));
+                    let missing = super::missing_download_sql(asin, marketplace, "k.value");
                     parts.push(format!(
                         "EXISTS (
                              SELECT 1 FROM json_each(?) k
-                             WHERE NOT EXISTS (
-                                 SELECT 1 FROM downloads d
-                                 WHERE d.asin = {asin} AND d.marketplace = {marketplace}
-                                   AND d.kind = k.value
-                             )
+                             WHERE {missing}
                              AND {possible}
                          )"
                     ));
@@ -1052,13 +1055,7 @@ impl Db {
                     // With no candidate set the audio check degrades to
                     // kind-level (defensive; the caller always passes ≥ `mpeg`).
                     if audio_request_kinds.is_empty() {
-                        parts.push(format!(
-                            "NOT EXISTS (
-                                 SELECT 1 FROM downloads d
-                                 WHERE d.asin = {asin} AND d.marketplace = {marketplace}
-                                   AND d.kind = 'audio'
-                             )"
-                        ));
+                        parts.push(super::missing_download_sql(asin, marketplace, "'audio'"));
                     } else {
                         let placeholders = vec!["?"; audio_request_kinds.len()].join(",");
                         parts.push(format!(
@@ -1162,8 +1159,9 @@ impl Db {
             let placeholders = in_placeholders(marketplaces.len());
             if fts {
                 let fts_query = prepare_fts_query(&query);
+                let book_columns = items_book_columns();
                 let sql = format!(
-                    "SELECT {ITEMS_BOOK_COLUMNS}, {}
+                    "SELECT {book_columns}, {}
                      FROM items_fts f JOIN items i ON i.rowid = f.rowid
                      WHERE items_fts MATCH ?
                        AND i.is_deleted = 0
@@ -1516,14 +1514,23 @@ mod tests {
                 "v_books.kind diverges from item_kind for {asin}: {doc}"
             );
         }
-        // The FTS branch (item_kind_sql over i.doc) agrees too — the
-        // asin is FTS-indexed, so it addresses one exact row.
-        let hits = db
-            .search(vec![MP.to_owned()], vec![], "K1".into(), 10, true)
-            .await
-            .unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].kind, "episode");
+        // The FTS branch builds its own `item_kind_sql` over `i.doc`
+        // (it reads `items` directly, not `v_books`), so sweep it over the
+        // whole taxonomy too, not just one row (audit 2026-07-18, D8):
+        // search each doc by its asin and check the classified kind.
+        for doc in &docs {
+            let asin = doc["asin"].as_str().unwrap();
+            let hits = db
+                .search(vec![MP.to_owned()], vec![], asin.into(), 10, true)
+                .await
+                .unwrap();
+            let hit = hits.iter().find(|b| b.asin == asin).unwrap();
+            assert_eq!(
+                hit.kind,
+                crate::models::library::item_kind(doc),
+                "FTS item_kind_sql diverges from item_kind for {asin}: {doc}"
+            );
+        }
     }
 
     #[tokio::test]

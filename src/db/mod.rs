@@ -220,6 +220,35 @@ fn pdf_available_sql(doc_expr: &str) -> String {
     )
 }
 
+/// The `purchase_date` document projection over a `doc` column/expression.
+/// One home (audit 2026-07-18, D5): the `v_books` view column, the
+/// `idx_items_purchase` expression index and `ITEMS_BOOK_COLUMNS` all
+/// build from this — an expression index is only used when its text
+/// matches the query expression **exactly**, so the view and the index
+/// must never drift apart.
+fn purchase_date_sql(doc: &str) -> String {
+    format!(
+        "COALESCE(json_extract({doc}, '$.purchase_date'), \
+                  json_extract({doc}, '$.library_status.date_added'))"
+    )
+}
+
+/// The `language` document projection (see [`purchase_date_sql`] for the
+/// single-home rationale).
+fn language_sql(doc: &str) -> String {
+    format!(
+        "COALESCE(json_extract({doc}, '$.language'), json_extract({doc}, '$.metadata.language'))"
+    )
+}
+
+/// The `runtime_min` document projection (see [`purchase_date_sql`]).
+fn runtime_min_sql(doc: &str) -> String {
+    format!(
+        "COALESCE(json_extract({doc}, '$.runtime_length_min'), \
+                  json_extract({doc}, '$.duration_min'))"
+    )
+}
+
 /// As [`pdf_available_sql`], for a row that carries no `doc` column of its own
 /// (`v_books`/`v_episodes`): looks the document up in `table` by the row's
 /// `(asin, marketplace)`.
@@ -246,6 +275,23 @@ fn kind_possible_sql(pdf_available: &str) -> String {
     format!("(k.value != 'pdf' OR {pdf_available})")
 }
 
+/// The correlated `NOT EXISTS` that holds when the `downloads` table has
+/// **no** record of `kind_expr` for the item at `asin_expr`/`marketplace_expr`
+/// — the "still missing this kind" shell shared by the `--missing` roll-up
+/// (`v_books`), the episode sweep and the `download --missing` sweep (audit
+/// 2026-07-18, C3: it was hand-copied into four SQL homes across three files).
+/// The audio request-kind variant (which also gates on `status` +
+/// `request_kind`) is deliberately a different predicate and stays separate.
+fn missing_download_sql(asin_expr: &str, marketplace_expr: &str, kind_expr: &str) -> String {
+    format!(
+        "NOT EXISTS (
+             SELECT 1 FROM downloads d
+             WHERE d.asin = {asin_expr} AND d.marketplace = {marketplace_expr}
+               AND d.kind = {kind_expr}
+         )"
+    )
+}
+
 /// Whether the requested download kind `k.value` is still missing for the
 /// `v_books` row aliased `b` — for queries that join `json_each(?) k` over the
 /// requested kinds (AUD-203).
@@ -266,23 +312,17 @@ fn missing_kind_predicate() -> String {
              SELECT 1 FROM episodes e
              WHERE e.parent_asin = b.asin AND e.marketplace = b.marketplace
                AND e.is_deleted = 0
-               AND NOT EXISTS (
-                   SELECT 1 FROM downloads d
-                   WHERE d.asin = e.asin AND d.marketplace = e.marketplace
-                     AND d.kind = k.value
-               )
+               AND {}
                AND {}
          )
      ELSE
-         NOT EXISTS (
-             SELECT 1 FROM downloads d
-             WHERE d.asin = b.asin AND d.marketplace = b.marketplace
-               AND d.kind = k.value
-         )
+         {}
          AND {}
      END",
+        missing_download_sql("e.asin", "e.marketplace", "k.value"),
         // The roll-up reads the episode rows directly, so the doc is in scope.
         kind_possible_sql(&pdf_available_sql("e.doc")),
+        missing_download_sql("b.asin", "b.marketplace", "k.value"),
         kind_possible_sql(&pdf_available_lookup_sql(
             "items",
             "b.asin",

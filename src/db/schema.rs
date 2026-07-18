@@ -78,6 +78,10 @@ CREATE TABLE change_log (
 CREATE INDEX idx_change_log_recorded ON change_log (recorded_utc);
 CREATE INDEX idx_change_log_asin     ON change_log (asin, marketplace);
 
+-- The document projections and the kind CASE are spliced in from single
+-- Rust homes (audit 2026-07-18, D5/D8): the view columns and the matching
+-- expression indexes must be byte-identical for SQLite to use the index,
+-- so both reference the same placeholder token, expanded by schema_sql().
 CREATE VIEW v_books AS
 SELECT
   asin,
@@ -85,30 +89,11 @@ SELECT
   title,
   subtitle,
   full_title,
-  COALESCE(
-    json_extract(doc, '$.purchase_date'),
-    json_extract(doc, '$.library_status.date_added')
-  ) AS purchase_date,
-  COALESCE(
-    json_extract(doc, '$.language'),
-    json_extract(doc, '$.metadata.language')
-  ) AS language,
-  COALESCE(
-    json_extract(doc, '$.runtime_length_min'),
-    json_extract(doc, '$.duration_min')
-  ) AS runtime_min,
+  @@PURCHASE_DATE@@ AS purchase_date,
+  @@LANGUAGE@@ AS language,
+  @@RUNTIME_MIN@@ AS runtime_min,
   json_extract(doc, '$.is_ayce') AS is_ayce,
-  -- Content kind for the shared --kind filter (AUD-173). SQL twin of
-  -- models::library::item_kind — kept in lockstep by a functional test.
-  CASE
-    WHEN json_extract(doc, '$.content_delivery_type') = 'PodcastEpisode'
-      THEN 'episode'
-    WHEN json_extract(doc, '$.content_delivery_type')
-           IN ('PodcastParent', 'Periodical', 'PodcastSeason')
-         OR json_extract(doc, '$.content_type') = 'Podcast'
-      THEN 'podcast'
-    ELSE 'book'
-  END AS kind
+  @@ITEM_KIND@@ AS kind
 FROM items
 WHERE is_deleted = 0;
 
@@ -118,14 +103,8 @@ CREATE INDEX idx_items_subtitle    ON items (lower(subtitle));
 CREATE INDEX idx_items_full_title  ON items (lower(full_title));
 CREATE INDEX idx_items_is_deleted  ON items (is_deleted);
 
-CREATE INDEX idx_items_purchase    ON items (
-  COALESCE(json_extract(doc,'$.purchase_date'),
-           json_extract(doc,'$.library_status.date_added'))
-);
-CREATE INDEX idx_items_language    ON items (
-  COALESCE(json_extract(doc,'$.language'),
-           json_extract(doc,'$.metadata.language'))
-);
+CREATE INDEX idx_items_purchase    ON items (@@PURCHASE_DATE@@);
+CREATE INDEX idx_items_language    ON items (@@LANGUAGE@@);
 
 CREATE VIRTUAL TABLE items_fts USING fts5(
   full_title,
@@ -187,10 +166,7 @@ SELECT
     json_extract(doc, '$.release_date'),
     json_extract(doc, '$.issue_date')
   ) AS release_date,
-  COALESCE(
-    json_extract(doc, '$.runtime_length_min'),
-    json_extract(doc, '$.duration_min')
-  ) AS runtime_min
+  @@RUNTIME_MIN@@ AS runtime_min
 FROM episodes
 WHERE is_deleted = 0;
 
@@ -270,6 +246,18 @@ CREATE TABLE annotations (
 );
 "#;
 
+/// The schema DDL with the `@@…@@` projection tokens expanded from their
+/// single Rust homes (D5): the `v_books` columns and the matching
+/// expression indexes both take the same expansion, so the index text is
+/// guaranteed to match the view's — the condition for SQLite to use it.
+fn schema_sql() -> String {
+    SCHEMA_SQL
+        .replace("@@PURCHASE_DATE@@", &super::purchase_date_sql("doc"))
+        .replace("@@LANGUAGE@@", &super::language_sql("doc"))
+        .replace("@@RUNTIME_MIN@@", &super::runtime_min_sql("doc"))
+        .replace("@@ITEM_KIND@@", &super::item_kind_sql("doc"))
+}
+
 /// Creates the schema on a fresh database. Pre-release there is a single
 /// version (1); schema changes are made in place and the developer deletes the
 /// database to pick them up — the version is not bumped and no migration
@@ -277,8 +265,37 @@ CREATE TABLE annotations (
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version < 1 {
-        conn.execute_batch(SCHEMA_SQL)?;
+        conn.execute_batch(&schema_sql())?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D5: every projection token is expanded, and each document
+    /// projection lands in both the view column and its expression index
+    /// with the identical text SQLite needs to use the index.
+    #[test]
+    fn schema_projections_are_single_homed() {
+        let sql = schema_sql();
+        assert!(!sql.contains("@@"), "an @@…@@ token was left unexpanded");
+        for projection in [
+            super::super::purchase_date_sql("doc"),
+            super::super::language_sql("doc"),
+        ] {
+            assert_eq!(
+                sql.matches(&projection).count(),
+                2,
+                "projection must appear once in the view and once in its index: {projection}"
+            );
+        }
+        // runtime_min has no index but is shared by v_books and v_episodes.
+        assert_eq!(
+            sql.matches(&super::super::runtime_min_sql("doc")).count(),
+            2
+        );
+    }
 }
