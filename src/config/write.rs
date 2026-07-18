@@ -297,6 +297,20 @@ pub fn flatten(content: &str) -> Result<Vec<(String, String)>, ConfigError> {
 
 /// Applies a string-level edit to the config file, creating it (and its
 /// directory) on demand, and writes the result atomically.
+/// Reads `path`, or the minimal seed (`version = N`) when the file does
+/// not exist yet — one home (audit 2026-07-18, D10) for the writers and
+/// `config get/list/edit`, so a fresh machine sees the same starting
+/// document both create.
+pub fn read_or_seed(path: &Path) -> std::io::Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => Ok(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(format!("version = {}\n", super::CONFIG_VERSION))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub fn edit_file(
     path: &Path,
     edit: impl FnOnce(&str) -> Result<String, ConfigError>,
@@ -314,13 +328,7 @@ pub fn edit_file(
     // on power loss, no shared temp inode between writers.
     let mut lock = crate::fsutil::write_lock(path)?;
     let _guard = lock.write()?;
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            format!("version = {}\n", super::CONFIG_VERSION)
-        }
-        Err(error) => return Err(error.into()),
-    };
+    let content = read_or_seed(path)?;
     let updated = edit(&content)?;
     crate::fsutil::persist_atomically(path, updated.as_bytes(), None)?;
     Ok(())

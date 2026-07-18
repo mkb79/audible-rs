@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::Value;
 
 use crate::api::client::Client;
@@ -55,9 +55,7 @@ async fn show(ctx: &Ctx, asins: Vec<String>, titles: Vec<String>) -> Result<()> 
         crate::commands::items::PodcastMode::Episodes,
     )
     .await?;
-    if asins.is_empty() {
-        bail!("nothing selected");
-    }
+    crate::commands::items::require_nonempty(&asins, "items")?;
     let client = ctx.client().await?;
 
     // Local download state, grouped per ASIN.

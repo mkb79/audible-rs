@@ -28,6 +28,34 @@ pub(crate) fn parse_iso(text: &str) -> Option<time::OffsetDateTime> {
         .map(|dt| dt.assume_utc())
 }
 
+/// The date part of an ISO-8601 timestamp (`2026-07-15T…` → `2026-07-15`).
+/// One home (audit 2026-07-18, C2): two `date_only` copies with different
+/// behavior (`&s[..10]` vs `split_once('T')`) drifted. Returns the input
+/// unchanged when it carries no `T` separator.
+pub(crate) fn date_only(timestamp: &str) -> &str {
+    timestamp
+        .split_once('T')
+        .map_or(timestamp, |(date, _)| date)
+}
+
+/// Current Unix time in fractional seconds. One home (audit 2026-07-18,
+/// D7): seven inline `SystemTime::now().duration_since(UNIX_EPOCH)`
+/// re-spellings disagreed on the pre-1970 case (`.expect` panic vs
+/// `unwrap_or(0.0)`). A clock before the epoch is treated as the epoch —
+/// never a panic; downstream that reads as "expired/stale", which is
+/// fail-safe.
+pub(crate) fn now_unix() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Current Unix time in whole milliseconds ([`now_unix`] scaled).
+pub(crate) fn now_unix_ms() -> i64 {
+    (now_unix() * 1000.0) as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

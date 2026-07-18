@@ -17,7 +17,7 @@
 //! episode "added"/"removed"), driven by the shared taxonomy
 //! (`models::library::item_kind`).
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use reqwest::Method;
 use serde_json::{Value, json};
 
@@ -105,9 +105,7 @@ pub(super) async fn add(
     let client = ctx.client().await?;
     let marketplace = ctx.marketplace_single()?;
     let asins = catalog::resolve_catalog_titles(client, &marketplace, asins, titles).await?;
-    if asins.is_empty() {
-        bail!("nothing to add — pass --asin or --title");
-    }
+    crate::commands::items::require_nonempty(&asins, "titles")?;
 
     // Authenticated eligibility (customer_rights) — refuse buy-only up
     // front instead of letting the PUT fail; plus the local library so an
@@ -196,9 +194,7 @@ pub(super) async fn remove(
         items::PodcastMode::ItemsOnly,
     )
     .await?;
-    if asins.is_empty() {
-        bail!("nothing to remove — pass --asin or --title");
-    }
+    crate::commands::items::require_nonempty(&asins, "titles")?;
 
     // Only removable memberships: `is_removable` is the authoritative flag
     // (a purchase is not removable); `origin_type == Purchase` corroborates.

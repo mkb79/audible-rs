@@ -102,8 +102,7 @@ pub(super) async fn login(ctx: &Ctx, args: LoginArgs) -> Result<()> {
     if cc.contains(',') || cc.eq_ignore_ascii_case("all") {
         bail!("account login registers in a single marketplace; pass one -m <cc> (e.g. -m de)");
     }
-    let locale = locale::find(&cc)
-        .ok_or_else(|| anyhow::anyhow!("unknown marketplace {cc:?} (e.g. de, us, uk, fr)"))?;
+    let locale = locale::require(&cc).map_err(|error| anyhow::anyhow!(error))?;
 
     let kind = match &args.reg.device {
         Some(value) => value

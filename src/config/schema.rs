@@ -481,11 +481,8 @@ impl Config {
         for (name, account) in &self.accounts {
             validate_name(name)?;
             for cc in &account.marketplaces {
-                if locale::find(cc).is_none() {
-                    return Err(ConfigError::Invalid(format!(
-                        "account {name:?} lists unknown marketplace {cc:?}"
-                    )));
-                }
+                locale::require(cc)
+                    .map_err(|error| ConfigError::Invalid(format!("account {name:?}: {error}")))?;
             }
             for cc in &account.default_marketplaces {
                 if !account.marketplaces.iter().any(|m| m == cc) {

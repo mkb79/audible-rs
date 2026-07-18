@@ -333,10 +333,7 @@ async fn build_authenticator(
         _ => None,
     }
     .ok_or(LoginError::RegisterResponse)?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before unix epoch")
-        .as_secs_f64();
+    let now = crate::timefmt::now_unix();
 
     // identity = customer_info with user_id renamed to customer_id; unknown
     // fields (e.g. given_name) round-trip through the Identity `extra` map.

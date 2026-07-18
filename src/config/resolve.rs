@@ -226,9 +226,7 @@ pub fn marketplaces(
     }
     let mut out: Vec<String> = Vec::with_capacity(requested.len());
     for cc in requested {
-        if locale::find(&cc).is_none() {
-            return Err(ConfigError::Invalid(format!("unknown marketplace {cc:?}")));
-        }
+        locale::require(&cc).map_err(ConfigError::Invalid)?;
         if !account.marketplaces.iter().any(|m| m == &cc) {
             return Err(ConfigError::Invalid(format!(
                 "marketplace {cc:?} is not registered for this account (add it with \

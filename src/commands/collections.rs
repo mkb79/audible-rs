@@ -24,12 +24,13 @@ use serde_json::Value;
 
 use crate::catalog::{CatalogDetails, catalog_details};
 use crate::collections::{
-    ARCHIVE_ID, CollectionItem, WISHLIST_ID, collection_items, collection_meta,
+    ARCHIVE_ID, CollectionItem, WISHLIST_ID, add_collection_items, collection_items,
     delete_collection_items,
 };
 use crate::commands::catalog::{format_runtime, resolve_catalog_titles};
 use crate::config::ctx::Ctx;
 use crate::output::Output;
+use crate::timefmt::date_only;
 
 /// Where a noun's `add --title` queries resolve.
 #[derive(PartialEq)]
@@ -372,26 +373,8 @@ async fn noun_add(
         return Ok(());
     }
 
-    let meta = collection_meta(client, &marketplace, noun.collection_id).await?;
-    let reply: Value = client
-        .request(
-            Method::POST,
-            format!("/1.0/collections/{}/items", noun.collection_id),
-        )
-        .country_code(&marketplace)
-        .body(serde_json::json!({
-            "collection_id": noun.collection_id,
-            "asins": missing,
-            "state_token": meta.state_token,
-        }))
-        .send()
+    let added = add_collection_items(client, &marketplace, noun.collection_id, &missing)
         .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let added = reply
-        .get("num_items_added")
-        .and_then(Value::as_u64)
         .map(|count| count.to_string())
         .unwrap_or_else(|| "?".to_owned());
     eprintln!(
@@ -542,15 +525,6 @@ fn resolve_removals(
     let mut seen = HashSet::new();
     targets.retain(|asin| seen.insert(asin.clone()));
     Ok(targets)
-}
-
-/// `2026-06-19T09:20:50.749Z` → `2026-06-19` (defensive on short input).
-fn date_only(timestamp: &str) -> &str {
-    if timestamp.len() >= 10 && timestamp.is_char_boundary(10) {
-        &timestamp[..10]
-    } else {
-        timestamp
-    }
 }
 
 #[cfg(test)]

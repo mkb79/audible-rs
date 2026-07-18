@@ -561,12 +561,8 @@ pub(crate) async fn maybe_auto_sync(ctx: &Ctx, db: &Db) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(db.path().with_extension("lock"))?;
-    let mut lock = fd_lock::RwLock::new(lock_file);
+    // Shared recipe with the explicit `library sync` (D4).
+    let mut lock = crate::fsutil::write_lock(db.path())?;
     let Ok(_guard) = lock.try_write() else {
         tracing::debug!("another sync is running; skipping auto-sync");
         return Ok(());

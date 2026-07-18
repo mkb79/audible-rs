@@ -29,6 +29,66 @@ pub(crate) fn split_csv(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Renders an optional config enum as its serde string (audit 2026-07-18,
+/// D10 — `settings` and `setup` each had an `enum_str` with a drifted
+/// signature). `None` (unset) or a non-string serialization yields `None`;
+/// serializing a plain field enum never actually fails.
+pub(crate) fn enum_str<T: serde::Serialize>(value: &Option<T>) -> Option<String> {
+    value.as_ref().and_then(|value| {
+        serde_json::to_value(value)
+            .ok()
+            .and_then(|json| json.as_str().map(str::to_owned))
+    })
+}
+
+/// The shared `--missing[=KINDS]` selector (audit 2026-07-18, D10 — the
+/// clap block was copied for `library list` and `library episodes`, and
+/// the artifact-kind vocabulary lived in three shapes). No value means
+/// `audio`, `all` covers every kind; the kinds come from the one
+/// [`crate::db::DOWNLOAD_KINDS`] home. `noun` words the help; the caller
+/// adds any `conflicts_with`/`help_heading`.
+pub(crate) fn missing_kinds_arg(noun: &str) -> clap::Arg {
+    let values: Vec<&str> = crate::db::DOWNLOAD_KINDS
+        .iter()
+        .copied()
+        .chain(std::iter::once("all"))
+        .collect();
+    clap::Arg::new("missing")
+        .long("missing")
+        .value_name("KINDS")
+        .num_args(0..)
+        .require_equals(true)
+        .value_delimiter(',')
+        .default_missing_value("audio")
+        .value_parser(clap::builder::PossibleValuesParser::new(values))
+        .help(format!(
+            "Only {noun} lacking a download record of these kinds \
+             (no value: audio; `all` covers every kind)"
+        ))
+}
+
+/// The shared `--limit <N>` row cap (default 50; 0 = all). One builder for
+/// the several list commands (D10).
+pub(crate) fn limit_arg() -> clap::Arg {
+    clap::Arg::new("limit")
+        .long("limit")
+        .value_name("N")
+        .default_value("50")
+        .value_parser(clap::value_parser!(u32))
+        .help("Maximum number of rows (0 = all)")
+}
+
+/// The shared `--page <N>` pagination arg (1-based). Pairs with
+/// [`limit_arg`] (D10).
+pub(crate) fn page_arg() -> clap::Arg {
+    clap::Arg::new("page")
+        .long("page")
+        .value_name("N")
+        .default_value("1")
+        .value_parser(clap::value_parser!(u32).range(1..))
+        .help("Show the N-th page of --limit rows")
+}
+
 /// Collects a repeatable/multi-value string option into an owned `Vec`,
 /// empty when the option is absent — the one `get_many→cloned` shape
 /// (audit 2026-07-17, D6; it lived inline and as local closures across a

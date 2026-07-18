@@ -172,7 +172,7 @@ async fn ffmpeg_version(path: &Path) -> Option<(u32, u32)> {
 /// Removes a partial output on failure; surfaces the tool's error (never the
 /// key/iv, which are only on argv).
 pub(super) async fn run(tool: &Tool, aaxc: &Path, key: &str, iv: &str, out: &Path) -> Result<()> {
-    let mut cmd = match tool {
+    let cmd = match tool {
         Tool::Aaxclean(path) => {
             let mut cmd = tokio::process::Command::new(path);
             cmd.arg("-f")
@@ -208,12 +208,19 @@ pub(super) async fn run(tool: &Tool, aaxc: &Path, key: &str, iv: &str, out: &Pat
             cmd
         }
     };
+    execute(cmd, tool, out).await
+}
+
+/// Runs a prepared decrypt command and maps its outcome (audit 2026-07-18,
+/// D10 — the aaxc and CENC paths carried an identical tail): on a non-zero
+/// exit the partial output is removed and the error surfaces the tool's
+/// stderr/stdout. Stdin is null so the tool never blocks on a prompt.
+async fn execute(mut cmd: tokio::process::Command, tool: &Tool, out: &Path) -> Result<()> {
     let output = cmd
         .stdin(std::process::Stdio::null())
         .output()
         .await
         .with_context(|| format!("could not run {}", tool.label()))?;
-
     if !output.status.success() {
         let _ = tokio::fs::remove_file(out).await;
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -237,7 +244,7 @@ pub(super) async fn run_cenc(
     key: &str,
     out: &Path,
 ) -> Result<()> {
-    let mut cmd = match tool {
+    let cmd = match tool {
         Tool::Aaxclean(path) => {
             let mut cmd = tokio::process::Command::new(path);
             cmd.arg("-f")
@@ -272,19 +279,7 @@ pub(super) async fn run_cenc(
             cmd
         }
     };
-    let output = cmd
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .with_context(|| format!("could not run {}", tool.label()))?;
-    if !output.status.success() {
-        let _ = tokio::fs::remove_file(out).await;
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let detail = pick_error(stderr.trim(), stdout.trim());
-        bail!("{} failed ({}){detail}", tool.label(), output.status);
-    }
-    Ok(())
+    execute(cmd, tool, out).await
 }
 
 /// Runs the decrypt step for one item (AUD-27): turns its downloaded audio
