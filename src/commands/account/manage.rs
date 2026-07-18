@@ -1,6 +1,8 @@
 //! Account bookkeeping: `list`, `remove`, `rename`, `set-default`,
 //! `marketplaces`, `export`, `logout` and the agent-facing `unlock`/`lock`.
 
+use std::path::Path;
+
 use anyhow::{Context as _, Result, bail};
 use clap::Args;
 #[cfg(unix)]
@@ -264,7 +266,7 @@ pub(super) fn remove(ctx: &Ctx, args: RemoveArgs) -> Result<()> {
     let Some(account) = ctx.config().accounts.get(name) else {
         bail!("unknown account {name:?}");
     };
-    let auth_file = account.auth_file.clone();
+    let auth_path = ctx.auth_path(account);
     let pw_path = crate::config::passwords::resolve_path(ctx.config_dir(), account);
 
     let clears_default = ctx.config().default_account.as_deref() == Some(name.as_str());
@@ -291,6 +293,30 @@ pub(super) fn remove(ctx: &Ctx, args: RemoveArgs) -> Result<()> {
         bail!("aborted");
     }
 
+    delete_account_locally(
+        ctx,
+        name,
+        &pw_path,
+        &auth_path,
+        clears_default,
+        args.delete_auth_file,
+    )
+}
+
+/// The local teardown shared by `account remove` and `logout` (audit
+/// 2026-07-18, D2): clear `default_account` first (the schema gate), drop
+/// the account table, remove its password entry, and — when `delete_auth`
+/// — its auth file (else keep it with a hint). `auth_path` comes from the
+/// one [`Ctx::auth_path`] rule the loaders use, so this never deletes a
+/// different file than the loader opens.
+fn delete_account_locally(
+    ctx: &Ctx,
+    name: &str,
+    pw_path: &Path,
+    auth_path: &Path,
+    clears_default: bool,
+    delete_auth: bool,
+) -> Result<()> {
     write::edit_file(&ctx.config_file(), |content| {
         // Order matters for the schema gate: clear default_account first,
         // then remove the account table.
@@ -301,16 +327,11 @@ pub(super) fn remove(ctx: &Ctx, args: RemoveArgs) -> Result<()> {
         };
         write::unset(&content, &format!("accounts.{name}"))
     })?;
-    crate::config::passwords::remove(&pw_path, name)?;
+    crate::config::passwords::remove(pw_path, name)?;
     eprintln!("removed account {name:?}");
 
-    let auth_path = if auth_file.is_absolute() {
-        auth_file
-    } else {
-        ctx.config_dir().join(auth_file)
-    };
-    if args.delete_auth_file {
-        match std::fs::remove_file(&auth_path) {
+    if delete_auth {
+        match std::fs::remove_file(auth_path) {
             Ok(()) => eprintln!("deleted {}", auth_path.display()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
@@ -336,7 +357,9 @@ pub(super) async fn logout(ctx: &Ctx, args: LogoutArgs) -> Result<()> {
     let Some(account) = ctx.config().accounts.get(&name) else {
         bail!("unknown account {name:?}");
     };
-    let auth_file = account.auth_file.clone();
+    // Resolved before the deregister await so no config borrow is held
+    // across it (the one `Ctx::auth_path` rule, D2).
+    let auth_path = ctx.auth_path(account);
     let pw_path = crate::config::passwords::resolve_path(ctx.config_dir(), account);
     let clears_default = ctx.config().default_account.as_deref() == Some(name.as_str());
 
@@ -371,30 +394,9 @@ pub(super) async fn logout(ctx: &Ctx, args: LogoutArgs) -> Result<()> {
         None => eprintln!("deregistered the device with Amazon"),
     }
 
-    // Then delete locally: clear default_account first (the schema gate),
-    // drop the account table, then remove the auth file.
-    write::edit_file(&ctx.config_file(), |content| {
-        let content = if clears_default {
-            write::unset(content, "default_account")?
-        } else {
-            content.to_owned()
-        };
-        write::unset(&content, &format!("accounts.{name}"))
-    })?;
-    crate::config::passwords::remove(&pw_path, &name)?;
-    eprintln!("removed account {name:?} from the config");
-
-    let auth_path = if auth_file.is_absolute() {
-        auth_file
-    } else {
-        ctx.config_dir().join(auth_file)
-    };
-    match std::fs::remove_file(&auth_path) {
-        Ok(()) => eprintln!("deleted {}", auth_path.display()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    Ok(())
+    // Then delete locally — logout always removes the auth file too (the
+    // device is deregistered, the material is spent).
+    delete_account_locally(ctx, &name, &pw_path, &auth_path, clears_default, true)
 }
 
 /// Loads an account's auth file for a password operation. The current
