@@ -2,8 +2,10 @@
 //! [`crate::library_sync`] (per-marketplace fan-out, summary printing,
 //! change listing), plus the bounded reflection poller shared by the
 //! membership and archive mutations. The poller lives here, not with the
-//! engine: it drives the full `sync` command body (whose summary output
-//! is part of the `--sync` contract) and speaks to the user via stderr.
+//! engine: it drives the full `sync` command body and speaks to the user
+//! via stderr — but it syncs **quietly** (audit 2026-07-18, A7: each poll
+//! round printed a full summary, so `--sync -o json` emitted several
+//! concatenated JSON documents on stdout).
 
 use std::sync::Arc;
 
@@ -20,11 +22,14 @@ use super::*;
 
 /// `library sync` — also reused by `collections archive … --sync`
 /// (AUD-111), which runs a plain delta sync after an archive mutation.
+/// `print_summary = false` is the reflection poller's quiet mode: apply
+/// everything, print nothing to stdout (failures still error).
 pub(crate) async fn sync(
     ctx: &Ctx,
     full: bool,
     no_podcasts: bool,
     show_volatile: bool,
+    print_summary: bool,
 ) -> Result<()> {
     let client = ctx.client().await?;
     let db = ctx.open_library_db().await?;
@@ -83,7 +88,10 @@ pub(crate) async fn sync(
     let mut podcasts_resolved = 0usize;
     let mut episodes_upserted = 0usize;
     let mut episodes_deleted = 0usize;
-    let mut mode = "delta";
+    // One mode per synced marketplace: the summary's `mode` must not
+    // claim one marketplace's mode for the whole run (audit 2026-07-18,
+    // A7 — `-m de,us` with delta+full printed whichever sorted last).
+    let mut modes: Vec<&'static str> = Vec::new();
     let mut failures = 0usize;
     // Per-marketplace change details for the listing; the initial sync (empty
     // DB) is skipped — everything would just be "added".
@@ -91,7 +99,7 @@ pub(crate) async fn sync(
     for (marketplace, result) in results {
         match result {
             Ok(summary) => {
-                if multi {
+                if multi && print_summary {
                     eprintln!(
                         "{marketplace}: {} mode, +{} ~{} -{}",
                         summary.mode,
@@ -100,7 +108,7 @@ pub(crate) async fn sync(
                         summary.changes.removed.len()
                     );
                 }
-                mode = summary.mode;
+                modes.push(summary.mode);
                 pages += summary.pages;
                 added += summary.changes.added.len();
                 changed += summary.changes.changed.len();
@@ -119,19 +127,26 @@ pub(crate) async fn sync(
         }
     }
 
-    ctx.print(&crate::output::Output::KeyValue(vec![
-        ("marketplaces".into(), marketplaces.join(",")),
-        ("mode".into(), mode.into()),
-        ("pages".into(), pages.to_string()),
-        ("added".into(), added.to_string()),
-        ("changed".into(), changed.to_string()),
-        ("removed".into(), removed.to_string()),
-        ("podcasts_resolved".into(), podcasts_resolved.to_string()),
-        ("episodes_upserted".into(), episodes_upserted.to_string()),
-        ("episodes_deleted".into(), episodes_deleted.to_string()),
-        ("database".into(), db.path().display().to_string()),
-    ]));
-    print_changes(&change_sections, multi, show_volatile);
+    let mode = match modes.as_slice() {
+        [] => "-",
+        [first, rest @ ..] if rest.iter().all(|other| other == first) => first,
+        _ => "mixed",
+    };
+    if print_summary {
+        ctx.print(&crate::output::Output::KeyValue(vec![
+            ("marketplaces".into(), marketplaces.join(",")),
+            ("mode".into(), mode.into()),
+            ("pages".into(), pages.to_string()),
+            ("added".into(), added.to_string()),
+            ("changed".into(), changed.to_string()),
+            ("removed".into(), removed.to_string()),
+            ("podcasts_resolved".into(), podcasts_resolved.to_string()),
+            ("episodes_upserted".into(), episodes_upserted.to_string()),
+            ("episodes_deleted".into(), episodes_deleted.to_string()),
+            ("database".into(), db.path().display().to_string()),
+        ]));
+        print_changes(&change_sections, multi, show_volatile);
+    }
     if failures > 0 {
         anyhow::bail!(
             "{failures} of {} marketplace(s) failed to sync",
@@ -173,7 +188,9 @@ pub(crate) async fn poll_until_reflected(
             eprintln!("change not in the library view yet; retrying the sync…");
         }
         tokio::time::sleep(*delay).await;
-        sync(ctx, false, false, false).await?;
+        // Quiet: a poll round must not print a summary — several rounds
+        // emitted several JSON documents on one stdout (A7).
+        sync(ctx, false, false, false, false).await?;
         let mut all_reflected = true;
         for asin in asins {
             let doc = db.item_doc(asin.clone(), marketplace.to_owned()).await?;

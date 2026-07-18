@@ -337,6 +337,7 @@ impl super::Command for LibraryCommand {
                     sub.get_flag("full"),
                     sub.get_flag("no_podcasts"),
                     sub.get_flag("show_volatile"),
+                    true,
                 )
                 .await
             }
