@@ -141,6 +141,7 @@ pub(crate) async fn disambiguated_base(
     dir: &Path,
     base: String,
     asin: &str,
+    claims: &ClaimedStems,
 ) -> Result<String> {
     let db = ctx
         .open_library_db()
@@ -153,14 +154,49 @@ pub(crate) async fn disambiguated_base(
         .await
         .context("could not consult the download records (collision check)")?;
     if owners.is_empty() {
-        return Ok(base);
+        // The records only know completed downloads; the in-flight claim
+        // covers the concurrent batch (A4).
+        if claims.claim(stem, asin) {
+            return Ok(base);
+        }
+        eprintln!(
+            "{asin}: filename {base:?} is already being written by another item of \
+             this run — appending the ASIN to keep both titles' files apart"
+        );
+    } else {
+        eprintln!(
+            "{asin}: filename {base:?} already belongs to {} — appending the ASIN to keep \
+             both titles' files apart",
+            owners.join(", ")
+        );
     }
-    eprintln!(
-        "{asin}: filename {base:?} already belongs to {} — appending the ASIN to keep \
-         both titles' files apart",
-        owners.join(", ")
-    );
-    Ok(format!("{base} [{asin}]"))
+    let base = format!("{base} [{asin}]");
+    // The ASIN-suffixed stem is unique per item; claim it for completeness.
+    claims.claim(join_relative(dir, &base), asin);
+    Ok(base)
+}
+
+/// Filename stems already being written by this download run — the
+/// in-flight half of the collision guard. The database half
+/// (`colliding_asins`) knows only **completed** downloads (rows are
+/// recorded after the transfer), so two identically-named distinct titles
+/// in one concurrent batch both passed it and streamed to the same
+/// `.part` path, silently overwriting each other (audit 2026-07-18, A4).
+#[derive(Debug, Default)]
+pub(crate) struct ClaimedStems(std::sync::Mutex<std::collections::HashMap<PathBuf, String>>);
+
+impl ClaimedStems {
+    /// Claims `stem` for `asin`. `false` when a **different** ASIN of this
+    /// run already streams to it; re-claims by the same ASIN pass.
+    fn claim(&self, stem: PathBuf, asin: &str) -> bool {
+        match self.0.lock().expect("claims lock").entry(stem) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.get() == asin,
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(asin.to_owned());
+                true
+            }
+        }
+    }
 }
 
 /// The fixed filename suffix (discriminator + extension) for a download
@@ -527,6 +563,18 @@ fn truncate_filename(name: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A4 (audit 2026-07-18): two identically-named distinct titles in one
+    /// concurrent batch — the first claims the stem, the second must be
+    /// pushed to its ASIN-suffixed name; same-ASIN re-claims pass.
+    #[test]
+    fn in_flight_claims_disambiguate_concurrent_twins() {
+        let claims = ClaimedStems::default();
+        assert!(claims.claim(PathBuf::from("/dl/Dune_Part_1"), "B0EXAMPLE1"));
+        assert!(!claims.claim(PathBuf::from("/dl/Dune_Part_1"), "B0EXAMPLE2"));
+        assert!(claims.claim(PathBuf::from("/dl/Dune_Part_1"), "B0EXAMPLE1"));
+        assert!(claims.claim(PathBuf::from("/dl/Dune_Part_1 [B0EXAMPLE2]"), "B0EXAMPLE2"));
+    }
 
     // Tilde expansion is component-based, so a Unix CI never exercises the
     // Windows separator path — these assert the real resolved paths on each

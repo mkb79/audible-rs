@@ -435,6 +435,10 @@ impl super::Command for DownloadCommand {
             widevine::load_cdm(ctx)?;
         }
 
+        // In-flight collision claims of this run (A4): shared across the
+        // concurrent batch so identically-named distinct titles cannot
+        // stream to one path.
+        let claims = crate::naming::ClaimedStems::default();
         let plan = DownloadPlan {
             quality,
             marketplace: &marketplace,
@@ -453,6 +457,7 @@ impl super::Command for DownloadCommand {
             cdm: cdm.as_ref(),
             external: &external,
             mp: multi.as_ref(),
+            claims: &claims,
         };
 
         let jobs = *matches.get_one::<u32>("jobs").expect("default") as usize;

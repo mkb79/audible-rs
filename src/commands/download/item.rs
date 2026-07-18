@@ -45,6 +45,9 @@ pub(super) struct DownloadPlan<'a> {
     /// Where heavy (audio) transfers add their byte bar; `None` when no
     /// progress is shown (quiet / non-interactive).
     pub(super) mp: Option<&'a MultiProgress>,
+    /// In-flight filename claims of this run — the concurrent half of the
+    /// collision guard (A4).
+    pub(super) claims: &'a crate::naming::ClaimedStems,
 }
 
 /// Running tally for the batch summary line. Items are counted once each;
@@ -103,7 +106,7 @@ pub(super) async fn download_one(
     // Distinct titles can render to the same name (non-ASIN modes); when
     // the stem already belongs to another ASIN's records, append the ASIN
     // instead of silently overwriting the other title's files (A7).
-    let base = crate::naming::disambiguated_base(ctx, plan.dir, base, asin).await?;
+    let base = crate::naming::disambiguated_base(ctx, plan.dir, base, asin, plan.claims).await?;
     // The custom filename mode may nest the title in subfolders; create them
     // before any artifact is written (a no-op for the flat modes).
     let stem = crate::naming::join_relative(plan.dir, &base);
