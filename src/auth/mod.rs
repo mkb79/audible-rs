@@ -37,6 +37,10 @@ use signing::{RequestSigner, SigningError};
 /// `account_pool` prefix that marks a pre-merger Audible account.
 const AUDIBLE_LEGACY_POOL_PREFIX: &str = "pool-";
 
+/// Refresh the access token this many seconds before its expiry (A7): a
+/// token expiring mid-request would fail once, as there is no 401 retry.
+const TOKEN_REFRESH_MARGIN_SECS: f64 = 60.0;
+
 /// Origin of the account's identity, derived from `account_pool`.
 ///
 /// Amazon's register response carries `customer_info.account_pool`:
@@ -280,6 +284,50 @@ struct LegacyAuthData {
     customer_info: serde_json::Value,
     #[serde(default)]
     activation_bytes: Option<String>,
+}
+
+/// The field group a background write-back owns (audit 2026-07-18, A6):
+/// a refresh/exchange persists **only** these, merged onto the current
+/// on-disk state, so it cannot roll back a concurrent CLI edit to an
+/// unrelated field. See [`Authenticator::save_merged`].
+pub enum MergeScope {
+    /// The refreshed access token and its expiry. The refresh token is
+    /// left as on disk — a token refresh never changes it.
+    BearerToken,
+    /// The exchanged website cookies and their TTLs for exactly these
+    /// domains; every other domain is left as on disk.
+    Cookies(Vec<String>),
+}
+
+/// Overwrites `base` with the fields `mine` owns per `scope`, leaving
+/// everything else in `base` (the on-disk state) untouched.
+fn merge_scope(base: &mut AuthData, mut mine: AuthData, scope: &MergeScope) {
+    match scope {
+        MergeScope::BearerToken => {
+            base.bearer.access_token = mine.bearer.access_token;
+            base.bearer.expires = mine.bearer.expires;
+        }
+        MergeScope::Cookies(domains) => {
+            for domain in domains {
+                match mine.website_cookies.remove(domain) {
+                    Some(jar) => {
+                        base.website_cookies.insert(domain.clone(), jar);
+                    }
+                    None => {
+                        base.website_cookies.remove(domain);
+                    }
+                }
+                match mine.cookie_ttls.remove(domain) {
+                    Some(ttl) => {
+                        base.cookie_ttls.insert(domain.clone(), ttl);
+                    }
+                    None => {
+                        base.cookie_ttls.remove(domain);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Where and how a loaded auth file is written back after token
@@ -636,6 +684,12 @@ impl Authenticator {
     /// Writes the current auth data back to the file it was loaded from,
     /// preserving its protection (fresh salt and nonce per write).
     ///
+    /// Whole-file: for **foreground, user-initiated** edits (`account
+    /// token remove`, `cookies remove`, `activation-bytes --fetch`,
+    /// `logout`) where this `Authenticator` was just loaded and the user
+    /// is present. A background refresh/exchange must NOT use this — see
+    /// [`Self::save_merged`] (A6).
+    ///
     /// No-op for auth data without a write-back target (legacy files,
     /// in-memory construction).
     pub async fn save(&self) -> Result<(), AuthError> {
@@ -653,6 +707,67 @@ impl Authenticator {
             let content = authfile::write(&data, protection, password.as_ref())?;
             atomic_write(&path, content.as_bytes())?;
             tracing::info!(path = %path.display(), "auth file updated (write-back)");
+            Ok(())
+        })
+        .await
+        .expect("blocking save task must not panic")
+    }
+
+    /// Persists only the fields named by `scope`, merged onto the current
+    /// **on-disk** auth data under the write lock (audit 2026-07-18, A6).
+    ///
+    /// A background refresh/exchange runs against an in-memory
+    /// `Authenticator` that may be hours old — the agent holds one per
+    /// session for the session's lifetime. The plain [`Self::save`] would
+    /// serialize that whole stale copy and roll back any CLI edit made
+    /// since it loaded (a removed access token / cookie, freshly stored
+    /// activation bytes silently reappear or vanish). Re-reading the file
+    /// under the lock and overwriting only the just-changed group closes
+    /// the lost-update gap while the fsutil lock keeps it torn-write-safe.
+    ///
+    /// A missing file falls back to a full write; a no-op without a
+    /// write-back target.
+    pub async fn save_merged(&self, scope: MergeScope) -> Result<(), AuthError> {
+        let Some(write_back) = &self.write_back else {
+            tracing::debug!("no write-back target; skipping auth file save");
+            return Ok(());
+        };
+
+        let mine = self.to_value();
+        let protection = write_back.protection;
+        let password = write_back.password.clone();
+        let path = write_back.path.clone();
+
+        tokio::task::spawn_blocking(move || {
+            // The lock spans read→write so no concurrent writer slips a
+            // change in between (fsutil B5 contract; the plain write-back
+            // held it only around the final persist — the A6 gap).
+            let mut lock = crate::fsutil::write_lock(&path)?;
+            let _guard = lock.write()?;
+
+            let mut base: AuthData = match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let text = std::str::from_utf8(&bytes)
+                        .map_err(|_| AuthError::InvalidData("auth file is not UTF-8".into()))?;
+                    let loaded = authfile::read(text, password.as_ref())?;
+                    serde_json::from_value(loaded.data)
+                        .map_err(|err| AuthError::InvalidData(err.to_string()))?
+                }
+                // Deleted since load: recreate it from our full state.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    serde_json::from_value(mine.clone())
+                        .map_err(|err| AuthError::InvalidData(err.to_string()))?
+                }
+                Err(err) => return Err(AuthError::Io(err)),
+            };
+            let mine: AuthData = serde_json::from_value(mine)
+                .map_err(|err| AuthError::InvalidData(err.to_string()))?;
+            merge_scope(&mut base, mine, &scope);
+
+            let merged = serde_json::to_value(base).expect("AuthData always serializes");
+            let content = authfile::write(&merged, protection, password.as_ref())?;
+            crate::fsutil::persist_atomically(&path, content.as_bytes(), Some(0o600))?;
+            tracing::info!(path = %path.display(), "auth file updated (merged write-back)");
             Ok(())
         })
         .await
@@ -689,14 +804,18 @@ impl Authenticator {
         self.expires = Some(expires);
     }
 
-    /// Whether the access token is missing or past its expiry.
+    /// Whether the access token needs refreshing: missing, past its
+    /// expiry, or within [`TOKEN_REFRESH_MARGIN_SECS`] of it. The margin
+    /// (audit 2026-07-18, A7) keeps a token that would expire mid-flight
+    /// from being sent — there is no 401-driven retry, so a request on a
+    /// one-second-valid token would just fail once.
     pub fn access_token_expired(&self) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock before unix epoch")
             .as_secs_f64();
         match (&self.access_token, self.expires) {
-            (Some(_), Some(expires)) => now >= expires,
+            (Some(_), Some(expires)) => now >= expires - TOKEN_REFRESH_MARGIN_SECS,
             _ => true,
         }
     }
@@ -966,6 +1085,116 @@ mod tests {
         assert!(auth.expires().is_none());
         // The refresh token is the account's lifeline and must remain.
         assert!(auth.refresh_token().is_some());
+    }
+
+    /// A7: the token counts as needing a refresh once it is within the
+    /// margin of expiry, so it is never sent about to expire.
+    #[test]
+    fn access_token_expired_honors_the_refresh_margin() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let with_expiry = |expires: f64| {
+            Authenticator::from_value(serde_json::json!({
+                "country_code": "de",
+                "bearer": {"access_token": "Atna|x", "expires": expires},
+            }))
+            .unwrap()
+        };
+        // Comfortably valid, within-margin, and past all read as expected.
+        assert!(!with_expiry(now + TOKEN_REFRESH_MARGIN_SECS + 30.0).access_token_expired());
+        assert!(with_expiry(now + TOKEN_REFRESH_MARGIN_SECS - 5.0).access_token_expired());
+        assert!(with_expiry(now - 1.0).access_token_expired());
+    }
+
+    /// A6: a background merged write-back persists only its own group and
+    /// keeps a concurrent CLI edit to another field — the lost-update the
+    /// plain whole-file write-back caused when the agent held a stale copy.
+    #[tokio::test]
+    async fn merged_bearer_write_back_preserves_a_concurrent_edit() {
+        use secrecy::ExposeSecret as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("alice.auth");
+
+        Authenticator::from_value(serde_json::json!({
+            "country_code": "de",
+            "bearer": {"access_token": "Atna|old", "refresh_token": "Atnr|keep", "expires": 1000.0_f64},
+        }))
+        .unwrap()
+        .save_to(&path, None, KdfParams::default())
+        .await
+        .unwrap();
+
+        // The agent's long-lived (now stale) in-memory copy.
+        let mut stale = Authenticator::load_file(&path, None).await.unwrap();
+
+        // Meanwhile the user stores activation bytes via a fresh load and a
+        // whole-file save (the foreground path).
+        let mut cli = Authenticator::load_file(&path, None).await.unwrap();
+        cli.set_activation_bytes("DEADBEEF".into());
+        cli.save().await.unwrap();
+
+        // The agent refreshes its token and persists only that group.
+        stale.apply_token_refresh(SecretString::from("Atna|new".to_owned()), 5000.0);
+        stale.save_merged(MergeScope::BearerToken).await.unwrap();
+
+        let reloaded = Authenticator::load_file(&path, None).await.unwrap();
+        assert_eq!(reloaded.access_token().unwrap().expose_secret(), "Atna|new");
+        assert_eq!(reloaded.expires(), Some(5000.0));
+        // The concurrent edit survived (the A6 lost-update is closed), and
+        // the refresh token is untouched.
+        assert_eq!(reloaded.activation_bytes(), Some("DEADBEEF"));
+        assert_eq!(
+            reloaded.refresh_token().unwrap().expose_secret(),
+            "Atnr|keep"
+        );
+    }
+
+    /// A6: the cookie merge is per-domain — re-exchanging one domain must
+    /// not resurrect a domain the user removed concurrently.
+    #[tokio::test]
+    async fn merged_cookie_write_back_is_per_domain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("alice.auth");
+
+        Authenticator::from_value(serde_json::json!({
+            "country_code": "de",
+            "website_cookies": {
+                ".amazon.de": [{"name": "sid", "value": "de-old"}],
+                ".amazon.co.uk": [{"name": "sid", "value": "uk"}],
+            },
+            "cookie_ttls": {".amazon.de": 1000.0_f64, ".amazon.co.uk": 1000.0_f64},
+        }))
+        .unwrap()
+        .save_to(&path, None, KdfParams::default())
+        .await
+        .unwrap();
+
+        let mut stale = Authenticator::load_file(&path, None).await.unwrap();
+
+        // Concurrent CLI edit: remove the uk domain, whole-file save.
+        let mut cli = Authenticator::load_file(&path, None).await.unwrap();
+        assert!(cli.remove_website_cookies(".amazon.co.uk"));
+        cli.save().await.unwrap();
+
+        // The agent re-exchanges only .amazon.de and merges that domain.
+        let jar: Vec<Cookie> =
+            serde_json::from_value(serde_json::json!([{"name": "sid", "value": "de-new"}]))
+                .unwrap();
+        stale.set_website_cookies(".amazon.de".to_owned(), jar);
+        stale.set_cookie_ttl(".amazon.de".to_owned(), 5000.0);
+        stale
+            .save_merged(MergeScope::Cookies(vec![".amazon.de".to_owned()]))
+            .await
+            .unwrap();
+
+        let reloaded = Authenticator::load_file(&path, None).await.unwrap();
+        let cookies = reloaded.website_cookies();
+        // .amazon.de was updated …
+        assert_eq!(cookies[".amazon.de"][0].value, "de-new");
+        // … and the concurrent uk removal was NOT undone.
+        assert!(!cookies.contains_key(".amazon.co.uk"));
     }
 
     #[test]

@@ -487,9 +487,12 @@ impl Client {
         auth.apply_token_refresh(token.clone(), now + expires_in);
         tracing::info!("access token refreshed");
 
-        // A failed write-back is not fatal: the fresh token lives in
-        // memory and the next run simply refreshes again.
-        if let Err(error) = auth.save().await {
+        // Merge only the refreshed token onto the on-disk state (A6): the
+        // agent holds this `auth` across a session's lifetime, so a plain
+        // whole-file save would roll back a concurrent CLI edit (a removed
+        // cookie, freshly stored activation bytes). A failed write-back is
+        // not fatal — the token lives in memory and the next run refreshes.
+        if let Err(error) = auth.save_merged(crate::auth::MergeScope::BearerToken).await {
             tracing::warn!(%error, "could not write refreshed token back to the auth file");
         }
 
@@ -640,9 +643,15 @@ impl Client {
             auth.set_cookie_ttl(domain.clone(), ttl_expiry);
             auth.set_website_cookies(domain, jar);
         }
-        // A failed write-back is not fatal: the cookies live in memory for
-        // this session and a later exchange simply fetches them again.
-        if let Err(error) = auth.save().await {
+        // Merge only the exchanged domains onto the on-disk state (A6): a
+        // whole-file save from this possibly-stale agent copy would roll
+        // back a concurrent CLI edit to another field or another domain.
+        // A failed write-back is not fatal — the cookies live in memory
+        // and a later exchange fetches them again.
+        if let Err(error) = auth
+            .save_merged(crate::auth::MergeScope::Cookies(domains.clone()))
+            .await
+        {
             tracing::warn!(%error, "could not write exchanged cookies back to the auth file");
         }
         tracing::info!(?domains, "exchanged website cookies");
