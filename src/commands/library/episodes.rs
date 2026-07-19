@@ -11,7 +11,7 @@ use anyhow::{Result, bail};
 use crate::config::ctx::Ctx;
 use crate::output::Output;
 
-use crate::library_sync::maybe_auto_sync;
+use crate::library_sync::maybe_auto_sync_for_reads;
 
 /// Lists the stored episodes of one followed show, newest first. The
 /// show is matched by ASIN or unique title substring across the selected
@@ -28,7 +28,7 @@ pub(crate) async fn episodes(
     page: u32,
 ) -> Result<()> {
     let db = ctx.open_library_db().await?;
-    maybe_auto_sync(ctx, &db).await?;
+    maybe_auto_sync_for_reads(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;
 
     // Resolve the parent show (ASIN or unique title substring) across

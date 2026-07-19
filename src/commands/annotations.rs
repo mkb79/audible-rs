@@ -14,7 +14,7 @@ use crate::db::Db;
 use crate::downloader::request_annotations;
 use crate::output::Output;
 
-use crate::library_sync::maybe_auto_sync;
+use crate::library_sync::{maybe_auto_sync, maybe_auto_sync_for_reads};
 use crate::naming::{base_filename, download_dir};
 
 /// How many annotation fetches run concurrently.
@@ -294,7 +294,7 @@ async fn save_annot(
 
 async fn list(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
     let db = ctx.open_library_db().await?;
-    maybe_auto_sync(ctx, &db).await?;
+    maybe_auto_sync_for_reads(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;
     let hide_none = matches.get_flag("hide_none");
 

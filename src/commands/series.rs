@@ -11,7 +11,7 @@ use crate::models::library as model;
 use crate::output::Output;
 
 use crate::catalog;
-use crate::library_sync::maybe_auto_sync;
+use crate::library_sync::maybe_auto_sync_for_reads;
 
 /// `audible series`.
 pub struct SeriesCommand;
@@ -66,7 +66,7 @@ impl super::Command for SeriesCommand {
 
 async fn list(ctx: &Ctx) -> Result<()> {
     let db = ctx.open_library_db().await?;
-    maybe_auto_sync(ctx, &db).await?;
+    maybe_auto_sync_for_reads(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;
 
     let rows: Vec<Vec<String>> = db
@@ -95,7 +95,7 @@ async fn list(ctx: &Ctx) -> Result<()> {
 
 async fn show(ctx: &Ctx, needle: String) -> Result<()> {
     let db = ctx.open_library_db().await?;
-    maybe_auto_sync(ctx, &db).await?;
+    maybe_auto_sync_for_reads(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;
 
     let rows: Vec<Vec<String>> = db
@@ -352,7 +352,7 @@ async fn volume_details(
 
 async fn missing(ctx: &Ctx, needle: Option<String>, include_unreleased: bool) -> Result<()> {
     let db = ctx.open_library_db().await?;
-    maybe_auto_sync(ctx, &db).await?;
+    maybe_auto_sync_for_reads(ctx, &db).await?;
     let client = ctx.client().await?;
     let marketplaces = ctx.marketplaces()?;
 
