@@ -62,6 +62,13 @@ pub struct Ctx {
     /// The account's library DB, opened once per process (one connection
     /// thread); handles are cheap clones sharing it.
     db: OnceCell<crate::db::Db>,
+    /// Warning-class messages recorded for the `-o json` envelope
+    /// (AUD-279); [`Ctx::warn`] mirrors each to stderr as it is raised.
+    warnings: std::sync::Mutex<Vec<output::Warning>>,
+    /// Whether stdout already carried this run's payload/envelope — the
+    /// error path emits its envelope only when nothing was printed yet
+    /// (at most one envelope per run).
+    printed: std::sync::atomic::AtomicBool,
 }
 
 impl Ctx {
@@ -91,6 +98,8 @@ impl Ctx {
             output: OutputFormat::default(),
             client: OnceCell::new(),
             db: OnceCell::new(),
+            warnings: std::sync::Mutex::new(Vec::new()),
+            printed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -105,9 +114,96 @@ impl Ctx {
         self.output
     }
 
-    /// Renders structured command output to stdout.
+    /// Renders structured command output to stdout. Drains the recorded
+    /// warnings into the `-o json` envelope (AUD-279); the other formats
+    /// already carried them on stderr.
     pub fn print(&self, output: &Output) {
-        output::print(output, self.output);
+        self.printed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let warnings = std::mem::take(&mut *self.warnings.lock().expect("warnings mutex"));
+        output::print(output, self.output, &warnings);
+    }
+
+    /// Raises a warning-class message (AUD-279): something was degraded or
+    /// silently narrowed — a skipped title class, stale data. Mirrors the
+    /// message to stderr immediately and records it for the `-o json`
+    /// envelope. **The** API for such messages — commands must not
+    /// `eprintln!` them ad hoc. `code` is the stable machine contract
+    /// (snake_case, never reworded once shipped); not for explanations of
+    /// a normal empty result, which stay plain stderr hints (AUD-205).
+    pub fn warn(&self, code: &'static str, message: impl Into<String>) {
+        let message = message.into();
+        eprintln!("{message}");
+        self.warnings
+            .lock()
+            .expect("warnings mutex")
+            .push(output::Warning { code, message });
+    }
+
+    /// Emits the failure envelope (`error` set, `result: null`) for a run
+    /// that dies before printing its payload — called once from the
+    /// dispatch boundary. A no-op outside `-o json` or when stdout
+    /// already carries this run's envelope (at most one per run; the
+    /// error still reaches stderr and the exit code either way).
+    pub fn emit_error_envelope(&self, message: &str) {
+        if self.output != OutputFormat::Json {
+            return;
+        }
+        if self
+            .printed
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let warnings = std::mem::take(&mut *self.warnings.lock().expect("warnings mutex"));
+        output::print_envelope(Some(message), &warnings, serde_json::Value::Null);
+    }
+
+    /// Emits the empty success envelope (`result: null`) for a run that
+    /// finished without printing a payload (mutations) — called once from
+    /// the dispatch boundary, so **every** command answers `-o json` with
+    /// exactly one envelope. A no-op outside `-o json`, after a payload,
+    /// or after [`Ctx::mark_raw_stdout`].
+    pub fn emit_success_envelope(&self) {
+        if self.output != OutputFormat::Json {
+            return;
+        }
+        if self
+            .printed
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let warnings = std::mem::take(&mut *self.warnings.lock().expect("warnings mutex"));
+        output::print_envelope(None, &warnings, serde_json::Value::Null);
+    }
+
+    /// Declares that this run's stdout is a raw artifact outside the
+    /// `-o json` contract (a shell-completion script, CSV, a wire dump) —
+    /// the dispatch boundary then emits no envelope around it. Each call
+    /// site is a documented passthrough exception in `output/mod.rs`.
+    pub fn mark_raw_stdout(&self) {
+        self.printed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// `api`'s documented failure-with-body (AUD-279): the server answered
+    /// a non-2xx whose body is the valuable part — the envelope carries
+    /// `error` **and** the body under `result`. The one caller pairs it
+    /// with a `bail!`, so the exit code stays honest; the printed-flag
+    /// keeps the dispatch boundary from emitting a second envelope.
+    pub fn print_json_error_with_result(&self, message: &str, result: serde_json::Value) {
+        if self.output != OutputFormat::Json {
+            return;
+        }
+        if self
+            .printed
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let warnings = std::mem::take(&mut *self.warnings.lock().expect("warnings mutex"));
+        output::print_envelope(Some(message), &warnings, result);
     }
 
     /// The loaded (validated) config.

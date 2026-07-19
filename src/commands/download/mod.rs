@@ -642,9 +642,12 @@ async fn resolve_source(
             .await?;
         let lapsed = with_lapsed.len().saturating_sub(asins.len());
         if lapsed > 0 {
-            eprintln!(
-                "skipped {lapsed} title(s) no longer covered by your subscription \
-                 (as of the last library sync); buying one makes it downloadable again"
+            ctx.warn(
+                "lapsed_skipped",
+                format!(
+                    "skipped {lapsed} title(s) no longer covered by your subscription \
+                     (as of the last library sync); buying one makes it downloadable again"
+                ),
             );
         }
         if !include_archived {
@@ -660,9 +663,12 @@ async fn resolve_source(
                 .await?;
             let skipped = unfiltered.len().saturating_sub(with_lapsed.len());
             if skipped > 0 {
-                eprintln!(
-                    "skipped {skipped} archived title(s) (as of the last library sync); \
-                     use --include-archived to fetch them"
+                ctx.warn(
+                    "archived_skipped",
+                    format!(
+                        "skipped {skipped} archived title(s) (as of the last library \
+                         sync); use --include-archived to fetch them"
+                    ),
                 );
             }
         }

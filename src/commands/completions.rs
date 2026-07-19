@@ -53,7 +53,10 @@ impl super::Command for CompletionsCommand {
             )
     }
 
-    async fn run(&self, _ctx: &Ctx, matches: &ArgMatches) -> Result<()> {
+    async fn run(&self, ctx: &Ctx, matches: &ArgMatches) -> Result<()> {
+        // The shell script IS the stdout artifact (`source <(…)`) —
+        // documented passthrough, never wrapped in the `-o json` envelope.
+        ctx.mark_raw_stdout();
         let shell = match matches.get_one::<Shell>("shell").copied() {
             Some(shell) => shell,
             None => Shell::from_env().ok_or_else(|| {
