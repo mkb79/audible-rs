@@ -101,7 +101,6 @@ pub(crate) fn strings(matches: &clap::ArgMatches, key: &str) -> Vec<String> {
 }
 pub mod library;
 pub mod plugin;
-pub mod podcasts;
 pub(crate) mod prompt;
 pub mod selfcmd;
 pub mod series;
@@ -241,7 +240,6 @@ pub fn registry() -> Vec<Box<dyn Command>> {
         Box::new(download::DownloadCommand),
         Box::new(library::LibraryCommand),
         Box::new(plugin::PluginCommand),
-        Box::new(podcasts::PodcastsCommand),
         Box::new(selfcmd::SelfCommand),
         Box::new(series::SeriesCommand),
         Box::new(settings::SettingsCommand),
@@ -250,7 +248,8 @@ pub fn registry() -> Vec<Box<dyn Command>> {
     ]
 }
 
-/// Migration hint for old Python command names (D2).
+/// Migration hint for a retired command name — old Python names (D2) and
+/// removed audible-rs nouns alike.
 pub fn old_command_hint(name: &str) -> Option<&'static str> {
     match name {
         "quickstart" => Some(
@@ -268,6 +267,12 @@ pub fn old_command_hint(name: &str) -> Option<&'static str> {
         "wishlist" => Some(
             "`wishlist` is now `audible collections wishlist list|add|remove` \
              (the wishlist is one of the account's server-side lists)",
+        ),
+        // Removed at v0.1.0 (AUD-175/AUD-176): the library is the one
+        // container. Deprecation notice was live from PR #24 to alpha.8.
+        "podcasts" => Some(
+            "`podcasts` is gone: use `audible library list --kind podcast` for the shows \
+             and `audible library episodes <SHOW>` for their episodes",
         ),
         _ => None,
     }
@@ -357,7 +362,7 @@ pub(crate) fn page_window(limit: u32, page: u32) -> (u32, u64) {
 }
 
 /// Uniform end-of-pages error for paged commands (`library list`,
-/// `podcasts episodes`): `--page` pointed past the last page. `limit`
+/// `library episodes`): `--page` pointed past the last page. `limit`
 /// is the raw user value (0 = everything on one page).
 pub(crate) fn empty_page_error(page: u32, limit: u32, total: u64) -> anyhow::Error {
     let per_page = if limit == 0 {

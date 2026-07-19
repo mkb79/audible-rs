@@ -1,9 +1,9 @@
 //! `library episodes <SHOW>` — the episode drill-down of a followed
 //! podcast, answered from the local database (episodes are stored by
-//! `library sync`). Moved here from the deprecated `podcasts` noun
-//! (AUD-175): child episodes of a followed show live only in the
-//! `episodes` table, so no `library list --kind …` variant can show
-//! them — this listing is the way to obtain episode ASINs (e.g. for
+//! `library sync`). Home of the drill-down since the `podcasts` noun was
+//! removed (AUD-175/AUD-176): child episodes of a followed show live only
+//! in the `episodes` table, so no `library list --kind …` variant can
+//! show them — this listing is the way to obtain episode ASINs (e.g. for
 //! downloads).
 
 use anyhow::{Result, bail};
@@ -15,12 +15,12 @@ use crate::library_sync::maybe_auto_sync_for_reads;
 
 /// Lists the stored episodes of one followed show, newest first. The
 /// show is matched by ASIN or unique title substring across the selected
-/// marketplaces. Also used by the deprecated `podcasts episodes`.
+/// marketplaces.
 ///
 /// `missing` (AUD-205) narrows the listing to the episodes lacking a download
 /// of those kinds, naming what each one lacks — the drill-down of the show
 /// roll-up that `library list --missing` displays.
-pub(crate) async fn episodes(
+pub(super) async fn episodes(
     ctx: &Ctx,
     show: String,
     missing: Option<Vec<String>>,

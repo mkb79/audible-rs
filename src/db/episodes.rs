@@ -626,8 +626,9 @@ mod tests {
     }
 
     /// An individually-subscribed `PodcastEpisode` living in `items` must
-    /// never show up as a show in `podcasts list` (AUD-173) — the listing
-    /// filters on the shared kind expression, not on `content_type` alone.
+    /// never show up as a show in the podcast listing (`library list --kind
+    /// podcast`, AUD-173) — the listing filters on the shared kind
+    /// expression, not on `content_type` alone.
     #[tokio::test]
     async fn podcasts_listing_excludes_episode_items() {
         let (_dir, db) = open_temp().await;
