@@ -9,6 +9,53 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 This file is generated from the commit history by [git-cliff](https://git-cliff.org)
 — do not edit it by hand (see `cliff.toml`).
 
+## [0.1.0-alpha.8](https://github.com/mkb79/audible-rs/compare/v0.1.0-alpha.7..v0.1.0-alpha.8) - 2026-07-19
+
+### Added
+
+- **BREAKING:** *output*: Every command answers -o json with one constant envelope ([#94](https://github.com/mkb79/audible-rs/pull/94)) ([93465b1](https://github.com/mkb79/audible-rs/commit/93465b11c792ff77f561e29abeb3c5d460b2f1a3))
+- *download*: Refuse lapsed subscription titles before the licenserequest ([#92](https://github.com/mkb79/audible-rs/pull/92)) ([b300172](https://github.com/mkb79/audible-rs/commit/b3001724a2e0cd98995725286d88a2717f0f187c))
+- *auth*: Auto mode sends the access token, signing only for annotations ([#91](https://github.com/mkb79/audible-rs/pull/91)) ([cff4a3a](https://github.com/mkb79/audible-rs/commit/cff4a3a9555d8b3b00df10484df1c7e6e9a5b7ff))
+- *download*: File titles outside your library under `__external__` ([#69](https://github.com/mkb79/audible-rs/pull/69)) ([7fa5427](https://github.com/mkb79/audible-rs/commit/7fa5427b237a90cc464fe7af4b28eedb1f3b53b9))
+- *cover*: Any cover size without a request, plus `native` for the largest ([#63](https://github.com/mkb79/audible-rs/pull/63)) ([44c7883](https://github.com/mkb79/audible-rs/commit/44c7883a816567eba15d458ac1465d089fda51c4))
+- *setup*: Group the wizard into sections and stop asking about disabled features ([#62](https://github.com/mkb79/audible-rs/pull/62)) ([e45818f](https://github.com/mkb79/audible-rs/commit/e45818f5600a23d95b2be3b75253651ebda1702e))
+- *library*: 'episodes <SHOW> --missing' lists which episodes are still missing ([#60](https://github.com/mkb79/audible-rs/pull/60)) ([66c383b](https://github.com/mkb79/audible-rs/commit/66c383be383992858be98d4086ce55b9eb282510))
+- *download*: Expand podcast shows to episodes, or skip with --exclude-podcasts ([#58](https://github.com/mkb79/audible-rs/pull/58)) ([d60a553](https://github.com/mkb79/audible-rs/commit/d60a5534267976ff9c9217fd54417acca80a1f86))
+- *windows*: Add a PowerShell installer (install.ps1) and a Windows-aware upgrade hint ([#57](https://github.com/mkb79/audible-rs/pull/57)) ([dbe0ce1](https://github.com/mkb79/audible-rs/commit/dbe0ce1c62694d157affa680ce4441c23682514a))
+
+### Fixed
+
+- *library*: Serve the local library when offline ([#95](https://github.com/mkb79/audible-rs/pull/95)) ([d247f32](https://github.com/mkb79/audible-rs/commit/d247f32058e9a7d08d08cbb48aa41be23cad1db4))
+- *auth*: A live agent no longer rolls back CLI-side auth changes ([#86](https://github.com/mkb79/audible-rs/pull/86)) ([a3cb52d](https://github.com/mkb79/audible-rs/commit/a3cb52d56a368b683ea27b398022b3d8cdb5b61c))
+- *agent*: Agent stop no longer signals a recycled PID ([#85](https://github.com/mkb79/audible-rs/pull/85)) ([d68c047](https://github.com/mkb79/audible-rs/commit/d68c04734a78aeea542ef15a06d930f72e95a025))
+- *library*: Honest input handling and summaries ([#84](https://github.com/mkb79/audible-rs/pull/84)) ([df67daf](https://github.com/mkb79/audible-rs/commit/df67daf86044495ad6b33568591d10a571425444))
+- *login*: A second config-page submit no longer strands the sign-in ([#83](https://github.com/mkb79/audible-rs/pull/83)) ([f2e85bc](https://github.com/mkb79/audible-rs/commit/f2e85bc2b01a70bee1eccae9bef9f378847868a4))
+- *download*: Honest artifact labels in summaries and download info ([#82](https://github.com/mkb79/audible-rs/pull/82)) ([a9a69da](https://github.com/mkb79/audible-rs/commit/a9a69dac047a5a25f592ca4d65d5b0de90b9dc38))
+- *annotations*: A failed --save counts as a failure ([#81](https://github.com/mkb79/audible-rs/pull/81)) ([abbebc7](https://github.com/mkb79/audible-rs/commit/abbebc7b679ae9e6d3cb2f57e5657fbdfe050774))
+- *api*: --save-request saves the request that was actually sent ([#80](https://github.com/mkb79/audible-rs/pull/80)) ([95a72d3](https://github.com/mkb79/audible-rs/commit/95a72d322f3fa6f45a0d501d9b5cc37723f7cd0b))
+- *download*: Distinct titles no longer overwrite each other under --jobs ([#79](https://github.com/mkb79/audible-rs/pull/79)) ([1ef7b1f](https://github.com/mkb79/audible-rs/commit/1ef7b1fddc391d92472bf565b4168ba4f69ab9e8))
+- *sync*: Episode resolution no longer drops episodes when the announced count is missing ([#78](https://github.com/mkb79/audible-rs/pull/78)) ([0c119c4](https://github.com/mkb79/audible-rs/commit/0c119c42701a5347bf0741d897eac5b2ee590e5d))
+- *agent*: Honest HTTP statuses and fail-closed selectors on /v1 ([#77](https://github.com/mkb79/audible-rs/pull/77)) ([e8f5ed8](https://github.com/mkb79/audible-rs/commit/e8f5ed8ce6f7bd4d8a19724e951e4e452dfe3d83))
+- *library*: Survive malformed Retry-After headers during sync retries ([#75](https://github.com/mkb79/audible-rs/pull/75)) ([57c4983](https://github.com/mkb79/audible-rs/commit/57c498344681d06b8b4431a8161631a041491d0a))
+- *download*: Download orphans no longer deletes resume version markers ([#74](https://github.com/mkb79/audible-rs/pull/74)) ([c1f69c0](https://github.com/mkb79/audible-rs/commit/c1f69c0c044a02b6381c315d113fd0453284ca56))
+- *download*: Stop announcing work that never happens ([#71](https://github.com/mkb79/audible-rs/pull/71)) ([70d0bd2](https://github.com/mkb79/audible-rs/commit/70d0bd2e9dd171fc87fedb34c750c828f3fc039e))
+- *audit*: Rectify the 2026-07-17 codebase audit (AUD-220) ([#72](https://github.com/mkb79/audible-rs/pull/72)) ([449d36d](https://github.com/mkb79/audible-rs/commit/449d36d375e77f107a9c284526efdaaa09f05121))
+- **BREAKING:** *db*: `db library remove` no longer touches your downloads ([#70](https://github.com/mkb79/audible-rs/pull/70)) ([bdbcb7f](https://github.com/mkb79/audible-rs/commit/bdbcb7f9d343a353afe794de240011bef1392a41))
+- *download*: Refuse an `--asin` that is not in your library ([#68](https://github.com/mkb79/audible-rs/pull/68)) ([d2c115f](https://github.com/mkb79/audible-rs/commit/d2c115f1618db18f1322d6525e1b2b3f3c4ea65a))
+- *reorganize*: A returned title's files keep their names ([#67](https://github.com/mkb79/audible-rs/pull/67)) ([d775fec](https://github.com/mkb79/audible-rs/commit/d775feca559bffef6d1a0c98303e47f7344f969b))
+- *download*: A configured decrypt no longer widens `--kind` ([#66](https://github.com/mkb79/audible-rs/pull/66)) ([37f283c](https://github.com/mkb79/audible-rs/commit/37f283cc3fba4b674085fa337057d31cdf1134fc))
+- *cover*: Resolve every cover size for podcast episodes, `native` included ([#64](https://github.com/mkb79/audible-rs/pull/64)) ([1d474a3](https://github.com/mkb79/audible-rs/commit/1d474a3613b11ef519b5a8e57ac090cb22f8d2a0))
+- *pdf*: Report and fetch a PDF only for titles that actually have one ([#61](https://github.com/mkb79/audible-rs/pull/61)) ([2a456f6](https://github.com/mkb79/audible-rs/commit/2a456f61101469b34971f83fa6526d7d3fc0ab51))
+- *podcasts*: A completed show is no longer "missing"; --missing now fetches missing episodes ([#59](https://github.com/mkb79/audible-rs/pull/59)) ([82b5edb](https://github.com/mkb79/audible-rs/commit/82b5edbc97a7d17dabd17b52ee8a221847baba8f))
+
+### Performance
+
+- *sync*: Store every cover size for podcast episodes ([#65](https://github.com/mkb79/audible-rs/pull/65)) ([ae3e249](https://github.com/mkb79/audible-rs/commit/ae3e249f0e2a85b73e1208807c148d8f22e93813))
+
+### Security
+
+- *security*: Create the passwords file owner-only from the first byte ([#76](https://github.com/mkb79/audible-rs/pull/76)) ([8e6fcb1](https://github.com/mkb79/audible-rs/commit/8e6fcb138c957cdb56e6212fa849488f4d30d2ae))
+
 ## [0.1.0-alpha.7](https://github.com/mkb79/audible-rs/compare/v0.1.0-alpha.6..v0.1.0-alpha.7) - 2026-07-15
 
 ### Added
