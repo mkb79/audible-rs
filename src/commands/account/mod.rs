@@ -545,7 +545,7 @@ async fn import(ctx: &Ctx, args: ImportArgs) -> Result<()> {
         },
     )
     .await?;
-    println!(
+    eprintln!(
         "Imported {} -> {} ({}). The original file is unchanged.",
         args.file.display(),
         target.display(),
@@ -646,7 +646,7 @@ pub(super) async fn finalize_account(
         }
     })?;
 
-    println!(
+    eprintln!(
         "Registered account {name:?} (marketplaces {}; default {}){}.",
         marketplaces.join(", "),
         default_marketplaces.join(", "),
@@ -657,7 +657,7 @@ pub(super) async fn finalize_account(
         }
     );
     if reg.auth.origin() == AccountOrigin::AudibleLegacy {
-        println!(
+        eprintln!(
             "\nNote: this is a pre-merger Audible account (it signs in with \
              an Audible username instead of an Amazon identity). You can \
              merge it with an Amazon account; see\n\

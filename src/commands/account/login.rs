@@ -170,12 +170,12 @@ pub(super) async fn login(ctx: &Ctx, args: LoginArgs) -> Result<()> {
         },
     )
     .await?;
-    println!(
+    eprintln!(
         "Logged in and registered account {name:?} ({}).",
         locale.country_code
     );
     if let Some(device_name) = device_name {
-        println!(
+        eprintln!(
             "Amazon registered this device as {device_name:?} — remove it later under \
              \"Manage Your Content and Devices\" in your Amazon account if needed."
         );
@@ -281,9 +281,9 @@ pub(super) async fn login_server(ctx: &Ctx, args: ServerArgs) -> Result<()> {
         },
     )
     .await?;
-    println!("Logged in and registered account {name:?} ({country_code}).");
+    eprintln!("Logged in and registered account {name:?} ({country_code}).");
     if let Some(device_name) = device_name {
-        println!(
+        eprintln!(
             "Amazon registered this device as {device_name:?} — remove it later with \
              `account logout` if needed."
         );

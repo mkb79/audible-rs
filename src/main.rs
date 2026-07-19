@@ -67,12 +67,37 @@ async fn main() -> anyhow::Result<()> {
     // Arc: the plugin broker (AUD-69) serves RPC from a background task
     // while the plugin child runs; `&Ctx` derefs out of the Arc for the
     // built-in commands.
-    let ctx = std::sync::Arc::new(Ctx::new(selectors)?.with_output(output));
+    let ctx = match Ctx::new(selectors) {
+        Ok(ctx) => std::sync::Arc::new(ctx.with_output(output)),
+        Err(error) => {
+            // The `-o json` envelope contract (AUD-279) also covers a run
+            // that dies before the context exists (config load/validation).
+            if output == OutputFormat::Json {
+                audible_rs::output::print_envelope(
+                    Some(&format!("{error:#}")),
+                    &[],
+                    serde_json::Value::Null,
+                );
+            }
+            return Err(error);
+        }
+    };
 
     let (name, sub_matches) = matches.subcommand().expect("subcommand required");
     for command in &registry {
         if command.name() == name {
-            return command.run(&ctx, sub_matches).await;
+            let result = command.run(&ctx, sub_matches).await;
+            // The dispatch boundary completes the envelope contract
+            // (AUD-279): a failure emits `error` + `result: null`, a
+            // success without a payload the empty envelope — so every
+            // command answers `-o json` with exactly one envelope. Both
+            // are no-ops if the run printed (or declared raw) stdout;
+            // stderr + exit code behave as always.
+            match &result {
+                Ok(()) => ctx.emit_success_envelope(),
+                Err(error) => ctx.emit_error_envelope(&format!("{error:#}")),
+            }
+            return result;
         }
     }
 
@@ -84,17 +109,25 @@ async fn main() -> anyhow::Result<()> {
         .map(|values| values.cloned().collect())
         .unwrap_or_default();
     let builtins = audible_rs::commands::plugin::builtin_names();
-    match audible_rs::plugins::run_external(&ctx, name, &builtins, &args).await? {
-        Some(code) => std::process::exit(code),
-        None => {
+    match audible_rs::plugins::run_external(&ctx, name, &builtins, &args).await {
+        // A plugin owns its stdout entirely (documented passthrough) —
+        // its exit code propagates, no envelope.
+        Ok(Some(code)) => std::process::exit(code),
+        Ok(None) => {
             if let Some(hint) = commands::old_command_hint(name) {
                 eprintln!("hint: {hint}\n");
             }
-            anyhow::bail!(
+            let error = anyhow::anyhow!(
                 "unrecognized subcommand {name:?} — not a built-in and no plugin of \
                  that name (plugin dir: {}; see `audible plugin list`)",
                 audible_rs::plugins::plugin_dir(&ctx).display()
             );
+            ctx.emit_error_envelope(&format!("{error:#}"));
+            Err(error)
+        }
+        Err(error) => {
+            ctx.emit_error_envelope(&format!("{error:#}"));
+            Err(error)
         }
     }
 }

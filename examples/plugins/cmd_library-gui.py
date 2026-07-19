@@ -109,17 +109,21 @@ class Api:
         self.broker = broker
 
     def _invoke_json(self, argv, empty):
-        """Invoke a built-in and parse its JSON stdout. Commands print
-        human hints to stderr and nothing to stdout when a result set is
-        empty — that case maps to `empty`, every other failure raises."""
+        """Invoke a built-in and parse its JSON stdout. `-o json` emits
+        the constant envelope `{"error", "warnings", "result"}` (AUD-279):
+        the payload sits under `"result"`; a failure raises (the
+        envelope's error mirrors the stderr detail)."""
         reply = self.broker.invoke(argv)
         stdout = reply.get("stdout", "")
         if reply.get("code") != 0:
             detail = (reply.get("stderr") or stdout or "").strip()
             raise BrokerError(500, f"`audible {' '.join(argv)}` failed: {detail[:300]}")
         if not stdout.strip():
+            # Defensive: with the envelope a successful run always prints
+            # one document; treat a bare stdout as the empty result.
             return empty
-        return json.loads(stdout)
+        result = json.loads(stdout).get("result")
+        return empty if result is None else result
 
     def library(self):
         # `library list` is the (mp, asin) source of truth; the export's

@@ -278,8 +278,10 @@ fn token_create(ctx: &Ctx, args: &clap::ArgMatches) -> Result<()> {
         account,
         ttl,
     )?;
-    // The one and only time the plaintext is shown.
-    println!("{token}");
+    // The one and only time the plaintext is shown — it is the payload:
+    // verbatim on stdout, a string under `result` with `-o json`
+    // (AUD-279; same one-time exposure either way).
+    ctx.print(&crate::output::Output::Text(token));
     eprintln!(
         "token created; store it now — it is not recoverable. \
          Callers send it as `Authorization: Bearer <token>`."

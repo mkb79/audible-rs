@@ -325,6 +325,9 @@ pub(super) async fn export(ctx: &Ctx, kinds: Vec<String>, csv: bool) -> Result<(
             out.push_str(&fields.map(|f| csv_field(&f)).join(","));
             out.push('\n');
         }
+        // Explicit CSV format on stdout (documented passthrough — the
+        // `-o` format does not apply to a `--csv` dump).
+        ctx.mark_raw_stdout();
         print!("{out}");
         return Ok(());
     }

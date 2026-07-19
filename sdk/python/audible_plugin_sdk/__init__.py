@@ -149,7 +149,11 @@ class Broker:
         selected account/settings/marketplace and ``-o json`` (override
         with ``output=``). Returns
         ``{"code": int, "stdout": str, "stderr": str}`` — with the
-        default JSON output, ``json.loads(reply["stdout"])`` is the data.
+        default JSON output, ``json.loads(reply["stdout"])`` is the
+        envelope ``{"error", "warnings", "result"}`` (AUD-279): the payload
+        sits under ``"result"``, ``"warnings"`` is a list of
+        ``{"code", "message"}`` entries (empty when clean) and
+        ``"error"`` is ``None`` on success.
         """
         return self._request(
             "POST",

@@ -194,7 +194,7 @@ async fn add(ctx: &Ctx, source: &str, symlink: bool, yes: bool) -> Result<()> {
         )
         .await?
     };
-    println!(
+    eprintln!(
         "installed: {} ({}, scopes: {}) -> {}",
         installed.name,
         installed.tier.label(),
@@ -391,7 +391,7 @@ async fn remove(ctx: &Ctx, name: &str, yes: bool) -> Result<()> {
     std::fs::remove_file(&plugin.source).map_err(|error| {
         anyhow::anyhow!("could not remove {}: {error}", plugin.source.display())
     })?;
-    println!("removed: {}", plugin.source.display());
+    eprintln!("removed: {}", plugin.source.display());
     Ok(())
 }
 

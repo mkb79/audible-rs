@@ -180,6 +180,15 @@ and global selectors `-a/--account`, `-m/--marketplace`,
 `-s/--settings`. Run `audible --help` for the full command tree, or
 `audible <command> --help` for any subcommand.
 
+With `-o json`, every command prints exactly one envelope
+`{"error", "warnings", "result"}`: the payload sits under `result`
+(for `api`, the server's response verbatim — on an HTTP error together
+with `error`), `warnings` lists machine-readable `{code, message}`
+notes (e.g. titles a sweep skipped) and `error` is set when the run
+fails — exit codes are unchanged. Commands whose stdout is a raw
+artifact stay unwrapped: `completions`, `library export --csv` and the
+`api` wire-debug flags (`--dry-run`, `--include`, `--output-file`).
+
 ## Shell completions
 
 Quickest — `audible completions --install` writes the script to the right

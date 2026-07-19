@@ -97,7 +97,9 @@ fn read_content(ctx: &Ctx) -> Result<String> {
 fn get(ctx: &Ctx, key: &str) -> Result<()> {
     match write::get(&read_content(ctx)?, key)? {
         Some(value) => {
-            println!("{value}");
+            // The value is the payload: verbatim on stdout as before, a
+            // string under the `-o json` envelope's `result` (AUD-279).
+            ctx.print(&crate::output::Output::Text(value));
             Ok(())
         }
         None => bail!("{key} is not set"),
@@ -120,8 +122,17 @@ fn unset(ctx: &Ctx, key: &str) -> Result<()> {
 
 fn list(ctx: &Ctx) -> Result<()> {
     eprintln!("config file: {}", ctx.config_file().display());
-    for (key, value) in write::flatten(&read_content(ctx)?)? {
-        println!("{key} = {value}");
+    let pairs = write::flatten(&read_content(ctx)?)?;
+    // `-o json` gets a key→value object; the human formats keep the
+    // exact `key = value` lines (the stats per-format pattern).
+    if ctx.output_format() == crate::output::OutputFormat::Json {
+        ctx.print(&crate::output::Output::KeyValue(pairs));
+    } else {
+        let lines: Vec<String> = pairs
+            .iter()
+            .map(|(key, value)| format!("{key} = {value}"))
+            .collect();
+        ctx.print(&crate::output::Output::Text(lines.join("\n")));
     }
     Ok(())
 }

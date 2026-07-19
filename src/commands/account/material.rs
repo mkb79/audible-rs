@@ -87,6 +87,8 @@ pub(super) async fn cookies_refresh(ctx: &Ctx, show_response: bool) -> Result<()
         let (domains, payload) = client.refresh_cookies(country_code).await?;
         // Status to stderr so stdout stays clean JSON when --show-response is used.
         if show_response {
+            // Raw payload dump (documented passthrough — no envelope).
+            ctx.mark_raw_stdout();
             println!("{}", serde_json::to_string_pretty(&payload)?);
         }
         if domains.is_empty() {
@@ -190,10 +192,14 @@ pub(super) async fn activation_bytes(
         auth.set_activation_bytes(activation_bytes.clone());
         auth.save().await?;
         eprintln!("fetched activation bytes and saved them to the auth file");
-        println!("{activation_bytes}");
+        // The bytes are the payload (deliberately shown): verbatim on
+        // stdout, a string under `result` with `-o json` (AUD-279).
+        ctx.print(&crate::output::Output::Text(activation_bytes));
     } else {
         match auth.activation_bytes() {
-            Some(activation_bytes) => println!("{activation_bytes}"),
+            Some(activation_bytes) => {
+                ctx.print(&crate::output::Output::Text(activation_bytes.to_owned()));
+            }
             None => eprintln!(
                 "no activation bytes stored — fetch them with \
                  `audible account activation-bytes --fetch`"

@@ -316,6 +316,8 @@ async fn run(ctx: &Ctx, args: ApiArgs, auth_explicit: bool) -> Result<()> {
     };
 
     if args.dry_run {
+        // Raw request preview on stdout (documented passthrough).
+        ctx.mark_raw_stdout();
         print_dry_run(
             &method_s,
             &display_path,
@@ -351,6 +353,7 @@ async fn run(ctx: &Ctx, args: ApiArgs, auth_explicit: bool) -> Result<()> {
     }
     let response = request.send().await?;
     emit_response(
+        ctx,
         response,
         args.include_headers,
         args.output_file,
@@ -640,6 +643,7 @@ async fn read_body_file(path: &str) -> Result<Vec<u8>> {
 /// the head to its own file. Pretty-prints JSON only for an interactive
 /// stdout; pipes and files get the raw bytes (binary-safe).
 async fn emit_response(
+    ctx: &Ctx,
     response: reqwest::Response,
     include_headers: bool,
     output: Option<PathBuf>,
@@ -666,6 +670,39 @@ async fn emit_response(
         .bytes()
         .await
         .context("could not read response body")?;
+
+    // `-o json` (AUD-279): the server's body lives verbatim under the
+    // envelope's `result` — deterministic for scripts, unlike the raw
+    // path's TTY/pipe split. Excluded: `--output-file` (the file is the
+    // raw sink; stdout then carries the empty success envelope) and
+    // `--include` (head+body as one raw text payload).
+    let json_mode = ctx.output_format() == crate::output::OutputFormat::Json
+        && output.is_none()
+        && !include_headers;
+    if json_mode {
+        let value = match serde_json::from_slice::<serde_json::Value>(&body) {
+            Ok(value) => value,
+            Err(_) => match std::str::from_utf8(&body) {
+                // A non-JSON text body (HTML via --foreign-host …) embeds
+                // as a string; binary cannot live in an envelope.
+                Ok(text) => serde_json::Value::String(text.to_owned()),
+                Err(_) => bail!(
+                    "binary response ({} bytes) cannot be embedded in the -o json \
+                     envelope — use --output-file FILE",
+                    body.len()
+                ),
+            },
+        };
+        if status.is_success() {
+            ctx.print(&crate::output::Output::Json(value));
+            return Ok(());
+        }
+        // Documented failure-with-body: the server's error payload is the
+        // valuable part — `error` set AND `result` = body, exit 1.
+        let message = format!("request failed with HTTP status {status}");
+        ctx.print_json_error_with_result(&message, value);
+        bail!("{message}");
+    }
 
     let to_tty = output.is_none() && std::io::stdout().is_terminal();
     let body_out: Vec<u8> = if to_tty {
@@ -700,6 +737,9 @@ async fn emit_response(
             eprintln!("wrote {} bytes to {}", payload.len(), path.display());
         }
         None => {
+            // Raw body bytes on stdout (documented passthrough — the
+            // dispatch boundary must not append an envelope).
+            ctx.mark_raw_stdout();
             if to_tty && !binary_to_tty {
                 payload.push(b'\n');
             }
@@ -847,6 +887,8 @@ async fn run_interactive(ctx: &Ctx, args: ApiArgs) -> Result<()> {
         None => {}
     }
     if args.dry_run {
+        // Raw request preview on stdout (documented passthrough).
+        ctx.mark_raw_stdout();
         print_dry_run(
             &method_str,
             &normalized,
@@ -914,6 +956,7 @@ async fn run_interactive(ctx: &Ctx, args: ApiArgs) -> Result<()> {
     );
     let response = request.send().await?;
     emit_response(
+        ctx,
         response,
         args.include_headers,
         args.output_file,
