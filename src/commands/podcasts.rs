@@ -10,7 +10,7 @@ use clap::Arg;
 use crate::config::ctx::Ctx;
 use crate::output::Output;
 
-use crate::library_sync::maybe_auto_sync;
+use crate::library_sync::maybe_auto_sync_for_reads;
 
 /// `audible podcasts` (deprecated).
 pub struct PodcastsCommand;
@@ -73,7 +73,7 @@ impl super::Command for PodcastsCommand {
 /// the `library episodes <SHOW>` header.
 async fn list(ctx: &Ctx) -> Result<()> {
     let db = ctx.open_library_db().await?;
-    maybe_auto_sync(ctx, &db).await?;
+    maybe_auto_sync_for_reads(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;
 
     let rows: Vec<Vec<String>> = db

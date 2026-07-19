@@ -587,6 +587,95 @@ pub(crate) async fn maybe_auto_sync(ctx: &Ctx, db: &Db) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The read-command variant of [`maybe_auto_sync`] (AUD-261): when the
+/// freshness pass cannot reach the server at all, the read serves the
+/// stale local answer with a `stale_offline` warning instead of failing —
+/// SQLite exists precisely to answer offline. Everything the server
+/// actually answers (4xx/5xx, auth/token verdicts) still fails: a
+/// reachable server reporting a problem must not be masked by stale data.
+/// A never-synced marketplace also still fails — an empty answer would be
+/// a lie, not a service. Mutating callers (`download --missing`,
+/// `annotations sync`), `download info` (its core work needs live
+/// requests anyway) and the explicit `library sync` stay strict.
+pub(crate) async fn maybe_auto_sync_for_reads(ctx: &Ctx, db: &Db) -> anyhow::Result<()> {
+    let Err(error) = maybe_auto_sync(ctx, db).await else {
+        return Ok(());
+    };
+    if !is_offline(&error) {
+        return Err(error);
+    }
+    let marketplaces = ctx.marketplaces()?;
+    let last_syncs = db
+        .last_sync_utc_by_marketplace(marketplaces.clone())
+        .await?;
+    let never_synced: Vec<String> = marketplaces
+        .into_iter()
+        .filter(|marketplace| !last_syncs.contains_key(marketplace))
+        .collect();
+    if !never_synced.is_empty() {
+        return Err(error.context(format!(
+            "the server is unreachable and {} was never synced — there is no \
+             local data to serve",
+            never_synced.join(",")
+        )));
+    }
+    // ISO-8601 UTC strings sort chronologically — the oldest selected
+    // marketplace honestly labels the whole answer's age.
+    let oldest = last_syncs.values().min().cloned().unwrap_or_default();
+    ctx.warn(
+        "stale_offline",
+        format!(
+            "offline: could not reach the server — showing local data from {oldest} \
+             (run `audible library sync` when back online)"
+        ),
+    );
+    Ok(())
+}
+
+/// Whether an auto-sync failure means the server was never reached
+/// (AUD-261): a transport-class `reqwest` error — connect refused, DNS,
+/// TLS handshake, timeout — anywhere in the chain. Walking the chain for
+/// `reqwest::Error` is the one classification home and reaches every
+/// wrapper uniformly (`ApiError::Http`, `SyncError::Http`, a catalog
+/// fetch); anything the server answered (an HTTP status, a refresh
+/// verdict) is deliberately NOT offline.
+fn is_offline(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|error| error.is_connect() || error.is_timeout())
+    })
+}
+
+#[cfg(test)]
+mod offline_tests {
+    use super::is_offline;
+    use crate::api::client::ApiError;
+
+    /// AUD-261: only transport-class failures classify as offline — a
+    /// connect error anywhere in the chain, through any wrapper — while a
+    /// server-answered verdict never does (fail-closed: a reachable
+    /// server reporting a problem must not be masked by stale data).
+    #[tokio::test]
+    async fn offline_classification_is_transport_only() {
+        // Port 1 on localhost refuses instantly — a genuine connect error.
+        let refused = reqwest::Client::new()
+            .get("http://127.0.0.1:1/")
+            .send()
+            .await
+            .expect_err("nothing listens on port 1");
+        assert!(refused.is_connect());
+        // Wrapped the way the sync paths wrap it (typed error → anyhow
+        // with added context) — the chain walk must still find it.
+        let chained = anyhow::Error::from(ApiError::Http(refused)).context("library sync failed");
+        assert!(is_offline(&chained));
+
+        // A server-answered verdict (token refresh 400) is NOT offline.
+        let verdict = anyhow::Error::from(ApiError::TokenRefresh(reqwest::StatusCode::BAD_REQUEST));
+        assert!(!is_offline(&verdict));
+    }
+}
+
 #[cfg(test)]
 mod tests {
 

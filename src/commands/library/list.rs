@@ -8,7 +8,7 @@ use reqwest::Method;
 use crate::api::paginator;
 use crate::config::ctx::Ctx;
 use crate::db::{self};
-use crate::library_sync::{DEFAULT_RESPONSE_GROUPS, maybe_auto_sync};
+use crate::library_sync::{DEFAULT_RESPONSE_GROUPS, maybe_auto_sync_for_reads};
 use crate::models::library as model;
 
 const BOOK_COLUMNS: [&str; 5] = ["asin", "title", "purchase_date", "runtime_min", "language"];
@@ -44,7 +44,7 @@ fn mp_book_rows(books: &[crate::db::BookRow]) -> Vec<Vec<String>> {
 
 pub(super) async fn list(ctx: &Ctx, kinds: Vec<String>, limit: u32, page: u32) -> Result<()> {
     let db = ctx.open_library_db().await?;
-    maybe_auto_sync(ctx, &db).await?;
+    maybe_auto_sync_for_reads(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;
 
     let (query_limit, offset) = crate::commands::page_window(limit, page);
@@ -101,7 +101,7 @@ pub(super) async fn list_missing(
     let kinds = crate::db::normalize_download_kinds(&kinds);
 
     let db = ctx.open_library_db().await?;
-    maybe_auto_sync(ctx, &db).await?;
+    maybe_auto_sync_for_reads(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;
 
     let (query_limit, offset) = crate::commands::page_window(limit, page);
@@ -173,7 +173,7 @@ pub(super) async fn list_borrowed(
     page: u32,
 ) -> Result<()> {
     let db = ctx.open_library_db().await?;
-    maybe_auto_sync(ctx, &db).await?;
+    maybe_auto_sync_for_reads(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;
 
     let (query_limit, offset) = crate::commands::page_window(limit, page);
@@ -284,7 +284,7 @@ pub(super) async fn search(
         anyhow::bail!("the search query is empty");
     }
     let db = ctx.open_library_db().await?;
-    maybe_auto_sync(ctx, &db).await?;
+    maybe_auto_sync_for_reads(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;
 
     let fts = fts && ctx.db_config()?.fts;
@@ -303,7 +303,7 @@ pub(super) async fn search(
 
 pub(super) async fn export(ctx: &Ctx, kinds: Vec<String>, csv: bool) -> Result<()> {
     let db = ctx.open_library_db().await?;
-    maybe_auto_sync(ctx, &db).await?;
+    maybe_auto_sync_for_reads(ctx, &db).await?;
     let marketplaces = ctx.marketplaces()?;
 
     if csv {

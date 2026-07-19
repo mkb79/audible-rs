@@ -46,6 +46,9 @@ pub(super) async fn info(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
 async fn show(ctx: &Ctx, asins: Vec<String>, titles: Vec<String>) -> Result<()> {
     let marketplace = ctx.marketplace_single()?;
     let db = ctx.open_library_db().await?;
+    // Deliberately the strict variant (AUD-261): `download info` makes
+    // live metadata/catalog requests as its core work — serving a stale
+    // DB half only to fail on the network half would be a worse answer.
     crate::library_sync::maybe_auto_sync(ctx, &db).await?;
     let asins = crate::commands::items::resolve_asins(
         &db,
