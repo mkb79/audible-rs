@@ -1,0 +1,84 @@
+name: Build binary (on demand)
+
+# Builds a single binary for a chosen ref and target and uploads it as a
+# downloadable artifact — so a branch can be exercised on a machine without a
+# Rust toolchain, without cutting a release. This is a TEST build, not a
+# release: AUDIBLE_RELEASE_TAG is left unset, so `--version` honestly reports
+# the dev/commit suffix (AUD-180). Packaging, checksums and publishing stay
+# the release workflow's job.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Build target (Rust triple)
+        type: choice
+        required: true
+        default: x86_64-pc-windows-msvc
+        options:
+          - x86_64-pc-windows-msvc
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+      ref:
+        # GitHub's `choice` inputs take only static options, so an
+        # all-branches dropdown is not possible here. Leave this blank to
+        # build the branch picked in the native "Use workflow from" selector
+        # (which is itself a branch dropdown); set it to build a specific
+        # branch, tag or SHA regardless of where the workflow is run from.
+        description: "Branch, tag or SHA to build (blank = the 'Use workflow from' branch)"
+        type: string
+        required: false
+        default: ""
+
+# Least privilege (matches ci.yml): only the checkout is read; artifact
+# upload needs no extra scope.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ inputs.target }}
+    # Map the chosen target to its runner, mirroring release.yml: MSVC on
+    # windows-latest, musl on ubuntu (arm64 for aarch64), Apple targets on the
+    # arm64 macOS runner (the Intel one cross-compiles there).
+    runs-on: ${{ fromJSON('{"x86_64-pc-windows-msvc":"windows-latest","x86_64-unknown-linux-musl":"ubuntu-22.04","aarch64-unknown-linux-musl":"ubuntu-22.04-arm","x86_64-apple-darwin":"macos-14","aarch64-apple-darwin":"macos-14"}')[inputs.target] }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Blank falls back to the ref the workflow was dispatched on.
+          ref: ${{ inputs.ref }}
+
+      # musl needs a C toolchain (bundled SQLite) + cmake (aws-lc-sys builds
+      # from source for musl). musl-gcc is only the C compiler; the Rust
+      # linker stays the self-contained rust-lld (AUD-140).
+      - name: Install musl toolchain
+        if: contains(inputs.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools cmake
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          targets: ${{ inputs.target }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ${{ inputs.target }}
+
+      - name: Build
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --target ${{ inputs.target }}
+
+      # The binary is `audible` on Unix, `audible.exe` on Windows; exactly one
+      # of these globs matches, the other is simply empty.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: audible-${{ inputs.target }}
+          path: |
+            target/${{ inputs.target }}/release/audible
+            target/${{ inputs.target }}/release/audible.exe
+          if-no-files-found: error
