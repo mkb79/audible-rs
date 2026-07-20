@@ -332,19 +332,23 @@ fn read_dir_sorted(dir: &Path) -> Vec<std::fs::DirEntry> {
     entries
 }
 
-/// The Python 3 interpreter for Tier-B plugins, or `None`: `python3` first
-/// on every platform, then `python` and the `py` launcher on Windows, where
-/// the interpreter is usually `python.exe`. Uses the shared PATHEXT-aware
-/// lookup (audit 2026-07-20, AUD-281 — the old bare-`python3` join never
-/// matched `python.exe`, so every Tier-B plugin was dead on Windows).
+/// The Python 3 interpreter for Tier-B plugins, or `None`. The
+/// `AUDIBLE_PYTHON` env override pins a specific interpreter (must be
+/// executable, else `None` — never a silent fallback); otherwise `python3`
+/// first on every platform, then `python` and the `py` launcher on Windows,
+/// where the interpreter is usually `python.exe`. Uses the shared
+/// PATHEXT-aware lookup (AUD-281). The override lets a user step past an
+/// awkward auto-pick — e.g. a pyenv-win `python3.bat` shim (AUD-284).
 fn python3() -> Option<PathBuf> {
     #[cfg(windows)]
     const CANDIDATES: &[&str] = &["python3", "python", "py"];
     #[cfg(not(windows))]
     const CANDIDATES: &[&str] = &["python3"];
-    CANDIDATES
-        .iter()
-        .find_map(|name| crate::fsutil::which(name))
+    crate::fsutil::resolve_with_override(std::env::var_os("AUDIBLE_PYTHON"), || {
+        CANDIDATES
+            .iter()
+            .find_map(|name| crate::fsutil::which(name))
+    })
 }
 
 /// Runs `--audible-describe` and parses the manifest. Errors are plain
@@ -493,7 +497,9 @@ fn base_command(plugin: &Discovered) -> Result<tokio::process::Command> {
     Ok(match plugin.tier {
         Tier::Executable => tokio::process::Command::new(&plugin.source),
         Tier::Python => {
-            let python = python3().context("no Python 3 interpreter (python3/python) on PATH")?;
+            let python = python3().context(
+                "no Python 3 interpreter (python3/python) on PATH — or set AUDIBLE_PYTHON to one",
+            )?;
             let mut command = tokio::process::Command::new(python);
             command.arg(&plugin.source);
             command

@@ -95,11 +95,7 @@ fn ffmpeg_path() -> Option<PathBuf> {
 /// Resolves a tool path: `env_var` override (must exist) → first match on
 /// `PATH` (PATHEXT-aware, via [`crate::fsutil::which`]).
 fn tool_path(env_var: &str, name: &str) -> Option<PathBuf> {
-    if let Some(value) = std::env::var_os(env_var) {
-        let path = PathBuf::from(value);
-        return crate::fsutil::is_executable(&path).then_some(path);
-    }
-    crate::fsutil::which(name)
+    crate::fsutil::resolve_with_override(std::env::var_os(env_var), || crate::fsutil::which(name))
 }
 
 /// Parses `<ffmpeg> -version` into `(major, minor)`; `None` if unparseable.

@@ -245,13 +245,15 @@ Commands are grouped by noun; each has subcommands (`audible <noun>
 | `annotations` | Bookmarks, notes, clips and last-position. |
 | `api` | Send raw authenticated requests to the Audible API. |
 | `db` | Maintain the local database (backup/restore, vacuum, integrity, downloads bookkeeping). |
-| `plugin` / `agent` | Plugin discovery and the resident session agent *(Unix only)*. |
+| `plugin` / `agent` | Plugin discovery and the resident session agent *(the agent is Unix only)*. |
 
 ## Where things live
 
 `audible` follows platform conventions (and honours `XDG_*` on Linux).
 Set `AUDIBLE_CONFIG_DIR` to override the config location (useful for
-throwaway setups).
+throwaway setups). Set `AUDIBLE_PYTHON` to pin the interpreter used for
+Tier-B (`cmd_*.py`) plugins when the auto-pick is awkward — e.g. past a
+pyenv-win `python3.bat` shim on Windows.
 
 | | Linux / macOS | Windows |
 | --- | --- | --- |
