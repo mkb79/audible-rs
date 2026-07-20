@@ -92,56 +92,14 @@ fn ffmpeg_path() -> Option<PathBuf> {
     tool_path("AUDIBLE_FFMPEG", "ffmpeg")
 }
 
-/// Resolves a tool path: `env_var` override (must exist) → first match on `PATH`.
+/// Resolves a tool path: `env_var` override (must exist) → first match on
+/// `PATH` (PATHEXT-aware, via [`crate::fsutil::which`]).
 fn tool_path(env_var: &str, name: &str) -> Option<PathBuf> {
     if let Some(value) = std::env::var_os(env_var) {
         let path = PathBuf::from(value);
-        return is_executable(&path).then_some(path);
+        return crate::fsutil::is_executable(&path).then_some(path);
     }
-    which(name)
-}
-
-fn which(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .flat_map(|dir| executable_candidates(&dir, name))
-        .find(|candidate| is_executable(candidate))
-}
-
-/// The filenames to try for `name` in one PATH directory. On Unix a program is
-/// its bare name; on Windows an executable carries an extension, so a bare
-/// `ffmpeg` never matches `ffmpeg.exe` — try each `PATHEXT` extension (unless
-/// the caller already gave one).
-#[cfg(not(windows))]
-fn executable_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
-    vec![dir.join(name)]
-}
-
-#[cfg(windows)]
-fn executable_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
-    if Path::new(name).extension().is_some() {
-        return vec![dir.join(name)];
-    }
-    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned());
-    pathext
-        .split(';')
-        .filter(|ext| !ext.is_empty())
-        .map(|ext| dir.join(format!("{name}{ext}")))
-        .collect()
-}
-
-fn is_executable(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::metadata(path)
-            .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        path.is_file()
-    }
+    crate::fsutil::which(name)
 }
 
 /// Parses `<ffmpeg> -version` into `(major, minor)`; `None` if unparseable.
@@ -581,40 +539,6 @@ fn pick_error(stderr: &str, stdout: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// On Unix a tool is looked up by its bare name.
-    #[cfg(not(windows))]
-    #[test]
-    fn candidates_are_the_bare_name_on_unix() {
-        assert_eq!(
-            executable_candidates(Path::new("/usr/bin"), "ffmpeg"),
-            vec![PathBuf::from("/usr/bin/ffmpeg")]
-        );
-    }
-
-    /// On Windows the PATH search must try the executable extensions, so a
-    /// bare `ffmpeg` finds `ffmpeg.exe`. A name that already has an extension
-    /// is used verbatim.
-    #[cfg(windows)]
-    #[test]
-    fn candidates_apply_pathext_on_windows() {
-        let cands = executable_candidates(Path::new(r"C:\bin"), "ffmpeg");
-        assert!(
-            cands
-                .iter()
-                .any(|c| c.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))),
-            "{cands:?} should include an .exe candidate"
-        );
-        assert!(
-            cands.iter().all(|c| c.starts_with(r"C:\bin")),
-            "candidates stay in the given dir"
-        );
-        assert_eq!(
-            executable_candidates(Path::new(r"C:\bin"), "ffmpeg.exe"),
-            vec![PathBuf::from(r"C:\bin\ffmpeg.exe")],
-            "an explicit extension is used as-is"
-        );
-    }
 
     #[tokio::test]
     async fn ffmpeg_version_parses_release_and_git_strings() {

@@ -1,6 +1,6 @@
 //! Plugin system (archived architecture §9, AUD-68; discovery revised in
 //! AUD-163): discovery of `audible-<name>` executables (Tier A) and
-//! `cmd_<name>.py` scripts (Tier B, run with `python3`) — both in the
+//! `cmd_<name>.py` scripts (Tier B, run with a Python 3 interpreter) — both in the
 //! dedicated plugin dir only, installed via `plugin add` — the
 //! `--audible-describe` manifest protocol, and external invocation with
 //! verbatim argv pass-through. **No command override**: a plugin whose
@@ -38,7 +38,7 @@ const DESCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub enum Tier {
     /// `audible-<name>` executable in the plugin dir.
     Executable,
-    /// `cmd_<name>.py` in the plugin dir, run via `python3`.
+    /// `cmd_<name>.py` in the plugin dir, run via a Python 3 interpreter.
     Python,
 }
 
@@ -214,11 +214,11 @@ pub async fn install(
              audible-<name> (executable) or cmd_<name>.py (python)"
         ),
     };
-    if tier == Tier::Executable && !is_executable(&source) {
+    if tier == Tier::Executable && !crate::fsutil::is_executable(&source) {
         bail!("{} is not executable (chmod +x it first)", source.display());
     }
     if tier == Tier::Python && python3().is_none() {
-        bail!("cmd_<name>.py plugins need python3 on PATH");
+        bail!("cmd_<name>.py plugins need a Python 3 interpreter (python3/python) on PATH");
     }
     if builtins.iter().any(|builtin| builtin == &name) {
         bail!("{name:?} collides with a built-in command (plugins cannot override built-ins)");
@@ -285,7 +285,7 @@ pub(crate) fn classify_file_name(file_name: &str) -> Option<(String, Tier)> {
 
 /// A Tier-A candidate; broken when the exec bit is missing.
 fn tier_a(name: &str, path: PathBuf) -> Discovered {
-    let broken = if is_executable(&path) {
+    let broken = if crate::fsutil::is_executable(&path) {
         None
     } else {
         Some("not executable".to_owned())
@@ -310,23 +310,19 @@ fn read_dir_sorted(dir: &Path) -> Vec<std::fs::DirEntry> {
     entries
 }
 
-#[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
-    path.is_file()
-}
-
-/// First `python3` on `PATH` (Tier B interpreter).
+/// The Python 3 interpreter for Tier-B plugins, or `None`: `python3` first
+/// on every platform, then `python` and the `py` launcher on Windows, where
+/// the interpreter is usually `python.exe`. Uses the shared PATHEXT-aware
+/// lookup (audit 2026-07-20, AUD-281 — the old bare-`python3` join never
+/// matched `python.exe`, so every Tier-B plugin was dead on Windows).
 fn python3() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join("python3"))
-        .find(|candidate| is_executable(candidate))
+    #[cfg(windows)]
+    const CANDIDATES: &[&str] = &["python3", "python", "py"];
+    #[cfg(not(windows))]
+    const CANDIDATES: &[&str] = &["python3"];
+    CANDIDATES
+        .iter()
+        .find_map(|name| crate::fsutil::which(name))
 }
 
 /// Runs `--audible-describe` and parses the manifest. Errors are plain
@@ -489,7 +485,7 @@ fn base_command(plugin: &Discovered) -> Result<tokio::process::Command> {
     Ok(match plugin.tier {
         Tier::Executable => tokio::process::Command::new(&plugin.source),
         Tier::Python => {
-            let python = python3().context("python3 is no longer on PATH")?;
+            let python = python3().context("no Python 3 interpreter (python3/python) on PATH")?;
             let mut command = tokio::process::Command::new(python);
             command.arg(&plugin.source);
             command
