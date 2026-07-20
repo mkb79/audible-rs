@@ -26,15 +26,15 @@ Rust crate. It installs one binary, `audible`.
   its source, deregister.
 - **Library** — sync your library into a local SQLite database (full and
   delta), list, full-text search, export (JSON/CSV), review the change
-  log, browse series and podcasts.
+  log, browse series, podcasts and episodes.
 - **Download** — owned titles as `aaxc` with resume, plus chapters,
   cover and PDF; optional lossless decrypt to a playable `m4b`.
 - **Collections** — wishlist and archive (list, add, remove).
 - **Raw API** — send authenticated requests to the Audible API for
   anything the higher-level commands don't cover.
-- **Plugins & agent** — a capability-scoped plugin system (Unix and
-  Windows) and a resident session agent for backend/web-frontend use
-  *(the session agent is Unix only for now)*.
+- **Plugins & agent** — a capability-scoped plugin system and a resident
+  session agent for backend/web-frontend use *(plugins run everywhere; the
+  agent is Unix-only for now)*.
 
 ## Install
 
@@ -162,7 +162,8 @@ cargo build --release   # binary at target/release/audible
 audible setup                 # 1. one-time interactive defaults
 audible account login -m de   # 2. register an account (pick your marketplace)
 audible library sync          # 3. pull your library into the local database
-audible library list          #    …then work with it
+audible library list          # 4. browse, search and export it
+audible download --missing    # 5. download owned titles (add --decrypt for m4b)
 ```
 
 1. **`audible setup`** — run once after installing; it configures
@@ -176,6 +177,11 @@ audible library list          #    …then work with it
    `search`, `download --missing`, `series`, `library episodes` etc. return
    anything. Run it again whenever your library changes (new purchases,
    returns); it does an incremental delta sync when it can.
+4. **Work with it** — `library list`/`search`/`export` read from the
+   database, and **`audible download`** fetches owned titles (`--missing`
+   for everything you don't have yet, or a specific ASIN); add `--decrypt`
+   for a playable `m4b` (needs ffmpeg or aaxclean-cli — see [Optional
+   tools](#optional-tools-for-download---decrypt)).
 
 Most commands accept `-o table|json|plain` to choose the output format,
 and global selectors `-a/--account`, `-m/--marketplace`,
@@ -188,8 +194,9 @@ With `-o json`, every command prints exactly one envelope
 with `error`), `warnings` lists machine-readable `{code, message}`
 notes (e.g. titles a sweep skipped) and `error` is set when the run
 fails — exit codes are unchanged. Commands whose stdout is a raw
-artifact stay unwrapped: `completions`, `library export --csv` and the
-`api` wire-debug flags (`--dry-run`, `--include`, `--output-file`).
+artifact stay unwrapped: `completions`, `library export --csv`, the
+`api` wire-debug flags (`--dry-run`, `--include`, `--output-file`),
+`account cookies refresh --show-response`, and external plugins.
 
 ## Shell completions
 
