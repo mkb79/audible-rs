@@ -133,30 +133,28 @@ fn discover_in(plugin_dir: &Path, builtins: &[String], python: Option<PathBuf>) 
         if !dangling && !path.is_file() {
             continue;
         }
-        if let Some(name) = file_name.strip_prefix("audible-") {
-            if dangling {
-                push(broken_symlink(name, path, Tier::Executable));
-            } else {
-                push(tier_a(name, path));
-            }
-        } else if let Some(name) = file_name
-            .strip_prefix("cmd_")
-            .and_then(|rest| rest.strip_suffix(".py"))
-        {
-            if dangling {
-                push(broken_symlink(name, path, Tier::Python));
-            } else {
-                match &python {
-                    Some(_) => push(Discovered {
-                        name: name.to_owned(),
-                        tier: Tier::Python,
-                        source: path,
-                        broken: None,
-                    }),
-                    // Per the spec: no python3 → Tier B is silently skipped.
-                    None => tracing::debug!(source = %path.display(), "no python3; skipping"),
-                }
-            }
+        // One name-derivation home (AUD-282): discovery and `plugin add`
+        // both classify through `classify_file_name`, so a Windows
+        // `audible-foo.exe` yields the same command `foo` on both paths.
+        let Some((name, tier)) = classify_file_name(&file_name) else {
+            continue;
+        };
+        if dangling {
+            push(broken_symlink(&name, path, tier));
+            continue;
+        }
+        match tier {
+            Tier::Executable => push(tier_a(&name, path)),
+            Tier::Python => match &python {
+                Some(_) => push(Discovered {
+                    name,
+                    tier: Tier::Python,
+                    source: path,
+                    broken: None,
+                }),
+                // Per the spec: no python3 → Tier B is silently skipped.
+                None => tracing::debug!(source = %path.display(), "no python3; skipping"),
+            },
         }
     }
 
@@ -271,15 +269,40 @@ pub async fn install(
 }
 
 /// Classifies a would-be plugin file by its name: `audible-<name>`
-/// (Tier A) or `cmd_<name>.py` (Tier B); `None` for anything else.
+/// (Tier A) or `cmd_<name>.py` (Tier B); `None` for anything else. On
+/// Windows a native Tier-A plugin carries an executable extension, so
+/// `audible-foo.exe` classifies as the command `foo` (AUD-282).
 pub(crate) fn classify_file_name(file_name: &str) -> Option<(String, Tier)> {
     if let Some(name) = file_name.strip_prefix("audible-") {
-        return Some((name.to_owned(), Tier::Executable));
+        return Some((strip_exe_suffix(name), Tier::Executable));
     }
     file_name
         .strip_prefix("cmd_")
         .and_then(|rest| rest.strip_suffix(".py"))
         .map(|name| (name.to_owned(), Tier::Python))
+}
+
+/// Drops a trailing `PATHEXT` executable extension from a Tier-A command
+/// name on Windows, so `audible-foo.exe` dispatches as `audible foo`; the
+/// installed file keeps its extension. On Unix the name is used verbatim.
+#[cfg(windows)]
+fn strip_exe_suffix(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned());
+    for ext in pathext.split(';').filter(|ext| !ext.is_empty()) {
+        let ext = ext.to_ascii_lowercase();
+        if lower.len() > ext.len() && lower.ends_with(&ext) {
+            // `ext` is ASCII, so the matched suffix is that many bytes in
+            // `name` too and the split lands on a char boundary.
+            return name[..name.len() - ext.len()].to_owned();
+        }
+    }
+    name.to_owned()
+}
+
+#[cfg(not(windows))]
+fn strip_exe_suffix(name: &str) -> String {
+    name.to_owned()
 }
 
 /// A Tier-A candidate; broken when the exec bit is missing.
@@ -504,6 +527,43 @@ pub async fn run_external(
         return Ok(None);
     };
     invoke(ctx, plugin, builtins, args).await.map(Some)
+}
+
+// Name classification is platform-dependent (the Windows `.exe` trim), so
+// it runs on both — unlike the exec-bit/symlink mechanics below.
+#[cfg(test)]
+mod classify_tests {
+    use super::{Tier, classify_file_name};
+
+    #[test]
+    fn classifies_names_and_tiers() {
+        assert_eq!(
+            classify_file_name("cmd_stats.py"),
+            Some(("stats".to_owned(), Tier::Python))
+        );
+        assert_eq!(
+            classify_file_name("audible-foo"),
+            Some(("foo".to_owned(), Tier::Executable))
+        );
+        assert_eq!(classify_file_name("notaplugin"), None);
+    }
+
+    /// A native Tier-A plugin carries an executable extension on Windows; the
+    /// command name must drop it so `audible foo` dispatches. On Unix the
+    /// extension stays part of the name (unchanged behaviour).
+    #[test]
+    fn tier_a_drops_the_windows_executable_extension() {
+        #[cfg(windows)]
+        assert_eq!(
+            classify_file_name("audible-foo.exe"),
+            Some(("foo".to_owned(), Tier::Executable))
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            classify_file_name("audible-foo.exe"),
+            Some(("foo.exe".to_owned(), Tier::Executable))
+        );
+    }
 }
 
 // These tests exercise Unix-only plugin mechanics (executable bit,
