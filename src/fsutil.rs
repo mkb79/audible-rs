@@ -145,9 +145,98 @@ pub(crate) fn write_lock(path: &Path) -> std::io::Result<fd_lock::RwLock<std::fs
     Ok(fd_lock::RwLock::new(file))
 }
 
+/// True if `path` is a regular file that can be executed: the owner has an
+/// exec bit on Unix, any regular file on Windows (executability there is
+/// decided by extension, applied during the PATH search — see [`which`]).
+///
+/// One home (audit 2026-07-20, AUD-281): `commands/download/decrypt` and
+/// `plugins` each carried a copy, and the `plugins` one omitted the
+/// `is_file` guard, so a directory with an exec bit read as executable.
+pub(crate) fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path)
+            .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+/// The first executable named `name` on `PATH`, or `None`. On Windows each
+/// `PATH` entry is expanded across `PATHEXT`, so a bare `ffmpeg` finds
+/// `ffmpeg.exe`; a `name` that already carries an extension is used
+/// verbatim. Shared by the decrypt-tool and plugin-interpreter lookups
+/// (audit 2026-07-20, AUD-281).
+pub(crate) fn which(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .flat_map(|dir| executable_candidates(&dir, name))
+        .find(|candidate| is_executable(candidate))
+}
+
+/// The filenames to try for `name` in one `PATH` directory. On Unix a
+/// program is its bare name; on Windows an executable carries an extension,
+/// so a bare `ffmpeg` never matches `ffmpeg.exe` — try each `PATHEXT`
+/// extension (unless the caller already gave one).
+#[cfg(not(windows))]
+fn executable_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
+    vec![dir.join(name)]
+}
+
+#[cfg(windows)]
+fn executable_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
+    if Path::new(name).extension().is_some() {
+        return vec![dir.join(name)];
+    }
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned());
+    pathext
+        .split(';')
+        .filter(|ext| !ext.is_empty())
+        .map(|ext| dir.join(format!("{name}{ext}")))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On Unix a tool is looked up by its bare name.
+    #[cfg(not(windows))]
+    #[test]
+    fn candidates_are_the_bare_name_on_unix() {
+        assert_eq!(
+            executable_candidates(Path::new("/usr/bin"), "ffmpeg"),
+            vec![PathBuf::from("/usr/bin/ffmpeg")]
+        );
+    }
+
+    /// On Windows the PATH search must try the executable extensions, so a
+    /// bare `ffmpeg` finds `ffmpeg.exe`. A name that already has an extension
+    /// is used verbatim.
+    #[cfg(windows)]
+    #[test]
+    fn candidates_apply_pathext_on_windows() {
+        let cands = executable_candidates(Path::new(r"C:\bin"), "ffmpeg");
+        assert!(
+            cands
+                .iter()
+                .any(|c| c.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))),
+            "{cands:?} should include an .exe candidate"
+        );
+        assert!(
+            cands.iter().all(|c| c.starts_with(r"C:\bin")),
+            "candidates stay in the given dir"
+        );
+        assert_eq!(
+            executable_candidates(Path::new(r"C:\bin"), "ffmpeg.exe"),
+            vec![PathBuf::from(r"C:\bin\ffmpeg.exe")],
+            "an explicit extension is used as-is"
+        );
+    }
 
     #[test]
     fn persist_is_atomic_unique_and_syncs() {
