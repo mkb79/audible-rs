@@ -172,6 +172,11 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+    /// Serializes the subprocess-spawning tests, so a parallel `cargo test`
+    /// fork storm can't starve the runtime and trip the 5 s describe timeout
+    /// (AUD-172). Same guard the discovery tests use.
+    static PROBE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[cfg(unix)]
     async fn http(socket: &std::path::Path, request: &str) -> String {
         let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
@@ -229,12 +234,10 @@ mod tests {
         test_broker_with(scopes, None).await
     }
 
-    async fn test_broker_with(
-        scopes: &[&str],
-        invoke_exe: Option<PathBuf>,
-    ) -> (Broker, tempfile::TempDir) {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("cfg");
+    /// A minimal isolated `Ctx` for the broker tests: one account `smoke`,
+    /// an on-disk config under `tmp`, and a tmp `[session] socket_dir`.
+    fn test_config(tmp: &std::path::Path) -> Arc<Ctx> {
+        let config_dir = tmp.join("cfg");
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
             config_dir.join("config.toml"),
@@ -243,12 +246,20 @@ mod tests {
                  [accounts.smoke]\nauth_file = \"smoke.auth\"\n\
                  marketplaces = [\"de\", \"us\"]\ndefault_marketplaces = [\"de\"]\n\n\
                  [session]\nsocket_dir = {:?}\n",
-                tmp.path().join("run")
+                tmp.join("run")
             ),
         )
         .unwrap();
-        std::fs::create_dir_all(tmp.path().join("run")).unwrap();
-        let ctx = Arc::new(Ctx::with_dir(config_dir, Default::default()).unwrap());
+        std::fs::create_dir_all(tmp.join("run")).unwrap();
+        Arc::new(Ctx::with_dir(config_dir, Default::default()).unwrap())
+    }
+
+    async fn test_broker_with(
+        scopes: &[&str],
+        invoke_exe: Option<PathBuf>,
+    ) -> (Broker, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_config(tmp.path());
         let scopes: Vec<String> = scopes.iter().map(|scope| (*scope).to_owned()).collect();
         let broker = match invoke_exe {
             Some(exe) => Broker::start_with_exe(ctx, scopes, vec!["library".to_owned()], exe)
@@ -370,13 +381,18 @@ mod tests {
         broker.shutdown().await;
     }
 
-    /// The Python SDK (AUD-70) speaks the protocol end-to-end.
+    /// The Python SDK (AUD-70) speaks the protocol end-to-end — over the
+    /// unix socket on Unix and the named pipe on Windows (the SDK picks the
+    /// transport by `os.name`). Runs the interpreter **resolved by
+    /// `python3()`** (AUD-281), not a literal `python3`, so it exercises the
+    /// SDK on both CI runners instead of silently skipping on Windows.
     #[tokio::test]
     async fn python_sdk_speaks_the_broker_protocol() {
-        if super::super::python3().is_none() {
-            eprintln!("skipping: no python3 on PATH");
+        let Some(python) = super::super::python3() else {
+            eprintln!("skipping: no Python 3 interpreter on PATH");
             return;
-        }
+        };
+        let _guard = PROBE_LOCK.lock().await;
         let (broker, _tmp) = test_broker(&["config"]).await;
         let script = r#"
 from audible_plugin_sdk import Broker, BrokerError
@@ -392,7 +408,7 @@ except BrokerError as error:
     assert error.status == 403, error.status
 print("ok")
 "#;
-        let output = tokio::process::Command::new("python3")
+        let output = tokio::process::Command::new(&python)
             .arg("-c")
             .arg(script)
             .env("AUDIBLE_SOCKET", &broker.socket_path)
@@ -411,5 +427,66 @@ print("ok")
         );
         assert!(String::from_utf8_lossy(&output.stdout).contains("ok"));
         broker.shutdown().await;
+    }
+
+    /// Full cross-platform lifecycle: discover a scoped Tier-B plugin, then
+    /// `invoke` it through the broker (unix socket on Unix, named pipe on
+    /// Windows) with the SDK doing a real `/v1` round-trip. The SDK is copied
+    /// next to the plugin so it imports via the script dir (`sys.path[0]`) —
+    /// no global `PYTHONPATH`, safe under parallel `cargo test`. Exit 0 means
+    /// discovery, the platform transport and the SDK all worked end-to-end.
+    #[tokio::test]
+    async fn plugin_lifecycle_discover_and_invoke() {
+        let Some(python) = super::super::python3() else {
+            eprintln!("skipping: no Python 3 interpreter on PATH");
+            return;
+        };
+        let _guard = PROBE_LOCK.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_config(tmp.path());
+
+        // A scoped Tier-B plugin with the SDK package beside it, so it is
+        // importable via the script's own directory (no PYTHONPATH needed).
+        let plugin_dir = tmp.path().join("plugins");
+        let sdk_pkg = plugin_dir.join("audible_plugin_sdk");
+        std::fs::create_dir_all(&sdk_pkg).unwrap();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/sdk/python/audible_plugin_sdk/__init__.py"
+            ),
+            sdk_pkg.join("__init__.py"),
+        )
+        .unwrap();
+        std::fs::write(
+            plugin_dir.join("cmd_smoke.py"),
+            r#"
+from audible_plugin_sdk import Broker, run
+MANIFEST = {"name": "smoke", "version": "1.0", "description": "e2e", "scopes": ["config"]}
+def main(argv):
+    accounts = Broker().accounts()
+    assert any(a["name"] == "smoke" for a in accounts), accounts
+    return 0
+if __name__ == "__main__":
+    raise SystemExit(run(MANIFEST, main))
+"#,
+        )
+        .unwrap();
+
+        // Discovery classifies the plugin the same way on both platforms.
+        let discovered = super::super::discover_in(&plugin_dir, &[], Some(python));
+        let plugin = discovered
+            .iter()
+            .find(|plugin| plugin.name == "smoke")
+            .expect("the smoke plugin is discovered");
+        assert_eq!(plugin.tier, super::super::Tier::Python);
+        assert!(plugin.broken.is_none(), "{:?}", plugin.broken);
+
+        // Invoke runs describe + the plugin through the broker; exit 0 means
+        // the SDK reached `/v1/accounts` over the platform transport.
+        let code = super::super::invoke(&ctx, plugin, &[], &[])
+            .await
+            .expect("invoke runs the plugin");
+        assert_eq!(code, 0, "the plugin should succeed end-to-end");
     }
 }
