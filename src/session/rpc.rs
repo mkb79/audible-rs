@@ -198,8 +198,9 @@ pub trait Backend: Send + Sync + 'static {
     /// the manifest scopes, no binding. Agent: admin token or app-token
     /// store.
     ///
-    /// `trusted` is the transport: `true` over the local unix socket,
-    /// `false` over the opt-in TCP listener. The bootstrap **admin token
+    /// `trusted` is the transport: `true` over the local unix socket (or
+    /// Windows named pipe), `false` over the opt-in TCP listener. The
+    /// bootstrap **admin token
     /// authenticates only over a trusted transport** (audit 2026-07-17,
     /// B3) — over TCP only scoped app tokens are accepted, so a leaked
     /// admin token is not a network-usable super-credential.
@@ -320,8 +321,9 @@ pub trait Backend: Send + Sync + 'static {
 type BoxedBody = Full<Bytes>;
 
 /// Serves `/v1` on an accepted stream until the peer closes it. `trusted`
-/// = the connection came in over the local unix socket; untrusted (TCP)
-/// connections cannot use the admin endpoints (AUD-119).
+/// = the connection came in over the local unix socket or Windows named
+/// pipe; untrusted (TCP) connections cannot use the admin endpoints
+/// (AUD-119).
 pub async fn serve_connection<I>(io: I, backend: Arc<dyn Backend>, trusted: bool)
 where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + 'static,
@@ -350,6 +352,51 @@ pub async fn serve_unix(listener: tokio::net::UnixListener, backend: Arc<dyn Bac
             }
             Err(error) => tracing::debug!(%error, "rpc accept failed"),
         }
+    }
+}
+
+/// Accept loop over a Windows named pipe (trusted); runs until aborted.
+/// The pipe's owner-only security descriptor ([`crate::session::winpipe`])
+/// is the analogue of the Unix 0700 socket dir, so accepted connections are
+/// `trusted` with the same honesty as [`serve_unix`]. `first` is the initial
+/// instance the broker created **synchronously** before spawning this loop
+/// (so the pipe exists the moment `Broker::start` returns); a fresh instance
+/// is armed before each connected one is served, so a client never finds the
+/// pipe absent between requests.
+#[cfg(windows)]
+pub async fn serve_pipe(
+    listener: crate::session::winpipe::PipeListener,
+    first: tokio::net::windows::named_pipe::NamedPipeServer,
+    backend: Arc<dyn Backend>,
+) {
+    let mut next = first;
+    loop {
+        let connected = match next.connect().await {
+            Ok(()) => next,
+            Err(error) => {
+                tracing::debug!(%error, "rpc pipe connect failed");
+                next = match listener.create(false) {
+                    Ok(server) => server,
+                    Err(error) => {
+                        tracing::debug!(%error, "rpc pipe re-arm failed");
+                        return;
+                    }
+                };
+                continue;
+            }
+        };
+        // Re-arm before serving, so the next client always finds an instance.
+        next = match listener.create(false) {
+            Ok(server) => server,
+            Err(error) => {
+                tracing::debug!(%error, "rpc pipe re-arm failed");
+                // Still serve the client we already accepted before giving up.
+                serve_connection(TokioIo::new(connected), Arc::clone(&backend), true).await;
+                return;
+            }
+        };
+        let backend = Arc::clone(&backend);
+        tokio::spawn(async move { serve_connection(TokioIo::new(connected), backend, true).await });
     }
 }
 
@@ -423,8 +470,10 @@ async fn route(
         backend.audit(caller, method.as_str(), &path, status.as_u16(), detail);
     };
 
-    // Admin surface (`/v1/agent/*`): local (unix socket) only, gated by
-    // the admin token. Never reachable over TCP (AUD-119).
+    // Admin surface (`/v1/agent/*`): trusted transport only (unix socket or
+    // named pipe), gated by the admin token — and only the agent issues
+    // those, so the ephemeral broker's trusted pipe still reaches nothing
+    // here. Never reachable over TCP (AUD-119).
     if let Some(rest) = path.strip_prefix("/v1/agent/") {
         if !trusted {
             let response = reply(

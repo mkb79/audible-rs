@@ -10,7 +10,6 @@
 //! RPC/scopes enforcement is AUD-69; until then a plugin simply gets no
 //! RPC access.
 
-#[cfg(unix)]
 pub mod broker;
 
 use std::path::{Path, PathBuf};
@@ -388,7 +387,7 @@ async fn describe_with_timeout(
 /// unusable plugin (broken, invalid manifest, bad scopes) never
 /// executes. Manifest scopes ≥ 1 spin up the ephemeral broker (AUD-69):
 /// the plugin gets `AUDIBLE_SOCKET`/`AUDIBLE_BROKER_TOKEN` and the
-/// socket lives exactly as long as the child.
+/// transport lives exactly as long as the child.
 pub async fn invoke(
     ctx: &Arc<Ctx>,
     plugin: &Discovered,
@@ -403,40 +402,26 @@ pub async fn invoke(
             plugin.source.display()
         ),
     };
-    // The ephemeral broker uses a UDS transport and is Unix-only for now
-    // (AUD-193). On Unix it lives exactly as long as the child; on Windows a
-    // plugin that requests broker scopes is refused cleanly.
-    #[cfg(unix)]
-    let (broker, envs) = {
-        let broker = if manifest.scopes.is_empty() {
-            None
-        } else {
-            Some(broker::Broker::start(Arc::clone(ctx), manifest.scopes, builtins.to_vec()).await?)
-        };
-        let mut envs: Vec<(String, String)> = Vec::new();
-        if let Some(broker) = &broker {
-            envs.push((
-                "AUDIBLE_SOCKET".to_owned(),
-                broker.socket_path.display().to_string(),
-            ));
-            envs.push(("AUDIBLE_BROKER_TOKEN".to_owned(), broker.token.clone()));
-        }
-        (broker, envs)
+    // The ephemeral broker serves the plugin over a private local transport
+    // for exactly the child's lifetime: a unix socket in a 0700 dir on Unix,
+    // a named pipe with an owner-only descriptor on Windows (AUD-280). A
+    // plugin that requests no scopes gets no broker.
+    let broker = if manifest.scopes.is_empty() {
+        None
+    } else {
+        Some(broker::Broker::start(Arc::clone(ctx), manifest.scopes, builtins.to_vec()).await?)
     };
-    #[cfg(not(unix))]
-    let envs: Vec<(String, String)> = {
-        let _ = (ctx, builtins);
-        if !manifest.scopes.is_empty() {
-            anyhow::bail!(
-                "plugins that request broker scopes are not supported on Windows yet (see AUD-193)"
-            );
-        }
-        Vec::new()
-    };
+    let mut envs: Vec<(String, String)> = Vec::new();
+    if let Some(broker) = &broker {
+        envs.push((
+            "AUDIBLE_SOCKET".to_owned(),
+            broker.socket_path.display().to_string(),
+        ));
+        envs.push(("AUDIBLE_BROKER_TOKEN".to_owned(), broker.token.clone()));
+    }
 
     let result = run(plugin, args, &envs).await;
 
-    #[cfg(unix)]
     if let Some(broker) = broker {
         broker.shutdown().await;
     }
@@ -525,8 +510,10 @@ pub async fn run_external(
     invoke(ctx, plugin, builtins, args).await.map(Some)
 }
 
-// Plugin tests exercise Unix-only mechanics (executable bit, symlinks, the
-// UDS broker), so they run on Unix; the Windows plugin port is AUD-193.
+// These tests exercise Unix-only plugin mechanics (executable bit,
+// symlinks, `#!/bin/sh` stubs), so they run on Unix. The broker's Windows
+// named-pipe transport (scoped plugins on Windows, AUD-280) is covered in
+// `broker.rs`, whose round-trip test builds on both platforms.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

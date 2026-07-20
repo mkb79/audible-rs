@@ -105,6 +105,18 @@ mimalloc = "0.1"
 # order correctly (alpha.2 < alpha.10), which string comparison gets wrong.
 semver = "1.0"
 
+# Windows named-pipe transport for the ephemeral plugin broker (AUD-280): the
+# owner-SID security descriptor that replaces the Unix 0700 socket dir, so
+# `serve_pipe` can be `trusted` with the same honesty as `serve_unix`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }
+
 # Build-time only (Widevine proto codegen, pure Rust — no protoc needed).
 # Not linked into the release binary.
 [build-dependencies]

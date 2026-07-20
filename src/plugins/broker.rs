@@ -1,10 +1,12 @@
 //! Ephemeral plugin broker (AUD-69): the short-lived half of the broker
-//! component (decision #7). Binds a private unix socket for the duration
-//! of one plugin invocation and serves the shared `/v1` router
+//! component (decision #7). Binds a private local transport for the
+//! duration of one plugin invocation and serves the shared `/v1` router
 //! ([`crate::session::rpc`]) with a fixed identity — the invoking `Ctx`,
 //! already unlocked because the user just ran the command. The manifest
-//! scopes are the single token's grant. Socket + dir are removed when the
-//! plugin exits; the token is never logged.
+//! scopes are the single token's grant. The transport is owner-restricted
+//! and torn down when the plugin exits; the token is never logged. On Unix
+//! it is a unix socket in a 0700 directory; on Windows a named pipe with an
+//! owner-only security descriptor (AUD-280) — both are `trusted`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,13 +16,16 @@ use anyhow::{Context as _, Result};
 use crate::config::ctx::Ctx;
 use crate::session::rpc::{self, Auth, Backend};
 
-/// A running broker: socket + token handed to exactly one plugin.
+/// A running broker: transport address + token handed to exactly one plugin.
 pub struct Broker {
-    /// Socket path, exported as `AUDIBLE_SOCKET`.
+    /// Transport address, exported as `AUDIBLE_SOCKET`: a socket path on
+    /// Unix, a `\\.\pipe\…` name on Windows.
     pub socket_path: PathBuf,
     /// Per-invocation bearer token, exported as `AUDIBLE_BROKER_TOKEN`.
     pub token: String,
-    /// Private 0700 directory holding the socket; removed on shutdown.
+    /// Private 0700 directory holding the unix socket; removed on shutdown.
+    /// (Windows named pipes have no filesystem entry.)
+    #[cfg(unix)]
     dir: PathBuf,
     accept_task: tokio::task::JoinHandle<()>,
 }
@@ -44,15 +49,38 @@ impl Broker {
         builtins: Vec<String>,
         invoke_exe: PathBuf,
     ) -> Result<Self> {
-        let dir = crate::session::runtime_dir(&ctx).join(format!(
-            "audible-broker-{}",
-            hex::encode(rand::random::<[u8; 8]>())
-        ));
-        crate::session::create_private_dir(&dir)?;
-        let socket_path = dir.join("broker.sock");
-        let listener = tokio::net::UnixListener::bind(&socket_path)
-            .with_context(|| format!("could not bind {}", socket_path.display()))?;
         let token = hex::encode(rand::random::<[u8; 32]>());
+        // The transport differs per platform; the backend identity does not.
+        // A unix socket in a fresh 0700 dir, or a named pipe whose owner-only
+        // descriptor is that dir's analogue (AUD-280).
+        #[cfg(unix)]
+        let (socket_path, dir, listener) = {
+            let dir = crate::session::runtime_dir(&ctx).join(format!(
+                "audible-broker-{}",
+                hex::encode(rand::random::<[u8; 8]>())
+            ));
+            crate::session::create_private_dir(&dir)?;
+            let socket_path = dir.join("broker.sock");
+            let listener = tokio::net::UnixListener::bind(&socket_path)
+                .with_context(|| format!("could not bind {}", socket_path.display()))?;
+            (socket_path, dir, listener)
+        };
+        #[cfg(windows)]
+        let (socket_path, listener, first) = {
+            let name = format!(
+                r"\\.\pipe\audible-broker-{}",
+                hex::encode(rand::random::<[u8; 8]>())
+            );
+            let listener = crate::session::winpipe::PipeListener::new(&name)
+                .context("could not create the broker pipe")?;
+            // Create the first instance up front, so the pipe exists the
+            // moment we return (like `UnixListener::bind` above) — otherwise a
+            // client connecting before the accept task runs gets `os error 2`.
+            let first = listener
+                .create(true)
+                .context("could not create the broker pipe")?;
+            (PathBuf::from(&name), listener, first)
+        };
 
         let backend: Arc<dyn Backend> = Arc::new(Ephemeral {
             ctx,
@@ -61,22 +89,32 @@ impl Broker {
             invoke_exe,
             builtins,
         });
+        #[cfg(unix)]
         let accept_task = tokio::spawn(rpc::serve_unix(listener, backend));
+        #[cfg(windows)]
+        let accept_task = tokio::spawn(rpc::serve_pipe(listener, first, backend));
 
         Ok(Self {
             socket_path,
             token,
+            #[cfg(unix)]
             dir,
             accept_task,
         })
     }
 
-    /// Stops serving and removes socket and directory.
+    /// Stops serving and tears down the transport. On Unix that removes the
+    /// socket and its directory; a Windows named pipe has no filesystem
+    /// entry, so aborting the accept task (dropping the last server
+    /// instance) is enough.
     pub async fn shutdown(self) {
         self.accept_task.abort();
         let _ = self.accept_task.await;
-        let _ = std::fs::remove_file(&self.socket_path);
-        let _ = std::fs::remove_dir(&self.dir);
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(&self.socket_path);
+            let _ = std::fs::remove_dir(&self.dir);
+        }
     }
 }
 
@@ -93,8 +131,9 @@ struct Ephemeral {
 #[async_trait::async_trait]
 impl Backend for Ephemeral {
     fn authenticate(&self, token: &str, _trusted: bool) -> Option<Auth> {
-        // The ephemeral broker is UDS-only (always trusted); its single
-        // per-invocation token has no admin/network distinction.
+        // The broker's transport is local and owner-restricted (always
+        // trusted); its single per-invocation token has no admin/network
+        // distinction.
         (token == self.token).then(|| Auth {
             scopes: self.scopes.clone(),
             account: None,
@@ -133,11 +172,39 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+    #[cfg(unix)]
     async fn http(socket: &std::path::Path, request: &str) -> String {
         let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
         stream.write_all(request.as_bytes()).await.unwrap();
         let mut response = Vec::new();
         stream.read_to_end(&mut response).await.unwrap();
+        String::from_utf8_lossy(&response).into_owned()
+    }
+
+    #[cfg(windows)]
+    async fn http(pipe: &std::path::Path, request: &str) -> String {
+        use tokio::net::windows::named_pipe::ClientOptions;
+        // ERROR_FILE_NOT_FOUND (2) / ERROR_PIPE_BUSY (231) are transient while
+        // the server arms the next instance — retry briefly (bounded so a real
+        // failure fails the test instead of hanging), same as the SDK client.
+        let mut connected = None;
+        for _ in 0..200 {
+            match ClientOptions::new().open(pipe) {
+                Ok(client) => {
+                    connected = Some(client);
+                    break;
+                }
+                Err(error) if matches!(error.raw_os_error(), Some(2) | Some(231)) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("open pipe {}: {error}", pipe.display()),
+            }
+        }
+        let mut client =
+            connected.unwrap_or_else(|| panic!("pipe {} never became available", pipe.display()));
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
         String::from_utf8_lossy(&response).into_owned()
     }
 
@@ -148,6 +215,8 @@ mod tests {
         format!("{method} {path} HTTP/1.1\r\nHost: broker\r\n{auth}Connection: close\r\n\r\n")
     }
 
+    // Only the self-exec test (unix-only) posts a body.
+    #[cfg(unix)]
     fn post(path: &str, token: &str, body: &str) -> String {
         format!(
             "POST {path} HTTP/1.1\r\nHost: broker\r\nAuthorization: Bearer {token}\r\n\
@@ -241,12 +310,22 @@ mod tests {
         let response = http(&socket, &request("GET", "/v1/nope", Some(&broker.token))).await;
         assert!(response.starts_with("HTTP/1.1 404"), "{response}");
 
-        let dir = broker.dir.clone();
+        // The unix socket + its 0700 dir vanish on shutdown; a Windows named
+        // pipe has no filesystem entry to check.
+        #[cfg(unix)]
+        {
+            let dir = broker.dir.clone();
+            broker.shutdown().await;
+            assert!(!socket.exists());
+            assert!(!dir.exists());
+        }
+        #[cfg(windows)]
         broker.shutdown().await;
-        assert!(!socket.exists());
-        assert!(!dir.exists());
     }
 
+    // The self-exec stub is a `#!/bin/sh` script; the invoke path itself is
+    // transport-agnostic, so covering it on Unix is enough.
+    #[cfg(unix)]
     #[tokio::test]
     async fn invoke_endpoint_runs_builtins_via_self_exec() {
         let tmp = tempfile::tempdir().unwrap();

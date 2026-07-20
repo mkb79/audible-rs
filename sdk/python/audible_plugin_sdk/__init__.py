@@ -1,8 +1,9 @@
 """SDK for audible-rs plugins (AUD-70) — stdlib only.
 
-Speaks the broker protocol of AUD-69: HTTP/1.1 over the unix socket the
-CLI passes in ``AUDIBLE_SOCKET``, authorized per request with the bearer
-token from ``AUDIBLE_BROKER_TOKEN``. The CLI only starts the broker for
+Speaks the broker protocol of AUD-69: HTTP/1.1 over the local transport
+the CLI passes in ``AUDIBLE_SOCKET`` — a unix socket on Unix, a named pipe
+on Windows — authorized per request with the bearer token from
+``AUDIBLE_BROKER_TOKEN``. The CLI only starts the broker for
 plugins whose manifest declares at least one scope; every call the scope
 does not cover fails with :class:`BrokerError` (HTTP 403).
 
@@ -65,6 +66,68 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
         self.sock = sock
 
 
+class _PipeSocket:
+    """Adapts a Windows named-pipe file object to the tiny socket surface
+    ``http.client`` uses: ``sendall`` to write the request, ``makefile`` to
+    read the response. Responses carry a ``Content-Length``, so the reader
+    terminates without needing the peer to close the stream."""
+
+    def __init__(self, pipe):
+        self._pipe = pipe
+
+    def sendall(self, data):
+        view = memoryview(data)
+        while view:
+            written = self._pipe.write(view)
+            if written:
+                view = view[written:]
+        self._pipe.flush()
+
+    def makefile(self, _mode="rb", *_args, **_kwargs):
+        return self._pipe
+
+    def close(self):
+        try:
+            self._pipe.close()
+        except OSError:
+            pass
+
+    def settimeout(self, _timeout):
+        pass
+
+    def setsockopt(self, *_args):
+        pass
+
+
+class _PipeHTTPConnection(http.client.HTTPConnection):
+    """`http.client` over a Windows named pipe (host is decorative)."""
+
+    def __init__(self, path):
+        super().__init__("broker")
+        self._path = path
+
+    def connect(self):
+        import time
+
+        # The broker re-arms pipe instances between connections, so opening
+        # can transiently fail with ERROR_PIPE_BUSY (231) or
+        # ERROR_FILE_NOT_FOUND (2); both are retryable.
+        last = None
+        for _ in range(100):
+            try:
+                pipe = open(self._path, "r+b", buffering=0)
+                break
+            except OSError as error:
+                if getattr(error, "winerror", None) in (2, 231):
+                    last = error
+                    time.sleep(0.02)
+                    continue
+                raise
+        else:
+            raise last if last is not None else OSError("could not open broker pipe")
+        self.sock = _PipeSocket(pipe)
+
+
 class Broker:
     """Client for the CLI's per-invocation broker socket."""
 
@@ -79,7 +142,11 @@ class Broker:
             )
 
     def _request(self, method, path, payload=None, selectors=None):
-        connection = _UnixHTTPConnection(self.socket_path)
+        connection = (
+            _PipeHTTPConnection(self.socket_path)
+            if os.name == "nt"
+            else _UnixHTTPConnection(self.socket_path)
+        )
         headers = {
             "Authorization": f"Bearer {self._token}",
             "Content-Type": "application/json",
