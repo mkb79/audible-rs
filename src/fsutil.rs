@@ -178,6 +178,23 @@ pub(crate) fn which(name: &str) -> Option<PathBuf> {
         .find(|candidate| is_executable(candidate))
 }
 
+/// Resolves an executable via an optional override value. When
+/// `override_value` is present it must be executable, else `None` — a
+/// set-but-broken override never silently falls through to a different tool
+/// (fail-closed). When absent, `fallback` runs (typically a `PATH` lookup).
+/// One home for the decrypt-tool (`AUDIBLE_FFMPEG`/`AUDIBLE_AAXCLEAN_CLI`) and
+/// plugin-interpreter (`AUDIBLE_PYTHON`) overrides (audit 2026-07-20, AUD-284).
+pub(crate) fn resolve_with_override(
+    override_value: Option<std::ffi::OsString>,
+    fallback: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(value) = override_value {
+        let path = PathBuf::from(value);
+        return is_executable(&path).then_some(path);
+    }
+    fallback()
+}
+
 /// The filenames to try for `name` in one `PATH` directory. On Unix a
 /// program is its bare name; on Windows an executable carries an extension,
 /// so a bare `ffmpeg` never matches `ffmpeg.exe` — try each `PATHEXT`
@@ -203,6 +220,40 @@ fn executable_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A present, executable override wins and the fallback never runs.
+    #[test]
+    fn override_uses_an_executable_value() {
+        let exe = std::env::current_exe().unwrap();
+        let got = resolve_with_override(Some(exe.clone().into_os_string()), || {
+            panic!("fallback must not run when the override is usable")
+        });
+        assert_eq!(got, Some(exe));
+    }
+
+    /// A present but non-executable override yields `None` — it never
+    /// silently falls through to a different tool (fail-closed).
+    #[test]
+    fn override_broken_value_does_not_fall_through() {
+        let bogus = std::ffi::OsString::from("definitely-not-an-executable-xyz");
+        let mut fallback_ran = false;
+        let got = resolve_with_override(Some(bogus), || {
+            fallback_ran = true;
+            Some(PathBuf::from("fallback"))
+        });
+        assert_eq!(got, None);
+        assert!(
+            !fallback_ran,
+            "a present override must not run the fallback"
+        );
+    }
+
+    /// An absent override runs the fallback.
+    #[test]
+    fn override_absent_runs_the_fallback() {
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(resolve_with_override(None, || Some(exe.clone())), Some(exe));
+    }
 
     /// On Unix a tool is looked up by its bare name.
     #[cfg(not(windows))]
