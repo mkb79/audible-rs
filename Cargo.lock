@@ -217,6 +217,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-normalization",
  "url",
+ "windows-sys 0.60.2",
  "wiremock",
  "zeroize",
 ]

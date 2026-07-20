@@ -32,14 +32,16 @@ Rust crate. It installs one binary, `audible`.
 - **Collections** — wishlist and archive (list, add, remove).
 - **Raw API** — send authenticated requests to the Audible API for
   anything the higher-level commands don't cover.
-- **Plugins & agent** *(Unix only for now)* — a capability-scoped plugin
-  system and a resident session agent for backend/web-frontend use.
+- **Plugins & agent** — a capability-scoped plugin system (Unix and
+  Windows) and a resident session agent for backend/web-frontend use
+  *(the session agent is Unix only for now)*.
 
 ## Install
 
 Linux, macOS (x86-64 and arm64) and Windows (x86-64) are supported. On
-Windows the core commands work natively; only the plugin and agent subsystems
-stay Unix-only — if you need those on Windows, run audible-rs under
+Windows the core commands and the plugin system work natively; only the
+resident session agent stays Unix-only — if you need it on Windows, run
+audible-rs under
 [WSL2](https://learn.microsoft.com/windows/wsl/install) (see the
 [step-by-step guide](https://github.com/mkb79/audible-rs/discussions/49)).
 

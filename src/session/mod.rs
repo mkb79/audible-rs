@@ -17,6 +17,8 @@ pub mod audit;
 pub mod client;
 pub mod rpc;
 pub mod tokens;
+#[cfg(windows)]
+pub mod winpipe;
 
 /// Base directory for agent/broker sockets: `[session].socket_dir`, else
 /// `$XDG_RUNTIME_DIR`, else the platform data dir.
