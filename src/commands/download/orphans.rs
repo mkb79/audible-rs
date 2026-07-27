@@ -12,6 +12,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use clap::{Arg, ArgAction};
@@ -208,13 +209,65 @@ fn referenced_paths(db_dirs: &[PathBuf]) -> Result<(HashSet<PathBuf>, usize)> {
     Ok((referenced, db_files.len()))
 }
 
+/// Everything the scan spends on a database someone else holds, waiting
+/// and retrying together — one budget, so the worst case stays what this
+/// says (see [`recorded_paths`]). The first pause after a refused read;
+/// it doubles from there.
+const BUSY_BUDGET: Duration = Duration::from_secs(5);
+const BUSY_BACKOFF: Duration = Duration::from_millis(50);
+
+/// The longest a single attempt lets SQLite's own busy handler wait. It
+/// keeps the retry loop — not one blocked open — in charge of the pacing,
+/// so the waiting works the same where SQLite refuses a reader outright
+/// instead of waiting (Windows) and where it does wait (Unix).
+const BUSY_SLICE: Duration = Duration::from_millis(50);
+
 /// All recorded file paths of one account database, read via a direct
 /// read-only connection — another account's database is never migrated,
 /// locked for writing, or decrypted-auth-dependent.
+///
+/// A writer closing its connection (another process finishing a `library
+/// sync`) holds the file while SQLite checkpoints the WAL and removes
+/// `-wal`/`-shm`. A reader arriving in that window is refused with
+/// `SQLITE_BUSY` — on Windows immediately, since recovering the WAL index
+/// is beyond a read-only connection and that path never runs SQLite's own
+/// busy timeout. That is a transient collision, not the partial view the
+/// caller aborts over, so it is waited out. Every other error (corrupt
+/// file, no permission) still fails on the first attempt: a real fault
+/// must not be waited on.
 fn recorded_paths(db_file: &Path) -> Result<Vec<String>> {
+    recorded_paths_within(db_file, BUSY_BUDGET)
+}
+
+/// [`recorded_paths`] with an explicit budget, so tests need not spend
+/// the real one.
+///
+/// The budget covers both ways of waiting — SQLite's own busy handler
+/// inside an attempt ([`BUSY_SLICE`] at most) and the backoff between
+/// attempts — so the whole call overruns it by no more than one slice.
+/// Once the budget is spent, the last refusal is returned and the caller
+/// aborts the scan.
+fn recorded_paths_within(db_file: &Path, budget: Duration) -> Result<Vec<String>> {
+    let deadline = std::time::Instant::now() + budget;
+    let mut backoff = BUSY_BACKOFF;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match read_records(db_file, BUSY_SLICE.min(left)) {
+            Err(error) if is_locked(&error) && !left.is_zero() => {
+                std::thread::sleep(backoff.min(left));
+                backoff *= 2;
+            }
+            result => return Ok(result?),
+        }
+    }
+}
+
+/// One read-only pass over the path-recording tables of `db_file`,
+/// letting SQLite wait `busy_timeout` for a lock it finds held.
+fn read_records(db_file: &Path, busy_timeout: Duration) -> Result<Vec<String>, rusqlite::Error> {
     let conn =
         rusqlite::Connection::open_with_flags(db_file, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.busy_timeout(busy_timeout)?;
     let mut recorded = Vec::new();
     for sql in [
         "SELECT file_path FROM downloads",
@@ -227,6 +280,15 @@ fn recorded_paths(db_file: &Path) -> Result<Vec<String>> {
         }
     }
     Ok(recorded)
+}
+
+/// Whether an error means "someone else holds the file right now" — the
+/// only kind worth retrying.
+fn is_locked(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
 }
 
 /// Inserts a path and, when it resolves, its canonical form — recorded and
@@ -399,7 +461,10 @@ mod tests {
         db.set_annotation_path("de".into(), "B0TEST".into(), annot.display().to_string())
             .await
             .unwrap();
-        drop(db);
+        // Not `drop(db)`: that returns before the connection thread has
+        // closed the file, and the read-only reopen below would race the
+        // checkpoint (AUD-307).
+        db.close().await.unwrap();
 
         let db_dirs = vec![db_dir];
         let (referenced, databases) = referenced_paths(&db_dirs).unwrap();
@@ -436,5 +501,97 @@ mod tests {
 
         let error = referenced_paths(&[db_dir]).unwrap_err();
         assert!(error.to_string().contains("partial view"), "{error:#}");
+    }
+
+    /// Seeds one account database with a single download record and lets
+    /// go of it properly. Returns the tempdir (keep it alive) and the path.
+    async fn seeded_db() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join(account_file_name("amzn1.account.TEST"));
+        let db = Db::open(db_path.clone(), 100).await.unwrap();
+        db.record_download(
+            "de".into(),
+            DownloadRecord {
+                asin: "B0TEST".into(),
+                kind: "audio".into(),
+                acr: None,
+                content_format: "AAX_44_128".into(),
+                variant: "original".into(),
+                request_kind: String::new(),
+                version: None,
+                sku: None,
+                file_path: tmp.path().join("Book.aaxc").display().to_string(),
+                file_size: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+        (tmp, db_path)
+    }
+
+    /// Holds a database the way another process does: an exclusive-locking
+    /// connection refuses every reader until it is dropped.
+    fn hold_exclusively(db_file: &Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(db_file).unwrap();
+        conn.pragma_update(None, "locking_mode", "EXCLUSIVE")
+            .unwrap();
+        // The lock is only taken on the first write, and kept from there.
+        conn.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version = 1; COMMIT;")
+            .unwrap();
+        conn
+    }
+
+    /// A database someone else holds is waited out, not reported as a
+    /// partial view: the read succeeds once the lock goes away. The lock
+    /// outlives a single attempt ([`BUSY_SLICE`]) several times over, so
+    /// only the retry loop can get this green.
+    #[tokio::test]
+    async fn a_held_database_is_waited_out() {
+        let (_tmp, db_path) = seeded_db().await;
+        let holder = hold_exclusively(&db_path);
+
+        // The lock really refuses a reader (else the test proves nothing).
+        let refused = read_records(&db_path, Duration::ZERO).unwrap_err();
+        assert!(is_locked(&refused), "{refused}");
+
+        let path = db_path.clone();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(holder);
+            path
+        });
+        let recorded = recorded_paths_within(&db_path, Duration::from_secs(5)).unwrap();
+        releaser.join().unwrap();
+        assert_eq!(recorded.len(), 1);
+    }
+
+    /// A lock that outlasts the budget still aborts — waiting must not
+    /// turn into waiting forever, and a held database is never silently
+    /// read as "no records".
+    #[tokio::test]
+    async fn a_lock_outlasting_the_budget_aborts() {
+        let (_tmp, db_path) = seeded_db().await;
+        let _holder = hold_exclusively(&db_path);
+
+        let started = std::time::Instant::now();
+        let error = recorded_paths_within(&db_path, Duration::from_millis(200)).unwrap_err();
+        let waited = started.elapsed();
+
+        assert!(error.to_string().contains("locked"), "{error:#}");
+        assert!(waited < Duration::from_secs(2), "waited {waited:?}");
+    }
+
+    /// Only a lock is transient. A corrupt or unreadable database must
+    /// abort on the first attempt — retrying a real fault would stall the
+    /// scan for seconds and still abort.
+    #[test]
+    fn only_lock_errors_are_retried() {
+        let error = |code| rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
+        assert!(is_locked(&error(rusqlite::ffi::SQLITE_BUSY)));
+        assert!(is_locked(&error(rusqlite::ffi::SQLITE_LOCKED)));
+        assert!(!is_locked(&error(rusqlite::ffi::SQLITE_NOTADB)));
+        assert!(!is_locked(&error(rusqlite::ffi::SQLITE_CORRUPT)));
+        assert!(!is_locked(&rusqlite::Error::QueryReturnedNoRows));
     }
 }

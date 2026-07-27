@@ -56,6 +56,10 @@ pub enum DbError {
     /// The connection thread is gone.
     #[error("database connection thread terminated")]
     Closed,
+    /// [`Db::close`] was called while other handles to the same database
+    /// are still alive.
+    #[error("the database is still open elsewhere")]
+    StillShared,
     /// The database was initialized with different response groups.
     #[error(
         "this database was created with response_groups {existing:?} but \
@@ -83,8 +87,17 @@ type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 /// Handle to one database file; cheap to clone.
 #[derive(Clone)]
 pub struct Db {
-    jobs: std::sync::mpsc::Sender<Job>,
+    inner: std::sync::Arc<Inner>,
     path: PathBuf,
+}
+
+/// The shared half of a [`Db`]: the job channel into the connection
+/// thread, plus the signal that thread raises once it has closed the
+/// connection. Both live behind one `Arc` so the thread stops exactly
+/// when the last handle is gone.
+struct Inner {
+    jobs: std::sync::mpsc::Sender<Job>,
+    closed: tokio::sync::oneshot::Receiver<()>,
 }
 
 impl Db {
@@ -93,6 +106,7 @@ impl Db {
     pub async fn open(path: PathBuf, busy_timeout_ms: u64) -> Result<Self, DbError> {
         let (jobs, job_receiver) = std::sync::mpsc::channel::<Job>();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (closed_tx, closed) = tokio::sync::oneshot::channel();
 
         let thread_path = path.clone();
         std::thread::Builder::new()
@@ -112,15 +126,48 @@ impl Db {
                 while let Ok(job) = job_receiver.recv() {
                     job(&mut conn);
                 }
+                // Close before signalling, and only then: closing is where
+                // SQLite checkpoints the WAL and removes `-wal`/`-shm`, so
+                // the file is only free once this returns. `Connection`'s
+                // `Drop` flushes the statement cache and calls
+                // `sqlite3_close`, both synchronous. See [`Db::close`].
+                drop(conn);
+                let _ = closed_tx.send(());
             })?;
 
         ready_rx.await.map_err(|_| DbError::Closed)??;
-        Ok(Self { jobs, path })
+        Ok(Self {
+            inner: std::sync::Arc::new(Inner { jobs, closed }),
+            path,
+        })
     }
 
     /// Path of the database file.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Closes the database and waits until the connection thread has
+    /// released the file.
+    ///
+    /// Dropping the last handle closes it too, but *asynchronously*: the
+    /// drop only closes the job channel, and the thread finishes its
+    /// close — checkpoint included — whenever it gets scheduled. Anything
+    /// that touches the same file right after (a read-only reopen, a
+    /// delete) races that window, and on Windows loses it: a reader
+    /// arriving mid-close is refused with `database is locked` outright,
+    /// because recovering the WAL index is beyond a read-only connection
+    /// and that path never runs the busy handler.
+    ///
+    /// Fails with [`DbError::StillShared`] when other handles are still
+    /// alive — the thread only stops once the last one is gone, so
+    /// waiting here would hang instead.
+    pub async fn close(self) -> Result<(), DbError> {
+        let inner = std::sync::Arc::try_unwrap(self.inner).map_err(|_| DbError::StillShared)?;
+        let Inner { jobs, closed } = inner;
+        // Ends the thread's `recv()` loop; it closes the connection next.
+        drop(jobs);
+        closed.await.map_err(|_| DbError::Closed)
     }
 
     /// Runs a closure on the connection thread and awaits its result.
@@ -130,7 +177,8 @@ impl Db {
         F: FnOnce(&mut Connection) -> Result<T, DbError> + Send + 'static,
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.jobs
+        self.inner
+            .jobs
             .send(Box::new(move |conn| {
                 let _ = tx.send(f(conn));
             }))
@@ -428,6 +476,51 @@ mod tests {
         }
         let db = Db::open(path, 5000).await.unwrap();
         db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+    }
+
+    /// `close` waits for the connection thread: once it returns, the
+    /// checkpoint has run, the WAL sidecars are gone and a read-only
+    /// connection opens at once. Dropping the handle would leave that
+    /// window open — the race `download orphans` lost on Windows
+    /// (AUD-307).
+    #[tokio::test]
+    async fn close_releases_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library_test.sqlite");
+        let db = Db::open(path.clone(), 5000).await.unwrap();
+        db.ensure_sync_state(MP.into(), "g".into()).await.unwrap();
+        db.close().await.unwrap();
+
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = PathBuf::from(format!("{}{suffix}", path.display()));
+            assert!(!sidecar.exists(), "{} survived close", sidecar.display());
+        }
+        let conn = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let states: i64 = conn
+            .query_row("SELECT count(*) FROM sync_state", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(states, 1);
+    }
+
+    /// Another handle keeps the connection thread alive, so `close` fails
+    /// instead of waiting for a thread that cannot stop yet.
+    #[tokio::test]
+    async fn close_refuses_while_another_handle_lives() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("library_test.sqlite"), 5000)
+            .await
+            .unwrap();
+        let second = db.clone();
+
+        assert!(matches!(db.close().await, Err(DbError::StillShared)));
+        second
+            .ensure_sync_state(MP.into(), "g".into())
+            .await
+            .unwrap();
     }
 
     /// The SQL predicate must classify exactly like
