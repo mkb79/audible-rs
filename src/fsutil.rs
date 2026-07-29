@@ -50,7 +50,7 @@ pub(crate) fn persist_atomically(
 /// A temp name no other writer can be using: pid + random suffix. Stale
 /// files (a crash between create and rename) are orphaned, not reused —
 /// `create_new` would refuse them, hence the random component.
-fn unique_tmp_path(path: &Path) -> PathBuf {
+pub(crate) fn unique_tmp_path(path: &Path) -> PathBuf {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     path.with_file_name(format!(
         ".{name}.tmp.{}.{}",
@@ -62,7 +62,7 @@ fn unique_tmp_path(path: &Path) -> PathBuf {
 /// Best-effort fsync of `path`'s parent directory, so the rename itself
 /// is durable. Errors are ignored: not every filesystem supports it, and
 /// the file content is already synced.
-fn sync_parent_dir(path: &Path) {
+pub(crate) fn sync_parent_dir(path: &Path) {
     #[cfg(unix)]
     if let Some(parent) = path.parent()
         && let Ok(dir) = std::fs::File::open(parent)
