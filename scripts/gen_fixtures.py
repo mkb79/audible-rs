@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
 """Generate synthetic golden-test fixtures for audible-rs.
 
 This script uses the Python reference implementation (mkb79/Audible) to
@@ -24,10 +24,16 @@ internally consistent set; signatures themselves are deterministic
 (PKCS#1 v1.5 with a fixed timestamp). Run once and commit the result.
 
 Usage:
-    python3 -m venv scripts/.venv
-    scripts/.venv/bin/pip install audible==0.10.0
-    scripts/.venv/bin/python scripts/gen_fixtures.py
+    ./scripts/gen_fixtures.py        # or: uv run scripts/gen_fixtures.py
 """
+
+# /// script
+# requires-python = ">=3.10,<3.13"
+# dependencies = [
+#     "audible==0.10.0",
+#     "rsa>=4.9",
+# ]
+# ///
 
 from __future__ import annotations
 
@@ -45,10 +51,8 @@ try:
 except ImportError as exc:
     sys.exit(
         f"missing dependency: {exc}\n"
-        "Create a venv and install the reference implementation first:\n"
-        "  python3 -m venv scripts/.venv\n"
-        "  scripts/.venv/bin/pip install audible==0.10.0\n"
-        "  scripts/.venv/bin/python scripts/gen_fixtures.py"
+        "Run this script through uv so the inline dependencies are installed:\n"
+        "  uv run scripts/gen_fixtures.py"
     )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

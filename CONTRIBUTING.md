@@ -18,11 +18,13 @@ code.
 
 You need stable Rust (via [rustup](https://rustup.rs)) and a **C
 toolchain** — SQLite is bundled and compiled from source (`cc`/`clang`
-on Linux/macOS, the MSVC build tools on Windows).
+on Linux/macOS, the MSVC build tools on Windows). The easiest way to run the
+`./scripts/gen_fixtures.py` script is to invoke it directly with
+[`uv`](https://docs.astral.sh/uv/) installed on the system.
 
 ```bash
 cargo build
-python3 scripts/gen_fixtures.py   # once: generates the golden-test fixtures
+./scripts/gen_fixtures.py   # once: generates the golden-test fixtures.
 cargo test
 ```
 
