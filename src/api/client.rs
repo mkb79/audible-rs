@@ -4,9 +4,14 @@
 //!
 //! One [`Client`] serves one account (one `reqwest::Client`, pooling and
 //! HTTP/2 multiplexing across all profiles and tasks, D11). The access
-//! token is refreshed proactively at its expiry timestamp, serialized
-//! per account through a `tokio::sync::Mutex`, and written back to the
-//! auth file.
+//! token is refreshed proactively shortly before it expires, serialized
+//! per account through a `tokio::sync::Mutex`.
+//!
+//! Where the methods below say they write the auth file back, that holds
+//! only for an account loaded from an auth file; an `Authenticator` built
+//! from in-memory data is never written anywhere. Callers that keep auth
+//! data in their own storage read the current state back with
+//! [`Client::export_auth_value`].
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -596,6 +601,24 @@ impl Client {
             remaining_secs,
             has_refresh_token: auth.refresh_token().is_some(),
         }
+    }
+
+    /// The account's current auth data in the [`Authenticator::export_value`]
+    /// format, including any access token or website cookies this client
+    /// has refreshed since it was built. [`Authenticator::from_value`] takes
+    /// it back, so a caller that keeps auth data in its own storage can
+    /// carry the state to the next process without an auth file.
+    ///
+    /// Copied under the lock that token refreshes and cookie exchanges hold
+    /// while they update the state, so the copy never sees a half-applied
+    /// update. It holds what was applied when the lock was acquired: await a
+    /// request or refresh first when its result must be in the copy. The
+    /// value is plain data with no link to the auth file this client may
+    /// have been loaded from, nor to that file's password — an
+    /// `Authenticator` rebuilt from it never writes back. Exposes all
+    /// secrets; never log it.
+    pub async fn export_auth_value(&self) -> serde_json::Value {
+        self.auth.lock().await.export_value()
     }
 
     /// Removes the stored access token (and its expiry), forcing a refresh

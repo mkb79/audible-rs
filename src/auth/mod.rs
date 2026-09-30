@@ -590,7 +590,8 @@ impl Authenticator {
 
     /// The auth data in the new (grouped) format, for `account export`
     /// (lib guarantee: auth material serializes without a file). Exposes
-    /// all secrets — only for writing export files; never log it.
+    /// all secrets — only for writing export files or a caller's own secret
+    /// storage; never log it.
     pub fn export_value(&self) -> serde_json::Value {
         self.to_value()
     }
