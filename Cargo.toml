@@ -20,7 +20,7 @@ path = "src/lib.rs"
 # Async runtime & HTTP
 tokio = { version = "1.52", features = ["full"] }
 futures = "0.3"
-reqwest = { version = "0.13", features = ["json", "form", "cookies", "stream", "gzip", "brotli", "deflate"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "form", "cookies", "stream", "gzip", "brotli", "deflate"] }
 # `account login server` reverse proxy (AUD-60). The hyper stack is already in
 # the tree via reqwest, so these are near-free; qrcode without `image` stays tiny.
 hyper = { version = "1.10", features = ["server", "http1"] }
