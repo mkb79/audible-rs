@@ -100,7 +100,7 @@ fn effective_account<'s>(
     match (auth.account.as_deref(), selection.account.as_deref()) {
         (Some(bound), Some(requested)) if bound != requested => Err(Box::new(reply(
             StatusCode::FORBIDDEN,
-            &json!({"error": format!("this token is bound to another account")}),
+            &json!({"error": "this token is bound to another account"}),
         ))),
         (bound, requested) => Ok(bound.or(requested)),
     }
