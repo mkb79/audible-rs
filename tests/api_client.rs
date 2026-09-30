@@ -1,9 +1,10 @@
 //! Integration tests for the API client: auth modes, signing parity with
-//! the golden fixtures, access-token refresh with write-back, all against
-//! wiremock servers. Synthetic throwaway material only.
+//! the golden fixtures, access-token refresh with write-back, the auth-state
+//! export, all against wiremock servers. Synthetic throwaway material only.
 
 use audible_rs::api::client::{ApiError, AuthMode, Client};
 use audible_rs::auth::Authenticator;
+use audible_rs::auth::authfile::{self, Protection};
 use audible_rs::auth::signing::RequestSigner;
 use reqwest::{Method, Url};
 use serde::Deserialize;
@@ -30,9 +31,9 @@ const PAST: f64 = 1.0;
 
 /// Synthetic auth data; `signing` controls whether adp_token + key are
 /// present, `expires` the access token expiry.
-fn make_auth(signing: bool, expires: f64) -> Authenticator {
+fn auth_data(signing: bool, expires: f64) -> serde_json::Value {
     let fixture = signing_fixture();
-    let data = serde_json::json!({
+    serde_json::json!({
         "country_code": "de",
         "device": { "name": "Alices Test iPhone" },
         "signing": {
@@ -58,8 +59,11 @@ fn make_auth(signing: bool, expires: f64) -> Authenticator {
         // A future TTL keeps the mock host's bucket fresh, so the cookies-mode
         // request sends them instead of attempting a lazy exchange.
         "cookie_ttls": { "127.0.0.1": FAR_FUTURE },
-    });
-    Authenticator::from_value(data).unwrap()
+    })
+}
+
+fn make_auth(signing: bool, expires: f64) -> Authenticator {
+    Authenticator::from_value(auth_data(signing, expires)).unwrap()
 }
 
 async fn client_for(server: &MockServer, auth: Authenticator) -> Client {
@@ -69,6 +73,28 @@ async fn client_for(server: &MockServer, auth: Authenticator) -> Client {
         .auth_base_override(url)
         .build()
         .unwrap()
+}
+
+fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
+}
+
+/// Mounts a token endpoint that answers exactly one refresh with
+/// `Atna|fresh-token`, valid for an hour.
+async fn mount_one_token_refresh(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/auth/token"))
+        .and(body_string_contains("source_token_type=refresh_token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "Atna|fresh-token",
+            "expires_in": 3600,
+        })))
+        .expect(1)
+        .mount(server)
+        .await;
 }
 
 #[tokio::test]
@@ -391,16 +417,7 @@ async fn rejects_foreign_hosts_and_relative_paths() {
 #[tokio::test]
 async fn force_refresh_replaces_token_even_when_valid() {
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/auth/token"))
-        .and(body_string_contains("source_token_type=refresh_token"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "access_token": "Atna|fresh-token",
-            "expires_in": 3600,
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
+    mount_one_token_refresh(&server).await;
 
     // The current token is NOT expired, yet `force` must refresh anyway.
     let client = client_for(&server, make_auth(false, FAR_FUTURE)).await;
@@ -441,6 +458,67 @@ async fn force_refresh_replaces_token_even_when_valid() {
             .unwrap()
             .to_str()
             .unwrap(),
+        "Atna|fresh-token"
+    );
+}
+
+#[tokio::test]
+async fn export_auth_value_carries_the_refresh_and_round_trips() {
+    let server = MockServer::start().await;
+    mount_one_token_refresh(&server).await;
+
+    let client = client_for(&server, make_auth(true, FAR_FUTURE)).await;
+    let before = unix_now();
+    client.force_refresh_access_token().await.unwrap();
+    let after = unix_now();
+    let exported = client.export_auth_value().await;
+
+    assert_eq!(exported["bearer"]["access_token"], "Atna|fresh-token");
+    let expires = exported["bearer"]["expires"].as_f64().unwrap();
+    assert!(
+        (before + 3600.0..=after + 3600.0).contains(&expires),
+        "expiry {expires} not an hour after the refresh ({before}..={after})"
+    );
+
+    // Everything but the refreshed bearer fields is what the client started with.
+    let mut expected = make_auth(true, FAR_FUTURE).export_value();
+    expected["bearer"]["access_token"] = exported["bearer"]["access_token"].clone();
+    expected["bearer"]["expires"] = exported["bearer"]["expires"].clone();
+    assert_eq!(exported, expected);
+
+    let rebuilt = Authenticator::from_value(exported.clone()).unwrap();
+    assert_eq!(rebuilt.export_value(), exported);
+}
+
+#[tokio::test]
+async fn client_built_from_an_export_never_writes_the_auth_file() {
+    let server = MockServer::start().await;
+    mount_one_token_refresh(&server).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice.authfile");
+    let content = authfile::write(&auth_data(false, FAR_FUTURE), Protection::Plain, None).unwrap();
+    std::fs::write(&path, &content).unwrap();
+    let loaded = client_for(
+        &server,
+        Authenticator::load_file(&path, None).await.unwrap(),
+    )
+    .await;
+    let exported = loaded.export_auth_value().await;
+
+    // The next worker refreshes on the exported state; the file the state
+    // originally came from must not see that refresh.
+    let worker = client_for(&server, Authenticator::from_value(exported).unwrap()).await;
+    worker.force_refresh_access_token().await.unwrap();
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    let files: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(files, ["alice.authfile"], "no sidecar or second file");
+    assert_eq!(
+        worker.export_auth_value().await["bearer"]["access_token"],
         "Atna|fresh-token"
     );
 }
