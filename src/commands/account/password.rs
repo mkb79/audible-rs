@@ -1,7 +1,7 @@
 //! `account password set|remove|source` — auth-file encryption and the
 //! passphrase sources (prompt|env|command|file).
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::auth::authfile::KdfParams;

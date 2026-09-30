@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
 use clap::Args;
 #[cfg(unix)]
 use secrecy::ExposeSecret;
