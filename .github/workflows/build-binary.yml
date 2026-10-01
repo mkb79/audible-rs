@@ -47,7 +47,7 @@ jobs:
     # arm64 macOS runner (the Intel one cross-compiles there).
     runs-on: ${{ fromJSON('{"x86_64-pc-windows-msvc":"windows-latest","x86_64-unknown-linux-musl":"ubuntu-22.04","aarch64-unknown-linux-musl":"ubuntu-22.04-arm","x86_64-apple-darwin":"macos-14","aarch64-apple-darwin":"macos-14"}')[inputs.target] }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Blank falls back to the ref the workflow was dispatched on.
           ref: ${{ inputs.ref }}
