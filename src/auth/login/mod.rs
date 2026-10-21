@@ -401,7 +401,7 @@ pub async fn register(
 
 /// Maps the register `response.success` onto the grouped auth data and builds
 /// an [`Authenticator`]. The device private key is normalized to PKCS#1 PEM.
-async fn build_authenticator(
+pub(crate) async fn build_authenticator(
     locale: &Locale,
     success: &Value,
 ) -> Result<Authenticator, LoginError> {

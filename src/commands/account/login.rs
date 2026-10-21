@@ -218,12 +218,42 @@ async fn login_external(
         "Open this URL in your browser and sign in. When the page goes blank \
          (a \"page not found\" at .../ap/maplanding), copy the full address-bar URL:\n\n{url}\n"
     );
-    let redirect = prompt_required("Paste the redirect URL")?;
-    let code = login_flow::extract_authorization_code(&redirect)?;
+    let code = read_authorization_code()?;
     let http = reqwest::Client::builder()
         .connect_timeout(crate::api::client::CONNECT_TIMEOUT)
         .build()?;
     Ok(login_flow::register(&http, locale, device, &pkce, &code, with_username).await?)
+}
+
+/// Asks for the URL the browser ended on until it holds an authorization
+/// code (a few attempts). Terminals may cut off a long pasted line, so the
+/// path of a text file holding the URL is accepted as well.
+fn read_authorization_code() -> Result<String> {
+    const ATTEMPTS: usize = 3;
+    for attempt in 1..=ATTEMPTS {
+        let answer =
+            prompt_required("Paste the redirect URL, or the path of a text file containing it")?;
+        match authorization_code_from_answer(&answer) {
+            Ok(code) => return Ok(code),
+            Err(error) if attempt < ATTEMPTS => eprintln!("{error} — please try again."),
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the last attempt returns")
+}
+
+/// The authorization code from a pasted redirect URL, or from the file the
+/// answer names when it is not a URL.
+fn authorization_code_from_answer(answer: &str) -> Result<String> {
+    let redirect = if answer.trim().to_ascii_lowercase().starts_with("http") {
+        answer.to_owned()
+    } else {
+        std::fs::read_to_string(answer.trim())
+            .map_err(|error| anyhow::anyhow!("cannot read {:?}: {error}", answer.trim()))?
+            .trim_start_matches('\u{feff}')
+            .to_owned()
+    };
+    Ok(login_flow::extract_authorization_code(&redirect)?)
 }
 
 /// The legacy scripted login: email + password typed here, challenges
@@ -483,4 +513,32 @@ fn iterm2_inline_supported() -> bool {
         || std::env::var("LC_TERMINAL")
             .map(|value| value == "iTerm2")
             .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorization_code_comes_from_a_url_or_a_file() {
+        let url = "https://www.audible.de/ap/maplanding?openid.oa2.authorization_code=CODE1&x=y";
+        assert_eq!(authorization_code_from_answer(url).unwrap(), "CODE1");
+        assert_eq!(
+            authorization_code_from_answer(&format!("  {url}\n")).unwrap(),
+            "CODE1"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("redirect.txt");
+        std::fs::write(&file, format!("\u{feff}{url}\n")).unwrap();
+        assert_eq!(
+            authorization_code_from_answer(file.to_str().unwrap()).unwrap(),
+            "CODE1"
+        );
+
+        let missing = dir.path().join("missing.txt");
+        let error = authorization_code_from_answer(missing.to_str().unwrap()).unwrap_err();
+        assert!(error.to_string().starts_with("cannot read"), "{error}");
+        assert!(authorization_code_from_answer("https://www.audible.de/ap/maplanding").is_err());
+    }
 }

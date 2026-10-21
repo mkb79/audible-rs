@@ -24,9 +24,7 @@ use crate::api::locale::Locale;
 use crate::auth::Authenticator;
 use crate::auth::device::Device;
 
-use super::{
-    IdentityApi, LoginError, authenticator_from_response, register_request, registration_body,
-};
+use super::{IdentityApi, LoginError, build_authenticator, register_request, registration_body};
 
 /// Validity asked of Amazon for a code, in seconds (the response's
 /// `expires_in` is what counts).
@@ -131,11 +129,12 @@ pub(crate) async fn create_code_pair_via(
         .send()
         .await?;
     let status = response.status();
-    if !status.is_success() {
-        let error = AmazonError::from_response(response).await;
+    let payload = json_object(response).await;
+    // An error can also ride in a 200 body.
+    let error = AmazonError::from_payload(&payload);
+    if !status.is_success() || error.code.is_some() {
         return Err(LoginError::CodePair(error.describe(status)));
     }
-    let payload: Value = response.json().await?;
     CodePair::from_response(&payload, requested_at)
 }
 
@@ -184,11 +183,10 @@ pub(crate) async fn register_with_code_pair_via(
     let mut delay = code_pair.interval;
     let mut failures = 0u32;
     loop {
-        let time_left = code_pair.time_left();
-        if time_left.is_zero() {
+        tokio::time::sleep(delay.min(code_pair.time_left())).await;
+        if code_pair.time_left().is_zero() {
             return Err(LoginError::CodeExpired);
         }
-        tokio::time::sleep(delay.min(time_left)).await;
 
         let response = match register_request(http, api, locale, device, &body)
             .send()
@@ -203,18 +201,6 @@ pub(crate) async fn register_with_code_pair_via(
             }
         };
         let status = response.status();
-        if status.is_success() {
-            let auth = authenticator_from_response(locale, response).await?;
-            // The pair was created for this serial; a registration for
-            // another device would be a mix-up, not this login.
-            if auth
-                .device_serial()
-                .is_some_and(|serial| serial != device.serial())
-            {
-                return Err(LoginError::ForeignDevice);
-            }
-            return Ok(auth);
-        }
         if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
             failures += 1;
             delay = retry_delay(retry_after(&response), code_pair.interval, failures);
@@ -225,7 +211,22 @@ pub(crate) async fn register_with_code_pair_via(
             );
             continue;
         }
-        let error = AmazonError::from_response(response).await;
+        let payload = json_object(response).await;
+        if status.is_success()
+            && let Some(success) = payload.pointer("/response/success")
+        {
+            let auth = build_authenticator(locale, success).await?;
+            // The pair was created for this serial; a registration for
+            // another device would be a mix-up, not this login.
+            if auth
+                .device_serial()
+                .is_some_and(|serial| serial != device.serial())
+            {
+                return Err(LoginError::ForeignDevice);
+            }
+            return Ok(auth);
+        }
+        let error = AmazonError::from_payload(&payload);
         if status == StatusCode::UNAUTHORIZED && error.is_pending() {
             failures = 0;
             delay = code_pair.interval;
@@ -235,29 +236,45 @@ pub(crate) async fn register_with_code_pair_via(
     }
 }
 
-/// Amazon's identity-API error envelope:
-/// `{"response": {"error": {"code": …, "message": …}}}`.
+/// The JSON object a response carries, or an empty object when the body is
+/// not one (Amazon's error pages are not always JSON).
+async fn json_object(response: Response) -> Value {
+    match response.json::<Value>().await {
+        Ok(value) if value.is_object() => value,
+        _ => Value::Object(Default::default()),
+    }
+}
+
+/// The error Amazon's identity API sent, if any, in either shape it uses:
+/// the MAP envelope `{"response": {"error": {"code": …, "message": …}}}`
+/// (or that object at the top level) and the OAuth form `{"error": "…",
+/// "error_description": "…"}`.
 struct AmazonError {
     code: Option<String>,
     message: Option<String>,
 }
 
 impl AmazonError {
-    async fn from_response(response: Response) -> Self {
-        let payload: Option<Value> = response.json().await.ok();
+    fn from_payload(payload: &Value) -> Self {
+        let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
         let error = payload
-            .as_ref()
-            .and_then(|payload| payload.get("response"))
-            .and_then(|response| response.get("error"));
-        let field = |key: &str| {
-            error
-                .and_then(|error| error.get(key))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        };
-        Self {
-            code: field("code"),
-            message: field("message"),
+            .get("error")
+            .or_else(|| payload.pointer("/response/error"));
+        match error {
+            Some(Value::String(code)) => Self {
+                code: Some(code.clone()),
+                message: text(payload.get("error_description")),
+            },
+            Some(Value::Object(fields)) => Self {
+                code: ["code", "error_code", "error", "type"]
+                    .into_iter()
+                    .find_map(|key| text(fields.get(key))),
+                message: text(fields.get("message")),
+            },
+            _ => Self {
+                code: None,
+                message: None,
+            },
         }
     }
 
@@ -492,6 +509,22 @@ mod tests {
                 "expires_in": 0,
                 "polling_interval_in_seconds": 5,
             })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // An error riding in a 200 body is still an error.
+        Mock::given(method("POST"))
+            .and(path("/auth/create/codepair"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "response": { "error": { "code": "ServerError", "message": "try later" } },
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // A non-JSON error page.
+        Mock::given(method("POST"))
+            .and(path("/auth/create/codepair"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("<html>down</html>"))
             .mount(&server)
             .await;
 
@@ -507,6 +540,14 @@ mod tests {
         assert!(matches!(
             create_code_pair_via(&http, &api(&server), &device).await,
             Err(LoginError::CodePairResponse)
+        ));
+        assert!(matches!(
+            create_code_pair_via(&http, &api(&server), &device).await,
+            Err(LoginError::CodePair(detail)) if detail == "HTTP 200 ServerError: try later"
+        ));
+        assert!(matches!(
+            create_code_pair_via(&http, &api(&server), &device).await,
+            Err(LoginError::CodePair(detail)) if detail == "HTTP 503"
         ));
     }
 
@@ -579,26 +620,78 @@ mod tests {
                     "message": "One or more provided values are invalid",
                 } },
             })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // The OAuth error form, then a 200 without a registration in it.
+        Mock::given(method("POST"))
+            .and(path("/auth/register"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": "invalid_grant",
+                "error_description": "the code pair is unknown",
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/register"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "response": { "challenge": {} },
+            })))
             .mount(&server)
             .await;
 
         let http = Client::new();
         let pair = pair(Duration::from_millis(10), Duration::from_secs(30));
-        let rejected = register_with_code_pair_via(&http, &api(&server), &de(), &device, &pair)
-            .await
-            .unwrap_err();
-        assert!(matches!(rejected, LoginError::CodeRejected(_)));
-        assert_eq!(
-            rejected.to_string(),
-            "Amazon rejected the device code (HTTP 401 InvalidToken: expired)"
-        );
+        for expected in [
+            "HTTP 401 InvalidToken: expired",
+            "HTTP 400 InvalidValue: One or more provided values are invalid",
+            "HTTP 400 invalid_grant: the code pair is unknown",
+            "HTTP 200",
+        ] {
+            let error = register_with_code_pair_via(&http, &api(&server), &de(), &device, &pair)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, LoginError::CodeRejected(_)));
+            assert_eq!(
+                error.to_string(),
+                format!("Amazon rejected the device code ({expected})")
+            );
+        }
+    }
 
-        let rejected = register_with_code_pair_via(&http, &api(&server), &de(), &device, &pair)
-            .await
-            .unwrap_err();
+    #[test]
+    fn amazon_errors_are_read_in_every_shape() {
+        let describe =
+            |payload: Value| AmazonError::from_payload(&payload).describe(StatusCode::BAD_REQUEST);
         assert_eq!(
-            rejected.to_string(),
-            "Amazon rejected the device code (HTTP 400 InvalidValue: One or more provided values are invalid)"
+            describe(
+                json!({ "response": { "error": { "code": "InvalidValue", "message": "bad" } } })
+            ),
+            "HTTP 400 InvalidValue: bad"
+        );
+        assert_eq!(
+            describe(json!({ "error": { "error_code": "Throttled" } })),
+            "HTTP 400 Throttled"
+        );
+        assert_eq!(
+            describe(json!({ "error": { "type": "ServerError", "message": "later" } })),
+            "HTTP 400 ServerError: later"
+        );
+        assert_eq!(
+            describe(json!({ "error": "invalid_request", "error_description": "no" })),
+            "HTTP 400 invalid_request: no"
+        );
+        assert_eq!(describe(json!({ "error": null })), "HTTP 400");
+        assert_eq!(describe(json!({})), "HTTP 400");
+        assert!(
+            AmazonError::from_payload(
+                &json!({ "response": { "error": { "code": "UNAUTHORIZED" } } })
+            )
+            .is_pending()
+        );
+        assert!(
+            !AmazonError::from_payload(&json!({ "error": "unauthorized_client" })).is_pending()
         );
     }
 
