@@ -1,20 +1,32 @@
-//! The `account login` OAuth/PKCE + device-registration flow (UI-free core).
+//! The `account login` sign-in + device-registration flows (UI-free core).
 //!
-//! Phase 1 (external browser, AUD-58): generate the PKCE pair and `frc`,
-//! build the authorize URL the user opens in their browser, take the pasted
-//! redirect, and register the device into an [`Authenticator`]. Captured from
-//! live iOS app traffic; secrets are never logged.
+//! Three ways to prove a sign-in, all ending in the same `POST
+//! /auth/register` that maps Amazon's response onto an [`Authenticator`]:
 //!
-//! Phase 2 (internal scripted login, AUD-59): [`metadata1`] + a form-driven
-//! sign-in with challenge handlers (added in sibling submodules).
+//! - **Device code** ([`device_code`], the default — mkb79/Audible#906): a
+//!   short code the user confirms at `amazon.<tld>/code` in any browser,
+//!   polled until Amazon links the device. The password never passes
+//!   through this program.
+//! - **External browser** (AUD-58): the PKCE pair + `frc`, the authorize
+//!   URL the user opens in their browser, and the pasted redirect's
+//!   authorization code. The one flow pre-merger Audible accounts have;
+//!   also what the `login server` reverse proxy ([`server`]) drives.
+//! - **Scripted** (AUD-59, legacy): [`metadata1`] + a form-driven sign-in
+//!   with challenge handlers — breaks whenever Amazon changes its pages.
+//!
+//! Captured from live iOS app traffic (the browser flows) and the
+//! reference's test plugin for the issue (the device code); secrets are
+//! never logged.
 
 mod challenge;
+mod device_code;
 mod internal;
 mod metadata1;
 mod page;
 mod server;
 
 pub use challenge::{ChallengePrompt, MfaDevice};
+pub use device_code::{CodePair, create_code_pair, register_with_code_pair, verification_url};
 pub use internal::login_internal;
 pub use server::{LoginDefaults, LoginServer};
 
@@ -51,6 +63,22 @@ pub enum LoginError {
     /// The register response did not have the expected shape.
     #[error("device registration returned an unexpected response")]
     RegisterResponse,
+    /// `POST /auth/create/codepair` answered with an error (status plus
+    /// Amazon's error code and message, if any).
+    #[error("requesting a device code failed ({0})")]
+    CodePair(String),
+    /// The code-pair response did not have the expected shape.
+    #[error("the device-code response had an unexpected shape")]
+    CodePairResponse,
+    /// The device code expired before the user confirmed it.
+    #[error("the device code expired before it was confirmed — run the login again for a new one")]
+    CodeExpired,
+    /// Amazon rejected the code pair (anything but "not confirmed yet").
+    #[error("Amazon rejected the device code ({0})")]
+    CodeRejected(String),
+    /// The registration came back for a different device serial.
+    #[error("the registration belongs to another device (serial mismatch)")]
+    ForeignDevice,
     /// The device private key from the registration could not be parsed.
     #[error("could not parse the device private key from the registration")]
     PrivateKey,
@@ -230,55 +258,87 @@ pub fn extract_authorization_code(redirect: &str) -> Result<String, LoginError> 
     auth_code_from_pairs(url.query_pairs()).ok_or(LoginError::NoAuthorizationCode)
 }
 
-/// Registers the device with Amazon (`POST /auth/register`) using the OAuth
-/// `authorization_code`, and maps the response onto an [`Authenticator`] —
-/// the same envelope `account import` produces. No secrets are logged.
+/// The identity API a login registers with: `https://api.amazon.<tld>` for
+/// Amazon accounts, `https://api.audible.<tld>` for pre-merger Audible
+/// accounts (the website-cookie domain in the body stays `.amazon.<tld>`
+/// either way, matching the reference). `auth_domain` is the host the
+/// `x-amzn-identity-auth-domain` header names — the same host, except in
+/// tests, where a mock server stands in for Amazon.
+#[derive(Clone, Debug)]
+pub(crate) struct IdentityApi {
+    base_url: String,
+    auth_domain: String,
+}
+
+impl IdentityApi {
+    pub(crate) fn new(locale: &Locale, with_username: bool) -> Self {
+        let host = if with_username { "audible" } else { "amazon" };
+        let auth_domain = format!("api.{host}.{}", locale.domain);
+        Self {
+            base_url: format!("https://{auth_domain}"),
+            auth_domain,
+        }
+    }
+
+    /// Points the requests at a mock server; the header keeps the real host.
+    #[cfg(test)]
+    pub(crate) fn mocked(base_url: &str, locale: &Locale) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_owned(),
+            auth_domain: format!("api.amazon.{}", locale.domain),
+        }
+    }
+
+    /// The URL of an API path, e.g. `/auth/register`.
+    pub(crate) fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.base_url)
+    }
+
+    /// The host for the `x-amzn-identity-auth-domain` header.
+    pub(crate) fn auth_domain(&self) -> &str {
+        &self.auth_domain
+    }
+}
+
+/// The `POST /auth/register` body around `auth_data` — the proof of the
+/// sign-in: the OAuth `authorization_code` + PKCE verifier of the browser
+/// flows, or the confirmed code pair of the device-code flow. Everything
+/// else is the same for every login: the device identity, the app's
+/// cookies and the requested tokens.
 ///
 /// `requested_token_type` deliberately omits `store_authentication_cookie`
 /// (see the NOTE in `auth/mod.rs`). Stored website cookies are left empty;
 /// they are lazily exchanged on first cookie use (AUD-25).
-pub async fn register(
-    http: &reqwest::Client,
-    locale: &Locale,
-    device: &Device,
-    pkce: &Pkce,
-    authorization_code: &str,
-    with_username: bool,
-) -> Result<Authenticator, LoginError> {
-    let domain = locale.domain;
-    // Pre-merger Audible accounts register on the Audible host; everyone else
-    // on the Amazon host. (The website-cookie domain in the body stays
-    // `.amazon.<tld>` either way, matching the reference.)
-    let host = if with_username { "audible" } else { "amazon" };
-    let url = format!("https://api.{host}.{domain}/auth/register");
-    let body = serde_json::json!({
+pub(crate) fn registration_body(locale: &Locale, device: &Device, auth_data: Value) -> Value {
+    serde_json::json!({
         "age_info": {},
-        "auth_data": {
-            "client_id": device.client_id(),
-            "authorization_code": authorization_code,
-            "code_verifier": pkce.verifier(),
-            "code_algorithm": "SHA-256",
-            "client_domain": "DeviceLegacy",
-        },
+        "auth_data": auth_data,
         "user_context_map": { "frc": generate_frc() },
         "cookies": {
             "website_cookies": [
                 { "Name": "amzn-app-id", "Value": "MAPiOSLib/6.0/ToHideRetailLink" },
                 { "Name": "id_pk", "Value": "eyJuIjoiMSJ9" },
             ],
-            "domain": format!(".amazon.{domain}"),
+            "domain": format!(".amazon.{}", locale.domain),
         },
         "registration_data": device.registration_data(),
         "requested_extensions": ["device_info", "customer_info"],
         "requested_token_type": ["bearer", "mac_dms", "website_cookies"],
-    });
+    })
+}
 
-    let response = http
-        .post(&url)
-        .header(
-            "x-amzn-identity-auth-domain",
-            format!("api.{host}.{domain}"),
-        )
+/// The register request (`POST /auth/register` with the app's headers),
+/// ready to send. Shared by the one-shot registrations and the device-code
+/// poll, which sends the same request until Amazon accepts it.
+pub(crate) fn register_request(
+    http: &reqwest::Client,
+    api: &IdentityApi,
+    locale: &Locale,
+    device: &Device,
+    body: &Value,
+) -> reqwest::RequestBuilder {
+    http.post(api.url("/auth/register"))
+        .header("x-amzn-identity-auth-domain", api.auth_domain())
         .header(reqwest::header::USER_AGENT, device.register_user_agent())
         .header(reqwest::header::ACCEPT, "application/json")
         .header(
@@ -290,9 +350,17 @@ pub async fn register(
             reqwest::header::COOKIE,
             "amzn-app-id=MAPiOSLib/6.0/ToHideRetailLink",
         )
-        .json(&body)
-        .send()
-        .await?;
+        .json(body)
+}
+
+/// Maps a register response onto an [`Authenticator`] — the same envelope
+/// `account import` produces. An error status is [`LoginError::Register`],
+/// a body without the `response.success` shape
+/// [`LoginError::RegisterResponse`]. No secrets are logged.
+pub(crate) async fn authenticator_from_response(
+    locale: &Locale,
+    response: reqwest::Response,
+) -> Result<Authenticator, LoginError> {
     if !response.status().is_success() {
         return Err(LoginError::Register(response.status()));
     }
@@ -302,6 +370,33 @@ pub async fn register(
         .and_then(|response| response.get("success"))
         .ok_or(LoginError::RegisterResponse)?;
     build_authenticator(locale, success).await
+}
+
+/// Registers the device with Amazon (`POST /auth/register`) using the OAuth
+/// `authorization_code` of the browser flows, and maps the response onto an
+/// [`Authenticator`]. Pre-merger Audible accounts (`with_username`) register
+/// on the Audible host, everyone else on the Amazon host.
+pub async fn register(
+    http: &reqwest::Client,
+    locale: &Locale,
+    device: &Device,
+    pkce: &Pkce,
+    authorization_code: &str,
+    with_username: bool,
+) -> Result<Authenticator, LoginError> {
+    let api = IdentityApi::new(locale, with_username);
+    let auth_data = serde_json::json!({
+        "client_id": device.client_id(),
+        "authorization_code": authorization_code,
+        "code_verifier": pkce.verifier(),
+        "code_algorithm": "SHA-256",
+        "client_domain": "DeviceLegacy",
+    });
+    let body = registration_body(locale, device, auth_data);
+    let response = register_request(http, &api, locale, device, &body)
+        .send()
+        .await?;
+    authenticator_from_response(locale, response).await
 }
 
 /// Maps the register `response.success` onto the grouped auth data and builds
@@ -466,6 +561,49 @@ mod tests {
         assert!(url.starts_with("https://www.audible.de/ap/signin?"));
         assert!(url.contains("openid.assoc_handle=amzn_audible_android_experiment_lap_de"));
         assert!(url.contains("pageId=amzn_audible_android_privatepool"));
+    }
+
+    #[test]
+    fn identity_api_hosts_per_account_kind() {
+        let uk = locale::find("uk").unwrap();
+        let amazon = IdentityApi::new(&uk, false);
+        assert_eq!(
+            amazon.url("/auth/register"),
+            "https://api.amazon.co.uk/auth/register"
+        );
+        assert_eq!(amazon.auth_domain(), "api.amazon.co.uk");
+        let audible = IdentityApi::new(&uk, true);
+        assert_eq!(
+            audible.url("/auth/register"),
+            "https://api.audible.co.uk/auth/register"
+        );
+        assert_eq!(audible.auth_domain(), "api.audible.co.uk");
+        // A mock keeps the real header host.
+        let mocked = IdentityApi::mocked("http://127.0.0.1:1/", &uk);
+        assert_eq!(
+            mocked.url("/auth/register"),
+            "http://127.0.0.1:1/auth/register"
+        );
+        assert_eq!(mocked.auth_domain(), "api.amazon.co.uk");
+    }
+
+    #[test]
+    fn registration_body_wraps_the_auth_data() {
+        let device = Device::generate(DeviceKind::IPhone);
+        let de = locale::find("de").unwrap();
+        let body = registration_body(&de, &device, serde_json::json!({ "proof": "x" }));
+        assert_eq!(body["auth_data"]["proof"], "x");
+        assert_eq!(body["registration_data"]["device_serial"], device.serial());
+        assert_eq!(body["cookies"]["domain"], ".amazon.de");
+        assert_eq!(
+            body["requested_token_type"],
+            serde_json::json!(["bearer", "mac_dms", "website_cookies"])
+        );
+        assert!(
+            body["user_context_map"]["frc"]
+                .as_str()
+                .is_some_and(|frc| !frc.is_empty())
+        );
     }
 
     #[test]

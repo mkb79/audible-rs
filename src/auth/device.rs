@@ -142,6 +142,13 @@ impl Device {
         self.kind.device_type()
     }
 
+    /// The MAP domain the device registers under — `registration_data.domain`
+    /// (`Device` for the iOS app, `DeviceLegacy` for Android), also the
+    /// `code_data.domain` a device-code pair is created for.
+    pub fn registration_domain(&self) -> &'static str {
+        self.kind.profile().registration_domain
+    }
+
     /// The OAuth `client_id`: lowercase hex of `serial + "#" + device_type`.
     pub fn client_id(&self) -> String {
         hex_lower(format!("{}#{}", self.serial, self.device_type()).as_bytes())

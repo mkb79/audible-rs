@@ -61,13 +61,19 @@ impl super::Command for AccountCommand {
                 // over the args struct's doc comment.
                 LoginArgs::augment_args(clap::Command::new("login"))
                     .about(
-                        "Register a new account via a live sign-in (scripted by default; \
-                         --external for the browser flow; pick the marketplace with -m <cc>)",
+                        "Register a new account via a live sign-in (a device code you confirm \
+                         in any browser; --external for the browser-URL flow; pick the \
+                         marketplace with -m <cc>)",
                     )
                     .long_about(
-                        "Register a new account by signing in live. Default: the scripted \
-                         (internal) login that prompts for email + password here; --external \
-                         prints a sign-in URL for your own browser instead.\n\n\
+                        "Register a new account by signing in live. Default: the device-code \
+                         sign-in — this prints a short code, you open amazon.<tld>/code in any \
+                         browser (on any device), sign in there and enter it; your password \
+                         never passes through this program and 2FA/CAPTCHA stay on Amazon's \
+                         pages. --external prints a sign-in URL for your own browser instead \
+                         and reads the redirect back (pre-merger Audible accounts, \
+                         --audible-username, always use it). --password is the legacy scripted \
+                         login that asks for email + password here.\n\n\
                          A sign-in registers ONE device on a SINGLE marketplace — the same \
                          Audible account (user_id) is shared across all marketplaces, so \
                          registering per marketplace is unnecessary.\n\n\

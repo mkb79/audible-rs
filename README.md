@@ -20,10 +20,11 @@ Rust crate. It installs one binary, `audible`.
 
 ## What it does
 
-- **Accounts** — sign in (scripted, external-browser, or a local
-  browser-proxy with QR for headless boxes), import a legacy
-  `audible`/`audible-cli` auth file, manage the auth-file password and
-  its source, deregister.
+- **Accounts** — sign in with a short device code you confirm in any
+  browser (no password typed here; alternatively the external-browser
+  URL flow, a local browser-proxy with QR for headless boxes, or the
+  legacy scripted login), import a legacy `audible`/`audible-cli` auth
+  file, manage the auth-file password and its source, deregister.
 - **Library** — sync your library into a local SQLite database (full and
   delta), list, full-text search, export (JSON/CSV), review the change
   log, browse series, podcasts and episodes.
@@ -171,7 +172,12 @@ audible download --missing    # 5. download owned titles (add --decrypt for m4b)
 2. **Add an account** — either register a fresh one with
    `audible account login` (pick the marketplace with `-m`, e.g. `-m de`,
    `-m us`, `-m uk`), or bring one over from the Python tools with
-   `audible account import <file>`.
+   `audible account import <file>`. `login` prints a short code: open
+   `amazon.<tld>/code` in any browser (on any device), sign in with your
+   Amazon account and enter it — your password never passes through the
+   CLI. Pre-merger Audible accounts (DE/US/UK, `--audible-username`)
+   sign in through a browser URL instead; see `audible account login
+   --help` for the other methods.
 3. **`audible library sync` first** — every library command reads from a
    **local database**, so you must sync at least once before `list`,
    `search`, `download --missing`, `series`, `library episodes` etc. return

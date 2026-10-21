@@ -341,3 +341,25 @@ async fn export_refuses_existing_files_without_force() {
     .unwrap();
     assert_ne!(std::fs::read(&out).unwrap(), b"precious");
 }
+
+/// The sign-in methods of `account login` (mkb79/Audible#906): the device
+/// code is the default, `--external` and the legacy `--password` are the
+/// alternatives and exclude each other; the old aliases keep working.
+#[test]
+fn login_sign_in_methods_parse_and_exclude_each_other() {
+    let parse = |argv: &[&str]| {
+        let mut full = vec!["account", "login"];
+        full.extend_from_slice(argv);
+        AccountCommand.clap().try_get_matches_from(full)
+    };
+    assert!(parse(&[]).is_ok());
+    assert!(parse(&["--external"]).is_ok());
+    assert!(parse(&["--link"]).is_ok());
+    assert!(parse(&["--password"]).is_ok());
+    assert!(parse(&["--scripted"]).is_ok());
+    assert!(parse(&["--audible-username"]).is_ok());
+    assert!(parse(&["--with-username", "--external"]).is_ok());
+    assert!(parse(&["--password", "--audible-username"]).is_ok());
+    let conflict = parse(&["--external", "--password"]).unwrap_err();
+    assert_eq!(conflict.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
