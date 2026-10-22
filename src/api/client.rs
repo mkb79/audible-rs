@@ -509,13 +509,8 @@ impl Client {
             .and_then(|v| v.as_str())
             .ok_or(ApiError::TokenRefreshResponse)?
             .to_owned();
-        // expires_in arrives as a number or numeric string.
-        let expires_in = match payload.get("expires_in") {
-            Some(serde_json::Value::Number(n)) => n.as_f64(),
-            Some(serde_json::Value::String(s)) => s.parse().ok(),
-            _ => None,
-        }
-        .ok_or(ApiError::TokenRefreshResponse)?;
+        let expires_in = crate::timefmt::json_secs(payload.get("expires_in"))
+            .ok_or(ApiError::TokenRefreshResponse)?;
 
         let now = crate::timefmt::now_unix();
         let token = SecretString::from(access_token);

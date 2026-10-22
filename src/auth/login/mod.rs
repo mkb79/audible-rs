@@ -57,9 +57,10 @@ pub enum LoginError {
     /// The pasted redirect URL has no `openid.oa2.authorization_code`.
     #[error("the pasted URL has no authorization code (sign-in not completed?)")]
     NoAuthorizationCode,
-    /// The register endpoint answered with an error status.
-    #[error("device registration failed with HTTP status {0}")]
-    Register(reqwest::StatusCode),
+    /// The register endpoint refused the registration (status plus Amazon's
+    /// error code and message, if any).
+    #[error("device registration failed ({0})")]
+    Register(String),
     /// The register response did not have the expected shape.
     #[error("device registration returned an unexpected response")]
     RegisterResponse,
@@ -294,9 +295,91 @@ impl IdentityApi {
         format!("{}{path}", self.base_url)
     }
 
-    /// The host for the `x-amzn-identity-auth-domain` header.
-    pub(crate) fn auth_domain(&self) -> &str {
-        &self.auth_domain
+    /// A `POST` to an API path with the headers every identity request
+    /// carries: the `x-amzn-identity-auth-domain` host, the device's app
+    /// User-Agent and `Accept: application/json`. The register request adds
+    /// its own on top; the code-pair request sends just these.
+    pub(crate) fn post(
+        &self,
+        http: &reqwest::Client,
+        device: &Device,
+        path: &str,
+    ) -> reqwest::RequestBuilder {
+        http.post(self.url(path))
+            .header("x-amzn-identity-auth-domain", &self.auth_domain)
+            .header(reqwest::header::USER_AGENT, device.register_user_agent())
+            .header(reqwest::header::ACCEPT, "application/json")
+    }
+}
+
+/// The JSON object a response carries, or an empty object when the body is
+/// not one (Amazon's error pages are not always JSON).
+pub(crate) async fn json_object(response: reqwest::Response) -> Value {
+    match response.json::<Value>().await {
+        Ok(value) if value.is_object() => value,
+        _ => Value::Object(Default::default()),
+    }
+}
+
+/// The error Amazon's identity API sent, if any, in either shape it uses:
+/// the MAP envelope `{"response": {"error": {"code": …, "message": …}}}`
+/// (or that object at the top level) and the OAuth form `{"error": "…",
+/// "error_description": "…"}`.
+pub(crate) struct AmazonError {
+    code: Option<String>,
+    message: Option<String>,
+}
+
+impl AmazonError {
+    pub(crate) fn from_payload(payload: &Value) -> Self {
+        let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
+        let error = payload
+            .get("error")
+            .or_else(|| payload.pointer("/response/error"));
+        match error {
+            Some(Value::String(code)) => Self {
+                code: Some(code.clone()),
+                message: text(payload.get("error_description")),
+            },
+            Some(Value::Object(fields)) => Self {
+                code: ["code", "error_code", "error", "type"]
+                    .into_iter()
+                    .find_map(|key| text(fields.get(key))),
+                message: text(fields.get("message")),
+            },
+            _ => Self {
+                code: None,
+                message: None,
+            },
+        }
+    }
+
+    /// Whether the payload carried an error code at all (an error can also
+    /// ride in a 200 body).
+    pub(crate) fn is_present(&self) -> bool {
+        self.code.is_some()
+    }
+
+    /// "Not confirmed yet": the `Unauthorized` a device-code poll expects
+    /// until the user has entered the code.
+    pub(crate) fn is_pending(&self) -> bool {
+        self.code
+            .as_deref()
+            .is_some_and(|code| code.eq_ignore_ascii_case("Unauthorized"))
+    }
+
+    /// `HTTP 400 InvalidValue: One or more provided values are invalid`.
+    pub(crate) fn describe(&self, status: reqwest::StatusCode) -> String {
+        let mut text = format!("HTTP {}", status.as_u16());
+        if let Some(code) = &self.code {
+            text.push(' ');
+            text.push_str(code);
+        }
+        if let Some(message) = &self.message {
+            text.push_str(": ");
+            text.push_str(message);
+        }
+        text
     }
 }
 
@@ -337,10 +420,7 @@ pub(crate) fn register_request(
     device: &Device,
     body: &Value,
 ) -> reqwest::RequestBuilder {
-    http.post(api.url("/auth/register"))
-        .header("x-amzn-identity-auth-domain", api.auth_domain())
-        .header(reqwest::header::USER_AGENT, device.register_user_agent())
-        .header(reqwest::header::ACCEPT, "application/json")
+    api.post(http, device, "/auth/register")
         .header(
             reqwest::header::ACCEPT_LANGUAGE,
             locale_language(locale.country_code),
@@ -353,23 +433,59 @@ pub(crate) fn register_request(
         .json(body)
 }
 
+/// A register response, read: its status and JSON body. The one-shot
+/// registrations and the device-code poll both read Amazon's answer
+/// through this, so they agree on what counts as a registration and report
+/// a refusal the same way.
+pub(crate) struct RegisterReply {
+    status: reqwest::StatusCode,
+    payload: Value,
+}
+
+impl RegisterReply {
+    pub(crate) async fn read(response: reqwest::Response) -> Self {
+        let status = response.status();
+        Self {
+            status,
+            payload: json_object(response).await,
+        }
+    }
+
+    /// The registration (`response.success`) of a successful answer.
+    pub(crate) fn success(&self) -> Option<&Value> {
+        if self.status.is_success() {
+            self.payload.pointer("/response/success")
+        } else {
+            None
+        }
+    }
+
+    /// The error Amazon sent instead, if any.
+    pub(crate) fn error(&self) -> AmazonError {
+        AmazonError::from_payload(&self.payload)
+    }
+
+    /// The refusal for an error message: status plus Amazon's code and
+    /// message, e.g. `HTTP 400 InvalidValue: …`.
+    pub(crate) fn describe(&self) -> String {
+        self.error().describe(self.status)
+    }
+}
+
 /// Maps a register response onto an [`Authenticator`] — the same envelope
-/// `account import` produces. An error status is [`LoginError::Register`],
-/// a body without the `response.success` shape
+/// `account import` produces. A refusal (an error status, or no
+/// `response.success` in the body) is [`LoginError::Register`] with
+/// Amazon's error code and message; a registration missing fields is
 /// [`LoginError::RegisterResponse`]. No secrets are logged.
 pub(crate) async fn authenticator_from_response(
     locale: &Locale,
     response: reqwest::Response,
 ) -> Result<Authenticator, LoginError> {
-    if !response.status().is_success() {
-        return Err(LoginError::Register(response.status()));
+    let reply = RegisterReply::read(response).await;
+    match reply.success() {
+        Some(success) => build_authenticator(locale, success).await,
+        None => Err(LoginError::Register(reply.describe())),
     }
-    let payload: Value = response.json().await?;
-    let success = payload
-        .get("response")
-        .and_then(|response| response.get("success"))
-        .ok_or(LoginError::RegisterResponse)?;
-    build_authenticator(locale, success).await
 }
 
 /// Registers the device with Amazon (`POST /auth/register`) using the OAuth
@@ -422,12 +538,8 @@ pub(crate) async fn build_authenticator(
     let raw_key = str_field(mac_dms, "device_private_key")?.to_owned();
     let pem = normalize_private_key(raw_key).await?;
 
-    let expires_in = match bearer.get("expires_in") {
-        Some(Value::Number(n)) => n.as_f64(),
-        Some(Value::String(s)) => s.parse().ok(),
-        _ => None,
-    }
-    .ok_or(LoginError::RegisterResponse)?;
+    let expires_in =
+        crate::timefmt::json_secs(bearer.get("expires_in")).ok_or(LoginError::RegisterResponse)?;
     let now = crate::timefmt::now_unix();
 
     // identity = customer_info with user_id renamed to customer_id; unknown
@@ -571,20 +683,20 @@ mod tests {
             amazon.url("/auth/register"),
             "https://api.amazon.co.uk/auth/register"
         );
-        assert_eq!(amazon.auth_domain(), "api.amazon.co.uk");
+        assert_eq!(amazon.auth_domain, "api.amazon.co.uk");
         let audible = IdentityApi::new(&uk, true);
         assert_eq!(
             audible.url("/auth/register"),
             "https://api.audible.co.uk/auth/register"
         );
-        assert_eq!(audible.auth_domain(), "api.audible.co.uk");
+        assert_eq!(audible.auth_domain, "api.audible.co.uk");
         // A mock keeps the real header host.
         let mocked = IdentityApi::mocked("http://127.0.0.1:1/", &uk);
         assert_eq!(
             mocked.url("/auth/register"),
             "http://127.0.0.1:1/auth/register"
         );
-        assert_eq!(mocked.auth_domain(), "api.amazon.co.uk");
+        assert_eq!(mocked.auth_domain, "api.amazon.co.uk");
     }
 
     #[test]
@@ -604,6 +716,90 @@ mod tests {
                 .as_str()
                 .is_some_and(|frc| !frc.is_empty())
         );
+    }
+
+    #[test]
+    fn amazon_errors_are_read_in_every_shape() {
+        use reqwest::StatusCode;
+        use serde_json::json;
+        let describe =
+            |payload: Value| AmazonError::from_payload(&payload).describe(StatusCode::BAD_REQUEST);
+        assert_eq!(
+            describe(
+                json!({ "response": { "error": { "code": "InvalidValue", "message": "bad" } } })
+            ),
+            "HTTP 400 InvalidValue: bad"
+        );
+        assert_eq!(
+            describe(json!({ "error": { "error_code": "Throttled" } })),
+            "HTTP 400 Throttled"
+        );
+        assert_eq!(
+            describe(json!({ "error": { "type": "ServerError", "message": "later" } })),
+            "HTTP 400 ServerError: later"
+        );
+        assert_eq!(
+            describe(json!({ "error": "invalid_request", "error_description": "no" })),
+            "HTTP 400 invalid_request: no"
+        );
+        assert_eq!(describe(json!({ "error": null })), "HTTP 400");
+        assert_eq!(describe(json!({})), "HTTP 400");
+        assert!(
+            AmazonError::from_payload(
+                &json!({ "response": { "error": { "code": "UNAUTHORIZED" } } })
+            )
+            .is_pending()
+        );
+        assert!(
+            !AmazonError::from_payload(&json!({ "error": "unauthorized_client" })).is_pending()
+        );
+        assert!(!AmazonError::from_payload(&json!({})).is_present());
+    }
+
+    /// A refused registration (the browser flows' one-shot register) now
+    /// carries Amazon's error code and message, not just the status.
+    #[tokio::test]
+    async fn a_refused_registration_reports_amazons_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/auth/register"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "response": { "error": {
+                    "code": "InvalidValue",
+                    "message": "One or more provided values are invalid",
+                } },
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/register"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("<html>down</html>"))
+            .mount(&server)
+            .await;
+
+        let de = locale::find("de").unwrap();
+        let device = Device::generate(DeviceKind::IPhone);
+        let api = IdentityApi::mocked(&server.uri(), &de);
+        let body = registration_body(&de, &device, serde_json::json!({}));
+        let http = reqwest::Client::new();
+        for expected in [
+            "device registration failed (HTTP 400 InvalidValue: One or more provided values are invalid)",
+            "device registration failed (HTTP 503)",
+        ] {
+            let response = register_request(&http, &api, &de, &device, &body)
+                .send()
+                .await
+                .unwrap();
+            let error = authenticator_from_response(&de, response)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, LoginError::Register(_)));
+            assert_eq!(error.to_string(), expected);
+        }
     }
 
     #[test]

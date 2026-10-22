@@ -3,6 +3,9 @@
 //! carried their own copy of the format literal; staleness checks parse
 //! what `now_iso_utc` wrote, so the copies had to round-trip each other
 //! and a drift in one would have broken the pair silently.
+//!
+//! It also holds the shared clock ([`now_unix`]) and the parser for the
+//! seconds values Amazon's JSON carries ([`json_secs`]).
 
 /// The one format literal. Callers use the helpers; the const exists so
 /// there is exactly one string to change.
@@ -56,9 +59,36 @@ pub(crate) fn now_unix_ms() -> i64 {
     (now_unix() * 1000.0) as i64
 }
 
+/// A seconds value from an Amazon JSON field (`expires_in`,
+/// `polling_interval_in_seconds`), which arrives as a number or as a
+/// numeric string. One home for the token refresh, the device registration
+/// and the device-code pair, which each spelled this match out. `None` for
+/// a missing field, another type or a non-numeric string; the caller checks
+/// the range it needs.
+pub(crate) fn json_secs(value: Option<&serde_json::Value>) -> Option<f64> {
+    match value? {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_secs_reads_numbers_and_numeric_strings() {
+        use serde_json::json;
+        assert_eq!(json_secs(Some(&json!(3600))), Some(3600.0));
+        assert_eq!(json_secs(Some(&json!(0.5))), Some(0.5));
+        assert_eq!(json_secs(Some(&json!("3600"))), Some(3600.0));
+        assert_eq!(json_secs(Some(&json!(" 600 "))), Some(600.0));
+        assert_eq!(json_secs(Some(&json!("soon"))), None);
+        assert_eq!(json_secs(Some(&json!(true))), None);
+        assert_eq!(json_secs(Some(&json!(null))), None);
+        assert_eq!(json_secs(None), None);
+    }
 
     #[test]
     fn iso_round_trips() {

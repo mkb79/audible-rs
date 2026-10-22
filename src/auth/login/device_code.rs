@@ -24,7 +24,10 @@ use crate::api::locale::Locale;
 use crate::auth::Authenticator;
 use crate::auth::device::Device;
 
-use super::{IdentityApi, LoginError, build_authenticator, register_request, registration_body};
+use super::{
+    AmazonError, IdentityApi, LoginError, RegisterReply, build_authenticator, json_object,
+    register_request, registration_body,
+};
 
 /// The MAP domain a code pair is created in. Always `Device`, whatever the
 /// profile registers under: `/auth/create/codepair` rejects the Android
@@ -130,11 +133,8 @@ pub(crate) async fn create_code_pair_via(
         },
     });
     let requested_at = Instant::now();
-    let response = http
-        .post(api.url("/auth/create/codepair"))
-        .header("x-amzn-identity-auth-domain", api.auth_domain())
-        .header(reqwest::header::USER_AGENT, device.register_user_agent())
-        .header(reqwest::header::ACCEPT, "application/json")
+    let response = api
+        .post(http, device, "/auth/create/codepair")
         .json(&body)
         .send()
         .await?;
@@ -142,7 +142,7 @@ pub(crate) async fn create_code_pair_via(
     let payload = json_object(response).await;
     // An error can also ride in a 200 body.
     let error = AmazonError::from_payload(&payload);
-    if !status.is_success() || error.code.is_some() {
+    if !status.is_success() || error.is_present() {
         return Err(LoginError::CodePair(error.describe(status)));
     }
     CodePair::from_response(&payload, requested_at)
@@ -221,10 +221,8 @@ pub(crate) async fn register_with_code_pair_via(
             );
             continue;
         }
-        let payload = json_object(response).await;
-        if status.is_success()
-            && let Some(success) = payload.pointer("/response/success")
-        {
+        let reply = RegisterReply::read(response).await;
+        if let Some(success) = reply.success() {
             let auth = build_authenticator(locale, success).await?;
             // The pair was created for this serial; a registration for
             // another device would be a mix-up, not this login.
@@ -236,78 +234,12 @@ pub(crate) async fn register_with_code_pair_via(
             }
             return Ok(auth);
         }
-        let error = AmazonError::from_payload(&payload);
-        if status == StatusCode::UNAUTHORIZED && error.is_pending() {
+        if status == StatusCode::UNAUTHORIZED && reply.error().is_pending() {
             failures = 0;
             delay = code_pair.interval;
             continue;
         }
-        return Err(LoginError::CodeRejected(error.describe(status)));
-    }
-}
-
-/// The JSON object a response carries, or an empty object when the body is
-/// not one (Amazon's error pages are not always JSON).
-async fn json_object(response: Response) -> Value {
-    match response.json::<Value>().await {
-        Ok(value) if value.is_object() => value,
-        _ => Value::Object(Default::default()),
-    }
-}
-
-/// The error Amazon's identity API sent, if any, in either shape it uses:
-/// the MAP envelope `{"response": {"error": {"code": …, "message": …}}}`
-/// (or that object at the top level) and the OAuth form `{"error": "…",
-/// "error_description": "…"}`.
-struct AmazonError {
-    code: Option<String>,
-    message: Option<String>,
-}
-
-impl AmazonError {
-    fn from_payload(payload: &Value) -> Self {
-        let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
-        let error = payload
-            .get("error")
-            .or_else(|| payload.pointer("/response/error"));
-        match error {
-            Some(Value::String(code)) => Self {
-                code: Some(code.clone()),
-                message: text(payload.get("error_description")),
-            },
-            Some(Value::Object(fields)) => Self {
-                code: ["code", "error_code", "error", "type"]
-                    .into_iter()
-                    .find_map(|key| text(fields.get(key))),
-                message: text(fields.get("message")),
-            },
-            _ => Self {
-                code: None,
-                message: None,
-            },
-        }
-    }
-
-    /// "Not confirmed yet": the `Unauthorized` a poll expects until the user
-    /// has entered the code.
-    fn is_pending(&self) -> bool {
-        self.code
-            .as_deref()
-            .is_some_and(|code| code.eq_ignore_ascii_case("Unauthorized"))
-    }
-
-    /// `HTTP 400 InvalidValue: One or more provided values are invalid`.
-    fn describe(&self, status: StatusCode) -> String {
-        let mut text = format!("HTTP {}", status.as_u16());
-        if let Some(code) = &self.code {
-            text.push(' ');
-            text.push_str(code);
-        }
-        if let Some(message) = &self.message {
-            text.push_str(": ");
-            text.push_str(message);
-        }
-        text
+        return Err(LoginError::CodeRejected(reply.describe()));
     }
 }
 
@@ -348,15 +280,11 @@ fn non_empty_str<'a>(payload: &'a Value, key: &str) -> Result<&'a str, LoginErro
         .ok_or(LoginError::CodePairResponse)
 }
 
-/// A positive number of seconds — Amazon sends numbers as numbers or strings.
+/// A positive number of seconds (Amazon sends numbers as numbers or strings).
 fn positive_secs(payload: &Value, key: &str) -> Result<Duration, LoginError> {
-    let secs = match payload.get(key) {
-        Some(Value::Number(number)) => number.as_f64(),
-        Some(Value::String(text)) => text.trim().parse::<f64>().ok(),
-        _ => None,
-    }
-    .filter(|secs| secs.is_finite() && *secs > 0.0)
-    .ok_or(LoginError::CodePairResponse)?;
+    let secs = crate::timefmt::json_secs(payload.get(key))
+        .filter(|secs| secs.is_finite() && *secs > 0.0)
+        .ok_or(LoginError::CodePairResponse)?;
     Duration::try_from_secs_f64(secs).map_err(|_| LoginError::CodePairResponse)
 }
 
@@ -700,41 +628,6 @@ mod tests {
                 format!("Amazon rejected the device code ({expected})")
             );
         }
-    }
-
-    #[test]
-    fn amazon_errors_are_read_in_every_shape() {
-        let describe =
-            |payload: Value| AmazonError::from_payload(&payload).describe(StatusCode::BAD_REQUEST);
-        assert_eq!(
-            describe(
-                json!({ "response": { "error": { "code": "InvalidValue", "message": "bad" } } })
-            ),
-            "HTTP 400 InvalidValue: bad"
-        );
-        assert_eq!(
-            describe(json!({ "error": { "error_code": "Throttled" } })),
-            "HTTP 400 Throttled"
-        );
-        assert_eq!(
-            describe(json!({ "error": { "type": "ServerError", "message": "later" } })),
-            "HTTP 400 ServerError: later"
-        );
-        assert_eq!(
-            describe(json!({ "error": "invalid_request", "error_description": "no" })),
-            "HTTP 400 invalid_request: no"
-        );
-        assert_eq!(describe(json!({ "error": null })), "HTTP 400");
-        assert_eq!(describe(json!({})), "HTTP 400");
-        assert!(
-            AmazonError::from_payload(
-                &json!({ "response": { "error": { "code": "UNAUTHORIZED" } } })
-            )
-            .is_pending()
-        );
-        assert!(
-            !AmazonError::from_payload(&json!({ "error": "unauthorized_client" })).is_pending()
-        );
     }
 
     #[tokio::test]
