@@ -717,6 +717,7 @@ async fn run(
 async fn github_get<T: serde::de::DeserializeOwned>(url: &str) -> Result<T> {
     let http = reqwest::Client::builder()
         .connect_timeout(crate::api::client::CONNECT_TIMEOUT)
+        .read_timeout(crate::api::client::READ_TIMEOUT)
         .user_agent(concat!("audible-rs/", env!("CARGO_PKG_VERSION")))
         .build()?;
     let response = http
@@ -1019,10 +1020,8 @@ mod tests {
         // host has no route to it.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            if let Ok((stream, _)) = listener.accept().await {
-                drop(stream);
-            }
+        let accepted = tokio::spawn(async move {
+            matches!(listener.accept().await, Ok(_))
         });
         let url = format!("http://127.0.0.1:{port}/releases");
         assert!(
@@ -1036,6 +1035,10 @@ mod tests {
             )
             .await
             .is_ok()
+        );
+        assert!(
+            accepted.await.unwrap(),
+            "the request never reached its own listener — check proxy env vars"
         );
     }
 
