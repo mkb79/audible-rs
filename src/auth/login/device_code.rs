@@ -26,6 +26,11 @@ use crate::auth::device::Device;
 
 use super::{IdentityApi, LoginError, build_authenticator, register_request, registration_body};
 
+/// The MAP domain a code pair is created in. Always `Device`, whatever the
+/// profile registers under: `/auth/create/codepair` rejects the Android
+/// profile's `DeviceLegacy` with `HTTP 400 InvalidValue` (verified live),
+/// while `registration_data.domain` keeps the profile's value.
+const CODE_PAIR_DOMAIN: &str = "Device";
 /// Validity asked of Amazon for a code, in seconds (the response's
 /// `expires_in` is what counts).
 const CODE_DURATION_SECS: u32 = 600;
@@ -106,13 +111,18 @@ pub(crate) async fn create_code_pair_via(
     api: &IdentityApi,
     device: &Device,
 ) -> Result<CodePair, LoginError> {
-    // The pair is bound to the device identity the registration will carry:
-    // the same serial, type and MAP domain as `registration_data`.
+    // The pair is bound to the device the registration will carry: the same
+    // serial and type as `registration_data` (the domain is always `Device`).
+    tracing::debug!(
+        device_type = device.device_type(),
+        domain = CODE_PAIR_DOMAIN,
+        "requesting a device code"
+    );
     let body = serde_json::json!({
         "code_data": {
             "device_serial": device.serial(),
             "device_type": device.device_type(),
-            "domain": device.registration_domain(),
+            "domain": CODE_PAIR_DOMAIN,
         },
         "code_properties": {
             "code_duration": CODE_DURATION_SECS.to_string(),
@@ -476,6 +486,38 @@ mod tests {
         assert_eq!(pair.interval(), MIN_INTERVAL);
         assert!(pair.time_left() > Duration::from_secs(590));
         assert!(pair.time_left() <= Duration::from_secs(600));
+    }
+
+    /// The Android profile registers under `DeviceLegacy`, but its code pair
+    /// is still created in the `Device` domain (anything else is rejected).
+    #[tokio::test]
+    async fn android_code_pair_is_created_in_the_device_domain() {
+        let server = MockServer::start().await;
+        let device = Device::generate(DeviceKind::Android);
+        assert_eq!(device.registration_data()["domain"], "DeviceLegacy");
+        Mock::given(method("POST"))
+            .and(path("/auth/create/codepair"))
+            .and(body_partial_json(json!({
+                "code_data": {
+                    "device_serial": device.serial(),
+                    "device_type": "A10KISP2GWF0E4",
+                    "domain": "Device",
+                },
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "public_code": "ABCDE",
+                "private_code": "private-code",
+                "expires_in": 600,
+                "polling_interval_in_seconds": 5,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let pair = create_code_pair_via(&Client::new(), &api(&server), &device)
+            .await
+            .unwrap();
+        assert_eq!(pair.public_code(), "ABCDE");
     }
 
     #[tokio::test]
