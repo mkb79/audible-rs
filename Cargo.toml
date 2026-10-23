@@ -109,7 +109,7 @@ semver = "1.0"
 # owner-SID security descriptor that replaces the Unix 0700 socket dir, so
 # `serve_pipe` can be `trusted` with the same honesty as `serve_unix`.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
