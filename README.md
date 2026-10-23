@@ -275,11 +275,28 @@ one database (marketplace is a column, not a separate file). Downloads
 default to `downloads/` under the data directory unless you set a
 `download_dir`.
 
+## The auth-file password
+
+The auth file is encrypted by default, so every command that talks to
+Audible needs its passphrase. It can be entered interactively (the
+default), read from `AUDIBLE_AUTH_PASSWORD[_<NAME>]`, taken from the
+stdout of a nominated command, or read from a `0600` passwords file:
+
+```bash
+audible account password source <prompt|env|command|file>
+```
+
+`command` mode is what connects audible-rs to a secret store.
+[docs/password-sources.md](docs/password-sources.md) covers all four
+sources and has ready-made recipes for the macOS Keychain, `secret-tool`,
+`pass`, PowerShell SecretManagement, DPAPI and the 1Password CLI.
+
 ## Security
 
 - Auth material is stored in an encrypted envelope (Argon2id +
   XChaCha20-Poly1305) by default; an unencrypted mode exists but is not
-  recommended.
+  recommended. See [The auth-file password](#the-auth-file-password) for
+  how the passphrase is supplied.
 - Credentials never appear in logs, errors or command output at any
   verbosity level.
 - The tool only ever touches **your own** account and the content you
@@ -287,9 +304,11 @@ default to `downloads/` under the data directory unless you set a
 
 ## Documentation
 
-This README is a starting overview. Fuller documentation will live under
-`docs/` as the project matures; until then, `--help` on any command is
-the authoritative reference.
+This README is a starting overview, and `--help` on any command is the
+authoritative reference. Longer-form guides live under `docs/`:
+
+- [The auth-file password](docs/password-sources.md) — the four password
+  sources, and recipes for OS keychains and password managers.
 
 Changes between releases are tracked in [CHANGELOG.md](CHANGELOG.md)
 (Keep a Changelog format). The file — like the GitHub release notes — is
