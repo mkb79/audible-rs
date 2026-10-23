@@ -1020,9 +1020,7 @@ mod tests {
         // host has no route to it.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let accepted = tokio::spawn(async move {
-            matches!(listener.accept().await, Ok(_))
-        });
+        let accepted = tokio::spawn(async move { listener.accept().await.is_ok() });
         let url = format!("http://127.0.0.1:{port}/releases");
         assert!(
             run(
@@ -1036,8 +1034,13 @@ mod tests {
             .await
             .is_ok()
         );
+        // `run` has returned, so the accept happened if it ever will; bound the
+        // wait so a request that went elsewhere fails instead of hanging.
+        let accepted = tokio::time::timeout(std::time::Duration::from_secs(5), accepted)
+            .await
+            .is_ok_and(|joined| joined.unwrap());
         assert!(
-            accepted.await.unwrap(),
+            accepted,
             "the request never reached its own listener — check proxy env vars"
         );
     }
