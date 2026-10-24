@@ -343,7 +343,7 @@ async fn export_refuses_existing_files_without_force() {
 }
 
 /// The sign-in methods of `account login` (mkb79/Audible#906): the device
-/// code is the default, `--external` and the legacy `--password` are the
+/// code is the default, `--external` and the deprecated `--password` are the
 /// alternatives and exclude each other; the old aliases keep working.
 #[test]
 fn login_sign_in_methods_parse_and_exclude_each_other() {

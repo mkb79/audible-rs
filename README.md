@@ -22,9 +22,10 @@ Rust crate. It installs one binary, `audible`.
 
 - **Accounts** — sign in with a short device code you confirm in any
   browser (no password typed here; alternatively the external-browser
-  URL flow, a local browser-proxy with QR for headless boxes, or the
-  legacy scripted login), import a legacy `audible`/`audible-cli` auth
-  file, manage the auth-file password and its source, deregister.
+  URL flow, a local browser-proxy with QR for headless boxes, or — as a
+  deprecated fallback — the scripted login), import a legacy
+  `audible`/`audible-cli` auth file, manage the auth-file password and
+  its source, deregister.
 - **Library** — sync your library into a local SQLite database (full and
   delta), list, full-text search, export (JSON/CSV), review the change
   log, browse series, podcasts and episodes.

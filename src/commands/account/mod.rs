@@ -72,8 +72,9 @@ impl super::Command for AccountCommand {
                          never passes through this program and 2FA/CAPTCHA stay on Amazon's \
                          pages. --external prints a sign-in URL for your own browser instead \
                          and reads the redirect back (pre-merger Audible accounts, \
-                         --audible-username, always use it). --password is the legacy scripted \
-                         login that asks for email + password here.\n\n\
+                         --audible-username, always use it). --password is the deprecated \
+                         scripted login that asks for email + password here, kept only as a \
+                         fallback in case the device code does not work for you.\n\n\
                          A sign-in registers ONE device on a SINGLE marketplace — the same \
                          Audible account (user_id) is shared across all marketplaces, so \
                          registering per marketplace is unnecessary.\n\n\

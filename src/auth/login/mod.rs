@@ -11,8 +11,10 @@
 //!   URL the user opens in their browser, and the pasted redirect's
 //!   authorization code. The one flow pre-merger Audible accounts have;
 //!   also what the `login server` reverse proxy ([`server`]) drives.
-//! - **Scripted** (AUD-59, legacy): [`metadata1`] + a form-driven sign-in
-//!   with challenge handlers — breaks whenever Amazon changes its pages.
+//! - **Scripted** (AUD-59, deprecated): [`metadata1`] + a form-driven
+//!   sign-in with challenge handlers — breaks whenever Amazon changes its
+//!   pages. Kept only as a fallback in case the device code does not work
+//!   everywhere.
 //!
 //! Captured from live iOS app traffic (the browser flows) and the
 //! reference's test plugin for the issue (the device code); secrets are

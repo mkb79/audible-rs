@@ -20,8 +20,9 @@ use super::*;
 /// this program. `--external` prints the sign-in URL for your browser and
 /// reads back the redirect — the flow pre-merger Audible accounts
 /// (`--audible-username`, DE/US/UK) always take, as they have no Amazon
-/// sign-in. `--password` is the legacy scripted login that asks for email +
-/// password here and answers challenges in the terminal.
+/// sign-in. `--password` is the deprecated scripted login that asks for
+/// email + password here and answers challenges in the terminal — kept only
+/// as a fallback in case the device code does not work everywhere.
 #[derive(Debug, Args)]
 pub(super) struct LoginArgs {
     /// Use the browser-URL flow instead of the device code: print the sign-in
@@ -29,9 +30,10 @@ pub(super) struct LoginArgs {
     #[arg(long, alias = "link", help_heading = "Sign-in method")]
     external: bool,
 
-    /// Legacy: type your email + password here (the scripted login, with
-    /// CAPTCHA/OTP prompts in the terminal). Breaks whenever Amazon changes
-    /// its sign-in pages — prefer the default device code
+    /// Deprecated: type your email + password here (the scripted login, with
+    /// CAPTCHA/OTP prompts in the terminal). Only a fallback in case the
+    /// device code does not work for you; breaks whenever Amazon changes its
+    /// sign-in pages
     #[arg(
         long,
         alias = "scripted",
@@ -140,6 +142,12 @@ pub(super) async fn login(ctx: &Ctx, args: LoginArgs) -> Result<()> {
     }
 
     let auth = if args.password {
+        ctx.warn(
+            "password_login_deprecated",
+            "--password is deprecated: the scripted login is only a fallback in case \
+             the device code does not work for you (run `audible account login` \
+             without it)",
+        );
         login_scripted(&locale, &device, args.audible_username).await?
     } else if args.external || args.audible_username {
         if !args.external {
@@ -256,7 +264,7 @@ fn authorization_code_from_answer(answer: &str) -> Result<String> {
     Ok(login_flow::extract_authorization_code(&redirect)?)
 }
 
-/// The legacy scripted login: email + password typed here, challenges
+/// The deprecated scripted login: email + password typed here, challenges
 /// answered in the terminal. Pre-merger accounts sign in with an Audible
 /// username + password instead.
 async fn login_scripted(
