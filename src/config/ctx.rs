@@ -486,25 +486,61 @@ pub(crate) async fn resolve_password(
     }
 }
 
+/// How long a `password_command` may take before it is killed.
+///
+/// The bound has to survive a *legitimate* interactive unlock — a Touch ID
+/// tap, a Keychain "Allow" click, an `op` re-prompt — so it is deliberately
+/// generous; a few seconds would break exactly the keychain/password-manager
+/// setups `command` mode exists for. What it rules out is the hang: `op read`
+/// while signed out, or a keychain ACL prompt with no GUI session to draw it,
+/// would otherwise block the CLI forever with no output.
+const PASSWORD_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Runs `command` through the shell and returns its stdout as the passphrase
 /// (one trailing newline stripped). Never surfaces stdout in errors.
+///
+/// Gives up after [`PASSWORD_COMMAND_TIMEOUT`] and kills the child. This uses
+/// `tokio::process` rather than `spawn_blocking` deliberately: a blocking task
+/// cannot be cancelled, so a timeout wrapped around one would return control
+/// while leaking both a blocking thread and an orphaned child for the rest of
+/// the process's life. `kill_on_drop` reaps the shell when the future below is
+/// dropped on timeout.
 pub(crate) async fn run_password_command(command: &str) -> Result<SecretString> {
-    let command = command.to_owned();
-    let output = tokio::task::spawn_blocking(move || {
-        let mut cmd = if cfg!(windows) {
-            let mut cmd = std::process::Command::new("cmd");
-            cmd.arg("/C").arg(&command);
-            cmd
-        } else {
-            let mut cmd = std::process::Command::new("sh");
-            cmd.arg("-c").arg(&command);
-            cmd
-        };
-        cmd.output()
-    })
-    .await
-    .expect("blocking password command must not panic")
-    .context("could not run password_command")?;
+    run_password_command_within(command, PASSWORD_COMMAND_TIMEOUT).await
+}
+
+/// [`run_password_command`] with an explicit bound, so the timeout path is
+/// testable without waiting [`PASSWORD_COMMAND_TIMEOUT`] out.
+async fn run_password_command_within(
+    command: &str,
+    timeout: std::time::Duration,
+) -> Result<SecretString> {
+    let mut cmd = if cfg!(windows) {
+        let mut cmd = tokio::process::Command::new("cmd");
+        cmd.arg("/C").arg(command);
+        cmd
+    } else {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(command);
+        cmd
+    };
+    // stdin stays inherited: a command that prompts on the terminal must
+    // still be able to. stdout/stderr must be piped explicitly — unlike
+    // `std::process::Command::output`, `spawn` does not do it for us, and
+    // `kill_on_drop` needs them owned.
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let child = cmd.spawn().context("could not run password_command")?;
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(result) => result.context("could not run password_command")?,
+        Err(_) => bail!(
+            "password_command did not produce a passphrase within {}s and was killed \
+             — if it waits on a prompt, make sure it can reach one non-interactively",
+            timeout.as_secs()
+        ),
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -593,6 +629,33 @@ mod password_tests {
             !err.contains("secret-should-not-appear"),
             "stdout leaked: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn command_that_hangs_is_killed_and_reported() {
+        // A command that never exits on its own; the bound is short so the
+        // test is fast, but it is the same code path as the 60s default.
+        #[cfg(unix)]
+        let command = "sleep 60";
+        // `timeout` refuses to run without a console to read from, which CI
+        // runners don't have; `ping` blocks for the same duration without
+        // needing one.
+        #[cfg(windows)]
+        let command = "ping -n 61 127.0.0.1 > NUL";
+        let err = run_password_command_within(command, std::time::Duration::from_millis(250))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("did not produce a passphrase"), "{err}");
+        assert!(err.contains("was killed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_command_well_inside_the_bound_still_succeeds() {
+        let got = run_password_command_within("echo hunter2", std::time::Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(got.expose_secret(), "hunter2");
     }
 
     #[tokio::test]
