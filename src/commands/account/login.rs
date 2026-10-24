@@ -288,8 +288,8 @@ async fn login_scripted(
 /// `account login server`: runs a local reverse-proxy so a real browser (incl.
 /// a phone via QR) completes the sign-in while we capture the code. The user
 /// first picks the marketplace/device/name/pre-merger on a small config page;
-/// the CLI flags only pre-fill it. A fallback for the scripted login and a
-/// clean path for the `br` redirect.
+/// the CLI flags only pre-fill it. An alternative to the default device code
+/// and the browser-URL flow, and a clean path for the `br` redirect.
 pub(super) async fn login_server(ctx: &Ctx, args: ServerArgs) -> Result<()> {
     // The marketplace is chosen on the config page; -m (a single cc) only
     // pre-selects it.

@@ -97,6 +97,7 @@ pub enum LoginError {
         "Amazon served an anti-automation verification page that requires JavaScript — \
          the scripted login cannot pass it (no verification code is sent). \
          Sign in through a browser instead:\n  \
+         audible account login              (device code, the default: confirm it in any browser)\n  \
          audible account login --external   (paste the redirect URL back here)\n  \
          audible account login server       (opens a local sign-in page; headless-friendly)"
     )]

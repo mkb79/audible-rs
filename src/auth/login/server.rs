@@ -1,8 +1,8 @@
 //! `account login server` (AUD-60): a loopback reverse-proxy that serves
 //! Amazon's sign-in through itself, so a real browser — including a phone via a
 //! printed QR code — can complete the login while we capture the OAuth
-//! authorization code. A convenience/fallback path on top of the scripted
-//! login (AUD-59); it also clears the `br` redirect in a real browser.
+//! authorization code. An alternative to the default device code and the
+//! browser-URL flow; it also clears the `br` redirect in a real browser.
 //!
 //! The user first lands on a small Amazon-styled **config page** (pick the
 //! marketplace, device, account name, pre-merger username). On submit the
