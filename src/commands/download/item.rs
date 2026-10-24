@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 
 use crate::config::ctx::Ctx;
 use crate::models::content::DownloadLicense;

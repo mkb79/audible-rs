@@ -1,7 +1,7 @@
 //! Per-account credential material: `cookies`, `token`,
 //! `activation-bytes` and the Widevine CDM (`widevine fetch|set`).
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
 
 use crate::activation::ActivationMethod;
 use crate::auth::Authenticator;

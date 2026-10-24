@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 
 use crate::config::ctx::Ctx;
 use crate::models::content::{DownloadLicense, Voucher};

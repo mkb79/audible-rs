@@ -20,7 +20,7 @@ path = "src/lib.rs"
 # Async runtime & HTTP
 tokio = { version = "1.52", features = ["full"] }
 futures = "0.3"
-reqwest = { version = "0.13", features = ["json", "form", "cookies", "stream", "gzip", "brotli", "deflate"] }
+reqwest = { version = "0.13", default-features = false, features = ["charset", "http2", "system-proxy", "json", "form", "cookies", "stream", "gzip", "brotli", "deflate"] }
 # `account login server` reverse proxy (AUD-60). The hyper stack is already in
 # the tree via reqwest, so these are near-free; qrcode without `image` stays tiny.
 hyper = { version = "1.10", features = ["server", "http1"] }
@@ -86,7 +86,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Encoding & misc
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
 rand = "0.10"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
@@ -109,13 +109,21 @@ semver = "1.0"
 # owner-SID security descriptor that replaces the Unix 0700 socket dir, so
 # `serve_pipe` can be `trusted` with the same honesty as `serve_unix`.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_System_Memory",
     "Win32_System_Threading",
 ] }
+
+# rustls everywhere except Android: there, rustls-platform-verifier needs a JVM
+# context that a CLI in Termux doesn't have, so use the system OpenSSL instead.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["default-tls"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
 
 # Build-time only (Widevine proto codegen, pure Rust — no protoc needed).
 # Not linked into the release binary.
