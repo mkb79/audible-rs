@@ -10,13 +10,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use objc2::MainThreadMarker;
 
 use super::apple::{
-    DownloadEvent, KeyEvent, KeyMode, KeySession, PackageDownload, Player, PlayerStatus,
-    protect_package, pump,
+    DownloadEvent, KeyEvent, KeyMode, KeySession, PackageDownload, Player, PlayerStatus, pump,
 };
 
 /// One run-loop slice between two looks at the events.
@@ -36,19 +35,17 @@ pub struct DownloadJob<'a> {
     pub title: &'a str,
     /// The provider certificate.
     pub certificate: &'a [u8],
-    /// When the license ends, as a hint for the system's storage management.
-    pub expires: Option<SystemTime>,
 }
 
 /// A finished download.
 pub struct Downloaded {
-    /// Where AVFoundation put the package. It stays there.
+    /// Where AVFoundation put the package. Apple's documentation expects it
+    /// to stay there; `audible fairplay` moves it into its store all the
+    /// same, which the spike showed to keep it playable.
     pub package: PathBuf,
     /// The persistable keys by content id — DRM material, to be stored
     /// owner-only and never logged.
     pub keys: HashMap<String, Vec<u8>>,
-    /// Whether the package was marked important for the storage management.
-    pub protected: bool,
 }
 
 /// Progress of a download.
@@ -185,12 +182,7 @@ pub fn download(
         }
     }
     let (package, keys) = result?;
-    let protected = protect_package(&package, job.expires);
-    Ok(Downloaded {
-        package,
-        keys,
-        protected,
-    })
+    Ok(Downloaded { package, keys })
 }
 
 #[allow(clippy::too_many_arguments)]

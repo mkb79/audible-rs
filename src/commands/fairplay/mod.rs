@@ -82,7 +82,7 @@ fn codec_args() -> [Arg; 2] {
 /// `--dir`: the FairPlay store, shared by `download` and `play`.
 fn dir_arg() -> Arg {
     Arg::new("dir").long("dir").value_name("DIR").help(
-        "FairPlay store for the index and keys (default: \
+        "FairPlay store for the packages, index and keys (default: \
              ~/Library/Application Support/audible-rs/FairPlay); must lie outside \
              the download dir",
     )

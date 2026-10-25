@@ -6,9 +6,8 @@
 //! AVFoundation picks the package location and reports it through
 //! `willDownloadToURL`; the location is meant to be kept, not moved (Apple:
 //! save the URL for later `AVAsset`s). For a tool without an app container
-//! that is under `~/Library/Caches/com.apple.nsurlsessiond/Downloads/`, so
-//! [`protect_package`] marks the package as important for the system's
-//! storage management.
+//! that is under `~/Library/Caches/com.apple.nsurlsessiond/Downloads/`. An app
+//! that keeps it there can mark it important with [`protect_package`].
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,7 +24,7 @@ use objc2_av_foundation::{
     AVURLAsset,
 };
 use objc2_foundation::{
-    NSDate, NSError, NSObject, NSOperationQueue, NSString, NSURL, NSURLSession,
+    NSBundle, NSDate, NSError, NSObject, NSOperationQueue, NSString, NSURL, NSURLSession,
     NSURLSessionConfiguration, NSURLSessionDelegate, NSURLSessionTask, NSURLSessionTaskDelegate,
 };
 
@@ -193,9 +192,14 @@ impl Drop for PackageDownload {
 /// Marks the package at `location` as important for the system's storage
 /// management, so it is among the last to be purged when space runs low;
 /// `expires` adds an expiration date (e.g. the license's access expiry).
-/// Returns `false` where the storage manager is not available.
+/// Returns `false` where it cannot: without the storage manager, or without
+/// a bundle identifier — the manager keys its policies on the app and, for a
+/// plain command-line tool, raises an exception instead of an error (seen on
+/// macOS 27), which would abort the process.
 pub fn protect_package(location: &Path, expires: Option<SystemTime>) -> bool {
-    if AnyClass::get(c"AVAssetDownloadStorageManager").is_none() {
+    if AnyClass::get(c"AVAssetDownloadStorageManager").is_none()
+        || NSBundle::mainBundle().bundleIdentifier().is_none()
+    {
         return false;
     }
     let policy = unsafe { AVMutableAssetDownloadStorageManagementPolicy::new() };

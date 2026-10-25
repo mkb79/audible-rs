@@ -3,12 +3,9 @@
 //! an entry in the FairPlay store. No database writes, no fallback to another
 //! format.
 //!
-//! The package stays where AVFoundation puts it (for a command-line tool
-//! below `~/Library/Caches/com.apple.nsurlsessiond/Downloads/`), as Apple
-//! requires; it is marked important for the system's storage management, and
-//! the store records where it is.
+//! AVFoundation downloads into the system cache; the finished package then
+//! moves into the FairPlay store (see [`super::store`]).
 
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, anyhow, bail};
@@ -32,9 +29,9 @@ pub(super) fn command() -> clap::Command {
         .long_about(
             "Download the audio of titles as FairPlay packages (experimental, macOS only). \
              Only FairPlay is requested; a title Audible does not serve with FairPlay fails \
-             instead of falling back to another format. The package stays where AVFoundation \
-             puts it (below ~/Library/Caches/com.apple.nsurlsessiond/Downloads), as Apple \
-             requires; the FairPlay store records its location and keys. Play it with \
+             instead of falling back to another format. The finished package moves from the \
+             system cache into the FairPlay store (~/Library/Application \
+             Support/audible-rs/FairPlay, or --dir), next to its keys. Play it with \
              `audible fairplay play`.",
         );
     crate::commands::items::item_source_args(cmd)
@@ -164,10 +161,13 @@ pub(super) async fn run(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
         };
         match download_one(&target, asin, title).await {
             Ok(entry) => {
-                // A forced re-download replaces the earlier package of the
-                // title; it is ours (the index recorded it), so it can go.
-                if let Some(old) = previous.filter(|old| old.package != entry.package) {
-                    remove_package(&old.package);
+                // The new package replaced the old one at the same path; an
+                // entry pointing elsewhere (an earlier layout) is cleaned up.
+                if let Some(old) = previous.filter(|old| old.package != entry.package)
+                    && old.package.extension().is_some_and(|ext| ext == "movpkg")
+                    && let Err(error) = super::store::remove_package(&old.package)
+                {
+                    eprintln!("warning: {error:#}");
                 }
                 rows.push(vec![
                     asin.clone(),
@@ -212,14 +212,6 @@ async fn download_one(target: &Target<'_>, asin: &str, title: Option<String>) ->
         Some(certificate) => certificate.clone(),
         None => fairplay::request_certificate(target.client, target.marketplace).await?,
     };
-    // A purchase expires in the year 9999; only a real end is a hint worth
-    // giving the storage management.
-    let expires = grant
-        .access_expiry
-        .as_deref()
-        .and_then(crate::timefmt::parse_iso)
-        .filter(|end| end.year() < 9999)
-        .map(std::time::SystemTime::from);
     let bar = target.show_progress.then(|| {
         let bar = indicatif::ProgressBar::new(1000);
         bar.set_style(
@@ -235,7 +227,6 @@ async fn download_one(target: &Target<'_>, asin: &str, title: Option<String>) ->
         hls_url: &grant.hls_url,
         title: title.as_deref().unwrap_or(asin),
         certificate: &certificate,
-        expires,
     };
     // AVFoundation runs on the main thread's run loop: the driver blocks it
     // and calls back for each SPC, which goes to the license server on the
@@ -262,20 +253,28 @@ async fn download_one(target: &Target<'_>, asin: &str, title: Option<String>) ->
         bar.finish_and_clear();
     }
     let done = result.map_err(|error| anyhow!("{asin}: {error}"))?;
-    if !done.protected {
-        tracing::debug!(
-            "the storage manager is not available; the package is not marked important"
-        );
-    }
 
+    // Keys first: a package without its keys is useless, keys without a
+    // package are just a few bytes.
     let keys = Store::keys_name(target.marketplace, asin);
     target.store.write_keys(&keys, &done.keys)?;
+    let package = match target
+        .store
+        .adopt_package(target.marketplace, asin, &done.package)
+    {
+        Ok(package) => package,
+        Err(error) => {
+            // It would otherwise linger in the system cache, unrecorded.
+            let _ = super::store::remove_package(&done.package);
+            return Err(error);
+        }
+    };
     Ok(Entry {
         asin: asin.to_owned(),
         marketplace: target.marketplace.to_owned(),
         account: target.account.to_owned(),
         title,
-        package: done.package,
+        package,
         keys,
         codec: grant.codec,
         content_format: grant.content_format,
@@ -391,20 +390,6 @@ fn describe_variants(master: &fairplay::Playlist) -> String {
     }
 }
 
-/// Deletes a replaced package — only ever an AVFoundation package the index
-/// recorded, never anything else.
-fn remove_package(package: &Path) {
-    if package.extension().is_some_and(|ext| ext == "movpkg")
-        && let Err(error) = std::fs::remove_dir_all(package)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        eprintln!(
-            "warning: could not delete the replaced package {}: {error}",
-            package.display()
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,19 +409,5 @@ mod tests {
         );
         let media = fairplay::hls::parse("#EXTM3U\n#EXTINF:10,\ns.mp4\n").unwrap();
         assert_eq!(describe_variants(&media), "single media playlist");
-    }
-
-    #[test]
-    fn only_packages_are_removed() {
-        let dir = tempfile::tempdir().unwrap();
-        let package = dir.path().join("title.movpkg");
-        std::fs::create_dir(&package).unwrap();
-        std::fs::write(package.join("segment"), b"x").unwrap();
-        let other = dir.path().join("keep");
-        std::fs::create_dir(&other).unwrap();
-        remove_package(&package);
-        remove_package(&other);
-        assert!(!package.exists());
-        assert!(other.exists());
     }
 }

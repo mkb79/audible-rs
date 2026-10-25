@@ -300,16 +300,17 @@ audible fairplay stream --asin B0EXAMPLE1       # online, nothing is stored
 Unlike `audible download`, a FairPlay download is **not a file you can
 keep or convert**: it is an AVFoundation package (`.movpkg`) that only
 plays through AVFoundation with its stored key — no `m4b`, no export. The
-package stays where AVFoundation puts it (below
-`~/Library/Caches/com.apple.nsurlsessiond/Downloads/`), as Apple
-requires, and is marked important for the system's storage management;
-the keys are bound to this Mac.
+keys are bound to this Mac. AVFoundation downloads into the system cache
+(`~/Library/Caches/com.apple.nsurlsessiond/Downloads/`); the finished
+package then moves into the FairPlay store, so no cache cleanup can take
+it. (Apple's documentation expects a package to stay where it was
+downloaded; a moved one plays fine.)
 
 `audible fairplay` keeps apart from the rest of the CLI: it writes
 nothing to the library database. Its own store —
 `~/Library/Application Support/audible-rs/FairPlay/`, or `--dir` outside
-the download dir — holds an `index.json` with the package locations and
-the persistable keys (owner-only). Covers, chapters and PDFs still come
+the download dir — holds the packages, an `index.json` and the
+persistable keys (owner-only). Covers, chapters and PDFs still come
 from `audible download`.
 
 ## Security
