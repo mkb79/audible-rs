@@ -289,7 +289,9 @@ default to `downloads/` under the data directory unless you set a
 
 `audible fairplay` downloads, streams and plays titles that Audible
 serves with FairPlay, the DRM of its Apple apps. It uses Apple's
-AVFoundation through Rust bindings and exists on macOS only.
+AVFoundation through Rust bindings and exists on macOS only. It works
+with accounts registered as an iPhone and as an Android device alike —
+FairPlay runs on the Mac, not on the registered device.
 
 ```sh
 audible fairplay download --asin B0EXAMPLE1     # --codec xhe, --spatial, --quality normal
