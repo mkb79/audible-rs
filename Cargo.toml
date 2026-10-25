@@ -117,6 +117,16 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
 ] }
 
+# Experimental FairPlay (AUD-321, `audible fairplay`): AVFoundation through
+# the objc2 bindings — macOS only, no Swift, no extra build step.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2-foundation = "0.3"
+objc2-av-foundation = { version = "0.3", features = ["objc2-core-media"] }
+objc2-core-media = "0.3"
+
 # rustls everywhere except Android: there, rustls-platform-verifier needs a JVM
 # context that a CLI in Termux doesn't have, so use the system OpenSSL instead.
 [target.'cfg(not(target_os = "android"))'.dependencies]

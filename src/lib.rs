@@ -20,6 +20,8 @@ pub mod config;
 pub mod crypto;
 pub mod db;
 pub mod downloader;
+#[cfg(target_os = "macos")]
+pub mod fairplay;
 pub(crate) mod fsutil;
 pub mod library_sync;
 pub mod output;

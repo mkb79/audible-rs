@@ -31,6 +31,8 @@ Rust crate. It installs one binary, `audible`.
   log, browse series, podcasts and episodes.
 - **Download** — owned titles as `aaxc` with resume, plus chapters,
   cover and PDF; optional lossless decrypt to a playable `m4b`.
+- **FairPlay** *(experimental, macOS only)* — download, stream and play
+  titles Audible serves with FairPlay, through Apple's AVFoundation.
 - **Collections** — wishlist and archive (list, add, remove).
 - **Raw API** — send authenticated requests to the Audible API for
   anything the higher-level commands don't cover.
@@ -255,6 +257,7 @@ Commands are grouped by noun; each has subcommands (`audible <noun>
 | `library` | `sync`, `list` (with `--kind book,podcast,episode`), `search`, `episodes`, `export`, `changes`, `add`, `remove`. |
 | `series` | Series volumes, including the ones you are missing. |
 | `download` | Download owned titles (audio/chapter/cover/pdf), decrypt, reorganize, orphans, info. |
+| `fairplay` | *Experimental, macOS only:* FairPlay `download`, `stream` and `play` (see below). |
 | `collections` | Wishlist and archive (`list`, `add`, `remove`). |
 | `annotations` | Bookmarks, notes, clips and last-position. |
 | `api` | Send raw authenticated requests to the Audible API. |
@@ -281,6 +284,33 @@ account or per marketplace — so two accounts that resolve to the same
 one database (marketplace is a column, not a separate file). Downloads
 default to `downloads/` under the data directory unless you set a
 `download_dir`.
+
+## FairPlay (experimental, macOS only)
+
+`audible fairplay` downloads, streams and plays titles that Audible
+serves with FairPlay, the DRM of its Apple apps. It uses Apple's
+AVFoundation through Rust bindings and exists on macOS only.
+
+```sh
+audible fairplay download --asin B0EXAMPLE1     # --codec xhe, --spatial, --quality normal
+audible fairplay play --asin B0EXAMPLE1         # offline, --start/--duration in seconds
+audible fairplay stream --asin B0EXAMPLE1       # online, nothing is stored
+```
+
+Unlike `audible download`, a FairPlay download is **not a file you can
+keep or convert**: it is an AVFoundation package (`.movpkg`) that only
+plays through AVFoundation with its stored key — no `m4b`, no export. The
+package stays where AVFoundation puts it (below
+`~/Library/Caches/com.apple.nsurlsessiond/Downloads/`), as Apple
+requires, and is marked important for the system's storage management;
+the keys are bound to this Mac.
+
+`audible fairplay` keeps apart from the rest of the CLI: it writes
+nothing to the library database. Its own store —
+`~/Library/Application Support/audible-rs/FairPlay/`, or `--dir` outside
+the download dir — holds an `index.json` with the package locations and
+the persistable keys (owner-only). Covers, chapters and PDFs still come
+from `audible download`.
 
 ## Security
 

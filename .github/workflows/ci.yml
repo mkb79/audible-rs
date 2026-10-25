@@ -43,17 +43,18 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
-  # clippy on both platforms: it only lints the code active for the target,
+  # clippy on every platform: it only lints the code active for the target,
   # so a Linux-only run never sees the `#[cfg(not(unix))]` branches (the
-  # Windows agent stubs, the plugin loader's Windows is_executable). rustfmt,
+  # Windows agent stubs, the plugin loader's Windows is_executable) or the
+  # macOS-only FairPlay module (AVFoundation via objc2, AUD-321). rustfmt,
   # by contrast, parses every branch regardless of target, so `fmt` stays
   # Linux-only.
   clippy:
     name: clippy
     strategy:
-      fail-fast: false # a Windows failure must not abort the Linux run
+      fail-fast: false # one platform's failure must not abort the others
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -63,16 +64,17 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo clippy --all-targets -- -D warnings
 
-  # test on both platforms: `cargo test` builds every target (so it proves the
+  # test on every platform: `cargo test` builds every target (so it proves the
   # binary compiles) and runs the suite — the Windows run is the authoritative
-  # MSVC build + runtime proof (AUD-188). No separate `cargo build` step: test
-  # already compiles the binary.
+  # MSVC build + runtime proof (AUD-188), the macOS run the one for the
+  # FairPlay module (AUD-321). No separate `cargo build` step: test already
+  # compiles the binary.
   test:
     name: test
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

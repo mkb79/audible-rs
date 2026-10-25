@@ -15,6 +15,8 @@ pub mod completions;
 pub mod config;
 pub mod db;
 pub mod download;
+#[cfg(target_os = "macos")]
+pub mod fairplay;
 pub(crate) mod hosts;
 pub mod items;
 
@@ -238,6 +240,8 @@ pub fn registry() -> Vec<Box<dyn Command>> {
         Box::new(config::ConfigCommand),
         Box::new(db::DbCommand),
         Box::new(download::DownloadCommand),
+        #[cfg(target_os = "macos")]
+        Box::new(fairplay::FairplayCommand),
         Box::new(library::LibraryCommand),
         Box::new(plugin::PluginCommand),
         Box::new(selfcmd::SelfCommand),
