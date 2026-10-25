@@ -14,13 +14,22 @@ use crate::config::ctx::Ctx;
 use crate::fairplay::driver::{self, PlayEvent, PlaySource, Playback};
 use crate::fairplay::{self, Consumption};
 
-fn playback_args() -> [Arg; 2] {
+fn playback_args() -> [Arg; 3] {
     [
         Arg::new("start")
             .long("start")
             .value_name("SECS")
             .value_parser(clap::value_parser!(f64))
-            .help("Start position in seconds"),
+            .conflicts_with("exact_start")
+            .help(
+                "Start position in seconds; jumps to the segment boundary before it (fast, \
+                 a few seconds early)",
+            ),
+        Arg::new("exact_start")
+            .long("exact-start")
+            .value_name("SECS")
+            .value_parser(clap::value_parser!(f64))
+            .help("Start exactly at this position in seconds (takes a moment longer)"),
         Arg::new("duration")
             .long("duration")
             .value_name("SECS")
@@ -62,8 +71,12 @@ pub(super) fn play_command() -> clap::Command {
 }
 
 fn playback(matches: &clap::ArgMatches) -> Playback {
+    let exact = matches.get_one::<f64>("exact_start").copied();
     Playback {
-        start: matches.get_one::<f64>("start").copied().unwrap_or(0.0),
+        start: exact
+            .or_else(|| matches.get_one::<f64>("start").copied())
+            .unwrap_or(0.0),
+        exact: exact.is_some(),
         duration: matches.get_one::<f64>("duration").copied(),
     }
 }
@@ -200,5 +213,34 @@ impl Status {
         if self.printed {
             eprintln!();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<clap::ArgMatches, clap::Error> {
+        clap::Command::new("t")
+            .args(playback_args())
+            .try_get_matches_from(std::iter::once("t").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn start_and_exact_start_exclude_each_other() {
+        assert!(parse(&["--start", "10", "--exact-start", "20"]).is_err());
+    }
+
+    #[test]
+    fn playback_follows_the_start_flags() {
+        let default = playback(&parse(&[]).unwrap());
+        assert_eq!((default.start, default.exact), (0.0, false));
+        let fast = playback(&parse(&["--start", "3600"]).unwrap());
+        assert_eq!((fast.start, fast.exact), (3600.0, false));
+        let exact = playback(&parse(&["--exact-start", "3600", "--duration", "10"]).unwrap());
+        assert_eq!(
+            (exact.start, exact.exact, exact.duration),
+            (3600.0, true, Some(10.0))
+        );
     }
 }

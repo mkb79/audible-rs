@@ -8,7 +8,7 @@ use objc2::rc::Retained;
 use objc2_av_foundation::{
     AVPlayer, AVPlayerItem, AVPlayerItemStatus, AVPlayerTimeControlStatus, AVURLAsset,
 };
-use objc2_core_media::CMTime;
+use objc2_core_media::{CMTime, kCMTimeZero};
 use objc2_foundation::{NSString, NSURL};
 
 use super::{KeySession, describe};
@@ -69,9 +69,22 @@ impl Player {
         unsafe { self.player.pause() };
     }
 
-    /// Jumps to `seconds`.
+    /// Jumps to `seconds` — fast, but AVPlayer may land on the segment
+    /// boundary before it, a few seconds early.
     pub fn seek(&self, seconds: f64) {
         unsafe { self.player.seekToTime(CMTime::with_seconds(seconds, 600)) };
+    }
+
+    /// Jumps to exactly `seconds` (no tolerance), which takes a moment
+    /// longer: AVPlayer decodes from the segment start up to the position.
+    pub fn seek_exact(&self, seconds: f64) {
+        unsafe {
+            self.player.seekToTime_toleranceBefore_toleranceAfter(
+                CMTime::with_seconds(seconds, 600),
+                kCMTimeZero,
+                kCMTimeZero,
+            );
+        }
     }
 
     /// Where the player stands.

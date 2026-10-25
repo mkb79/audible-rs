@@ -293,7 +293,7 @@ AVFoundation through Rust bindings and exists on macOS only.
 
 ```sh
 audible fairplay download --asin B0EXAMPLE1     # --codec xhe, --spatial, --quality normal
-audible fairplay play --asin B0EXAMPLE1         # offline, --start/--duration in seconds
+audible fairplay play --asin B0EXAMPLE1         # offline, --start or --exact-start, --duration
 audible fairplay stream --asin B0EXAMPLE1       # online, nothing is stored
 ```
 

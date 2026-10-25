@@ -82,6 +82,8 @@ pub enum PlaySource<'a> {
 pub struct Playback {
     /// Where to start, in seconds.
     pub start: f64,
+    /// Start exactly at `start` instead of the segment boundary before it.
+    pub exact: bool,
     /// How long to play, in seconds; `None` plays to the end.
     pub duration: Option<f64>,
 }
@@ -300,7 +302,11 @@ pub fn play(
         if !ready {
             ready = true;
             if playback.start > 0.0 {
-                player.seek(playback.start);
+                if playback.exact {
+                    player.seek_exact(playback.start);
+                } else {
+                    player.seek(playback.start);
+                }
             }
             events(PlayEvent::Ready {
                 duration: player.duration(),
