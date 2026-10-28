@@ -153,9 +153,9 @@ pub fn build_root(registry: &[Box<dyn Command>]) -> clap::Command {
                 .action(ArgAction::Count)
                 .global(true)
                 .help_heading(GLOBAL_OPTIONS)
-                .help("Increase log verbosity (-v info, -vv debug, -vvv trace)")
+                .help("Increase log verbosity (-v for info, -vv for debug, -vvv for trace)")
                 .long_help(
-                    "Increase log verbosity (-v info, -vv debug, -vvv trace).\n\
+                    "Increase log verbosity (-v for info, -vv for debug, -vvv for trace).\n\
                      Verbosity never changes WHAT is logged: credentials appear \
                      at no level. Explicit flags take precedence over RUST_LOG.",
                 ),
