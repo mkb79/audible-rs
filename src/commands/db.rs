@@ -57,6 +57,16 @@ impl super::Command for DbCommand {
                                 .help(
                                     "Only show this audio variant (original|decrypted|reencoded)",
                                 ),
+                        )
+                        .arg(
+                            Arg::new("always_show_selector")
+                                .long("always-show-selector")
+                                .action(ArgAction::SetTrue)
+                                .help(
+                                    "Always show the manual selector when filtering items \
+                                     using --title, even if the filter only returned a single \
+                                     item (overrides config)",
+                                ),
                         ),
                     )
                     .subcommand(
@@ -148,6 +158,16 @@ impl super::Command for DbCommand {
                                 .action(ArgAction::SetTrue)
                                 .help("Also delete the files on disk (not just the records)"),
                         )
+                        .arg(
+                            Arg::new("always_show_selector")
+                                .long("always-show-selector")
+                                .action(ArgAction::SetTrue)
+                                .help(
+                                    "Always show the manual selector when filtering items \
+                                     using --title, even if the filter only returned a single \
+                                     item (overrides config)",
+                                ),
+                        )
                         .arg(super::yes_arg()),
                     )
                     .subcommand(clap::Command::new("check").about(
@@ -186,6 +206,16 @@ impl super::Command for DbCommand {
                                 .args(["asin", "title"])
                                 .multiple(true)
                                 .required(true),
+                        )
+                        .arg(
+                            Arg::new("always_show_selector")
+                                .long("always-show-selector")
+                                .action(ArgAction::SetTrue)
+                                .help(
+                                    "Always show the manual selector when filtering items \
+                                     using --title, even if the filter only returned a single \
+                                     item (overrides config)",
+                                ),
                         )
                         .arg(super::yes_arg()),
                     ),
@@ -235,6 +265,13 @@ impl super::Command for DbCommand {
             Some(("downloads", sub)) => match sub.subcommand() {
                 Some(("list", list)) => {
                     let has_source = list.contains_id("asin") || list.contains_id("title");
+                    let always_show_selector = if list.get_flag("always_show_selector") {
+                        true
+                    } else {
+                        ctx.settings_view()
+                            .map(|v| v.always_show_selector())
+                            .unwrap_or(false)
+                    };
                     downloads_list(
                         ctx,
                         strings(list, "asin"),
@@ -242,6 +279,7 @@ impl super::Command for DbCommand {
                         has_source,
                         list.get_one::<String>("kind").cloned(),
                         list.get_one::<String>("variant").cloned(),
+                        always_show_selector,
                     )
                     .await
                 }
@@ -260,6 +298,13 @@ impl super::Command for DbCommand {
                 }
                 Some(("remove", remove)) => {
                     let has_source = remove.contains_id("asin") || remove.contains_id("title");
+                    let always_show_selector = if remove.get_flag("always_show_selector") {
+                        true
+                    } else {
+                        ctx.settings_view()
+                            .map(|v| v.always_show_selector())
+                            .unwrap_or(false)
+                    };
                     downloads_remove(
                         ctx,
                         strings(remove, "asin"),
@@ -270,6 +315,7 @@ impl super::Command for DbCommand {
                         remove.get_one::<String>("variant").cloned(),
                         remove.get_flag("with_files"),
                         remove.get_flag("yes"),
+                        always_show_selector,
                     )
                     .await
                 }
@@ -279,11 +325,19 @@ impl super::Command for DbCommand {
             },
             Some(("library", sub)) => match sub.subcommand() {
                 Some(("remove", remove)) => {
+                    let always_show_selector = if remove.get_flag("always_show_selector") {
+                        true
+                    } else {
+                        ctx.settings_view()
+                            .map(|v| v.always_show_selector())
+                            .unwrap_or(false)
+                    };
                     library_remove(
                         ctx,
                         strings(remove, "asin"),
                         strings(remove, "title"),
                         remove.get_flag("yes"),
+                        always_show_selector,
                     )
                     .await
                 }
@@ -319,6 +373,7 @@ async fn library_remove(
     asins: Vec<String>,
     titles: Vec<String>,
     yes: bool,
+    always_show_selector: bool,
 ) -> Result<()> {
     let db = ctx.open_library_db().await?;
     // Destructive single-marketplace operation: -m must select one.
@@ -330,6 +385,7 @@ async fn library_remove(
         asins,
         titles,
         crate::commands::items::PodcastMode::ItemsOnly,
+        always_show_selector,
     )
     .await?;
     if resolved.is_empty() {
@@ -1064,6 +1120,7 @@ async fn select_downloads(
     ctx: &Ctx,
     db: &crate::db::Db,
     selection: DownloadSelection,
+    always_show_selector: bool,
 ) -> Result<Vec<DownloadEntry>> {
     let asin_filter: Option<std::collections::HashSet<String>> = if selection.has_source {
         let marketplace = ctx.marketplace_single()?;
@@ -1073,6 +1130,7 @@ async fn select_downloads(
             selection.asins,
             selection.titles,
             crate::commands::items::PodcastMode::Episodes,
+            always_show_selector,
         )
         .await?;
         // D7: a named selection that resolves to nothing fails.
@@ -1111,6 +1169,7 @@ async fn downloads_list(
     has_source: bool,
     kind: Option<String>,
     variant: Option<String>,
+    always_show_selector: bool,
 ) -> Result<()> {
     let db = ctx.open_library_db().await?;
     let entries = select_downloads(
@@ -1124,6 +1183,7 @@ async fn downloads_list(
             variant,
             ..Default::default()
         },
+        always_show_selector,
     )
     .await?;
 
@@ -1192,6 +1252,7 @@ async fn downloads_remove(
     variant: Option<String>,
     with_files: bool,
     yes: bool,
+    always_show_selector: bool,
 ) -> Result<()> {
     if !has_source && kind.is_none() && format.is_none() && variant.is_none() {
         bail!(
@@ -1218,6 +1279,7 @@ async fn downloads_remove(
             format,
             variant,
         },
+        always_show_selector,
     )
     .await?;
 

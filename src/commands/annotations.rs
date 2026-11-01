@@ -75,6 +75,16 @@ impl super::Command for AnnotationsCommand {
                         .conflicts_with_all(["asin", "title", "missing"])
                         .help("Every owned item"),
                 )
+                .arg(
+                    Arg::new("always_show_selector")
+                        .long("always-show-selector")
+                        .action(ArgAction::SetTrue)
+                        .help(
+                            "Always show the manual selector when filtering items \
+                             using --title, even if the filter only returned a single \
+                             item (overrides config)",
+                        ),
+                )
                 .arg(save()),
             )
             .subcommand(
@@ -132,6 +142,13 @@ async fn sync(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
     if asins.is_empty() && titles.is_empty() && !all && !missing {
         bail!("select items with --asin/--title, or --all / --missing");
     }
+    let always_show_selector = if matches.get_flag("always_show_selector") {
+        true
+    } else {
+        ctx.settings_view()
+            .map(|v| v.always_show_selector())
+            .unwrap_or(false)
+    };
 
     let (mut ok, mut none, mut failed) = (0usize, 0usize, 0usize);
     let mut total_targets = 0usize;
@@ -149,6 +166,7 @@ async fn sync(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
                 asins.clone(),
                 titles.clone(),
                 crate::commands::items::PodcastMode::Episodes,
+                always_show_selector,
             )
             .await?
         };

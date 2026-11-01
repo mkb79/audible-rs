@@ -53,6 +53,16 @@ pub(super) fn stream_command() -> clap::Command {
                 .action(clap::ArgAction::SetTrue)
                 .help("Allow an --asin that is not in your library"),
         )
+        .arg(
+            Arg::new("always_show_selector")
+                .long("always-show-selector")
+                .action(clap::ArgAction::SetTrue)
+                .help(
+                    "Always show the manual selector when filtering items \
+                     using --title, even if the filter only returned a single \
+                     item (overrides config)",
+                ),
+        )
         .args(super::codec_args())
         .args(playback_args())
 }
@@ -66,6 +76,16 @@ pub(super) fn play_command() -> clap::Command {
              on Ctrl-C.",
         );
     crate::commands::items::item_source_args(cmd)
+        .arg(
+            Arg::new("always_show_selector")
+                .long("always-show-selector")
+                .action(clap::ArgAction::SetTrue)
+                .help(
+                    "Always show the manual selector when filtering items \
+                     using --title, even if the filter only returned a single \
+                     item (overrides config)",
+                ),
+        )
         .arg(super::dir_arg())
         .args(playback_args())
 }

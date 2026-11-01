@@ -79,8 +79,11 @@ fn parse_title_arg(raw: &str) -> Result<TitleQuery> {
 
 /// Resolves explicit `--asin` values (passed through verbatim, trusted as
 /// exact ids) and `--title` searches into a deduped, order-preserving
-/// ASIN list. Per title: 0 hits → warning + skip; 1 → taken; many →
-/// interactive multi-select on a TTY, otherwise an "ambiguous" error.
+/// ASIN list.
+/// Per title: 0 hits → warning + skip;
+/// 1 + `always_show_selector=false` → taken;
+/// many or (1 + `always_show_selector=true`) → interactive multi-select
+/// on a TTY, otherwise an "ambiguous" error.
 ///
 /// `mode` (AUD-174, AUD-196) controls podcast handling:
 /// [`PodcastMode::ItemsOnly`] surfaces only items (membership commands — a
@@ -98,6 +101,7 @@ pub(crate) async fn resolve_asins(
     asins: Vec<String>,
     titles: Vec<String>,
     mode: PodcastMode,
+    always_show_selector: bool,
 ) -> Result<Vec<String>> {
     let mut result: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -138,7 +142,7 @@ pub(crate) async fn resolve_asins(
             0 => {
                 eprintln!("no title matches {:?}", tq.query);
             }
-            1 => {
+            1 if !always_show_selector => {
                 choose(&candidates[0], &mut push);
             }
             _ => {
@@ -646,15 +650,23 @@ mod tests {
             vec!["A1".into(), "A1".into(), "ZZ".into()],
             vec![],
             PodcastMode::ItemsOnly,
+            false,
         )
         .await
         .unwrap();
         assert_eq!(result, vec!["A1", "ZZ"]);
 
         // (b) title single match → taken
-        let result = resolve_asins(&db, MP, vec![], vec!["jedi".into()], PodcastMode::ItemsOnly)
-            .await
-            .unwrap();
+        let result = resolve_asins(
+            &db,
+            MP,
+            vec![],
+            vec!["jedi".into()],
+            PodcastMode::ItemsOnly,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(result, vec!["A1"]);
 
         // (c) title no match → skip, empty result
@@ -664,6 +676,7 @@ mod tests {
             vec![],
             vec!["nomatch".into()],
             PodcastMode::ItemsOnly,
+            false,
         )
         .await
         .unwrap();
@@ -678,6 +691,7 @@ mod tests {
             vec![],
             vec!["Jedi OR Star".into()],
             PodcastMode::ItemsOnly,
+            false,
         )
         .await;
         assert!(
@@ -692,6 +706,7 @@ mod tests {
             vec!["A1".into()],
             vec!["jedi".into()], // also resolves to A1
             PodcastMode::ItemsOnly,
+            false,
         )
         .await
         .unwrap();
@@ -740,6 +755,7 @@ mod tests {
             vec![],
             vec!["Anfang".into()],
             PodcastMode::ItemsOnly,
+            false,
         )
         .await
         .unwrap();
@@ -754,6 +770,7 @@ mod tests {
             vec![],
             vec!["Anfang".into()],
             PodcastMode::Episodes,
+            false,
         )
         .await
         .unwrap();
@@ -767,6 +784,7 @@ mod tests {
             vec![],
             vec!["Sonderfolge".into()],
             PodcastMode::ItemsOnly,
+            false,
         )
         .await
         .unwrap();
@@ -779,6 +797,7 @@ mod tests {
             vec![],
             vec!["Sonderfolge".into()],
             PodcastMode::Episodes,
+            false,
         )
         .await
         .unwrap();
@@ -820,6 +839,7 @@ mod tests {
             vec!["P1".into()],
             vec![],
             PodcastMode::Download { include: true },
+            false,
         )
         .await
         .unwrap();
@@ -833,6 +853,7 @@ mod tests {
             vec!["P1".into()],
             vec![],
             PodcastMode::Download { include: false },
+            false,
         )
         .await
         .unwrap();
@@ -845,6 +866,7 @@ mod tests {
             vec!["E1".into()],
             vec![],
             PodcastMode::Download { include: false },
+            false,
         )
         .await
         .unwrap();
@@ -861,6 +883,7 @@ mod tests {
             vec!["B1".into(), "P1".into(), "E1".into()],
             vec![],
             PodcastMode::Download { include: true },
+            false,
         )
         .await
         .unwrap();

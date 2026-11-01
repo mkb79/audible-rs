@@ -29,6 +29,16 @@ pub(super) fn info_command() -> clap::Command {
         clap::Command::new("info")
             .about("Show what download could fetch for an item, and what is already on disk"),
     )
+    .arg(
+        clap::Arg::new("always_show_selector")
+            .long("always-show-selector")
+            .action(clap::ArgAction::SetTrue)
+            .help(
+                "Always show the manual selector when filtering items \
+                 using --title, even if the filter only returned a single \
+                 item (overrides config)",
+            ),
+    )
     .group(
         clap::ArgGroup::new("source")
             .args(["asin", "title"])
@@ -40,10 +50,28 @@ pub(super) fn info_command() -> clap::Command {
 /// `download info` — one table row per artifact kind and audio format.
 pub(super) async fn info(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
     use crate::commands::strings;
-    show(ctx, strings(matches, "asin"), strings(matches, "title")).await
+    let always_show_selector = if matches.get_flag("always_show_selector") {
+        true
+    } else {
+        ctx.settings_view()
+            .map(|v| v.always_show_selector())
+            .unwrap_or(false)
+    };
+    show(
+        ctx,
+        strings(matches, "asin"),
+        strings(matches, "title"),
+        always_show_selector,
+    )
+    .await
 }
 
-async fn show(ctx: &Ctx, asins: Vec<String>, titles: Vec<String>) -> Result<()> {
+async fn show(
+    ctx: &Ctx,
+    asins: Vec<String>,
+    titles: Vec<String>,
+    always_show_selector: bool,
+) -> Result<()> {
     let marketplace = ctx.marketplace_single()?;
     let db = ctx.open_library_db().await?;
     // Deliberately the strict variant (AUD-261): `download info` makes
@@ -56,6 +84,7 @@ async fn show(ctx: &Ctx, asins: Vec<String>, titles: Vec<String>) -> Result<()> 
         asins,
         titles,
         crate::commands::items::PodcastMode::Episodes,
+        always_show_selector,
     )
     .await?;
     crate::commands::items::require_nonempty(&asins, "items")?;

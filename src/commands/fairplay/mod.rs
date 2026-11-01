@@ -114,6 +114,7 @@ async fn resolve_titles(
     marketplace: &str,
     matches: &clap::ArgMatches,
     library_only: bool,
+    always_show_selector: bool,
 ) -> Result<Vec<String>> {
     let asins = crate::commands::strings(matches, "asin");
     let titles = crate::commands::strings(matches, "title");
@@ -138,6 +139,7 @@ async fn resolve_titles(
         asins,
         titles,
         crate::commands::items::PodcastMode::ItemsOnly,
+        always_show_selector,
     )
     .await
 }
@@ -152,7 +154,21 @@ async fn single_title(
     if !matches.contains_id("asin") && !matches.contains_id("title") {
         bail!("specify the title: --asin <ASIN> or --title <QUERY>");
     }
-    let mut asins = resolve_titles(ctx, marketplace, matches, library_only).await?;
+    let always_show_selector = if matches.get_flag("always_show_selector") {
+        true
+    } else {
+        ctx.settings_view()
+            .map(|v| v.always_show_selector())
+            .unwrap_or(false)
+    };
+    let mut asins = resolve_titles(
+        ctx,
+        marketplace,
+        matches,
+        library_only,
+        always_show_selector,
+    )
+    .await?;
     match asins.len() {
         1 => Ok(asins.remove(0)),
         0 => bail!("the requested title resolved to nothing"),

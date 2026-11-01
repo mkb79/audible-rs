@@ -226,6 +226,15 @@ impl super::Command for LibraryCommand {
                             .multiple(true)
                             .required(true),
                     )
+                    .arg(
+                        Arg::new("always_show_selector")
+                            .long("always-show-selector")
+                            .action(ArgAction::SetTrue)
+                            .help("Always show the manual selector when filtering items \
+                                   using --title, even if the filter only returned a single \
+                                   item (overrides config)",
+                            )
+                    )
                     .arg(super::kind_arg("all").help(
                         "Only add these content kinds — a guard against \
                          accidentally adding the wrong match (CSV; default all)",
@@ -259,6 +268,15 @@ impl super::Command for LibraryCommand {
                             .args(["asin", "title"])
                             .multiple(true)
                             .required(true),
+                    )
+                    .arg(
+                        Arg::new("always_show_selector")
+                            .long("always-show-selector")
+                            .action(ArgAction::SetTrue)
+                            .help("Always show the manual selector when filtering items \
+                                   using --title, even if the filter only returned a single \
+                                   item (overrides config)",
+                            )
                     )
                     .arg(super::kind_arg("all").help(
                         "Only remove these content kinds — a guard against \
@@ -337,22 +355,38 @@ impl super::Command for LibraryCommand {
                 _ => changes(ctx, sub).await,
             },
             Some(("add", sub)) => {
+                let always_show_selector = if sub.get_flag("always_show_selector") {
+                    true
+                } else {
+                    ctx.settings_view()
+                        .map(|v| v.always_show_selector())
+                        .unwrap_or(false)
+                };
                 membership::add(
                     ctx,
                     strings(sub, "asin"),
                     strings(sub, "title"),
                     super::kind_filter(sub),
                     sub.get_flag("sync"),
+                    always_show_selector,
                 )
                 .await
             }
             Some(("remove", sub)) => {
+                let always_show_selector = if sub.get_flag("always_show_selector") {
+                    true
+                } else {
+                    ctx.settings_view()
+                        .map(|v| v.always_show_selector())
+                        .unwrap_or(false)
+                };
                 membership::remove(
                     ctx,
                     strings(sub, "asin"),
                     strings(sub, "title"),
                     super::kind_filter(sub),
                     sub.get_flag("yes"),
+                    always_show_selector,
                 )
                 .await
             }

@@ -101,10 +101,13 @@ pub(super) async fn add(
     titles: Vec<String>,
     kinds: Vec<String>,
     sync: bool,
+    always_show_selector: bool,
 ) -> Result<()> {
     let client = ctx.client().await?;
     let marketplace = ctx.marketplace_single()?;
-    let asins = catalog::resolve_catalog_titles(client, &marketplace, asins, titles).await?;
+    let asins =
+        catalog::resolve_catalog_titles(client, &marketplace, asins, titles, always_show_selector)
+            .await?;
     crate::commands::items::require_nonempty(&asins, "titles")?;
 
     // Authenticated eligibility (customer_rights) — refuse buy-only up
@@ -179,6 +182,7 @@ pub(super) async fn remove(
     titles: Vec<String>,
     kinds: Vec<String>,
     yes: bool,
+    always_show_selector: bool,
 ) -> Result<()> {
     let client = ctx.client().await?;
     let marketplace = ctx.marketplace_single()?;
@@ -192,6 +196,7 @@ pub(super) async fn remove(
         asins,
         titles,
         items::PodcastMode::ItemsOnly,
+        always_show_selector,
     )
     .await?;
     crate::commands::items::require_nonempty(&asins, "titles")?;

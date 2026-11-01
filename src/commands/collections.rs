@@ -112,12 +112,20 @@ impl super::Command for CollectionsCommand {
                 match sub.subcommand() {
                     Some(("list", _)) => noun_list(ctx, noun).await,
                     Some(("add", add)) => {
+                        let always_show_selector = if add.get_flag("always_show_selector") {
+                            true
+                        } else {
+                            ctx.settings_view()
+                                .map(|v| v.always_show_selector())
+                                .unwrap_or(false)
+                        };
                         noun_add(
                             ctx,
                             noun,
                             strings(add, "asin"),
                             strings(add, "title"),
                             sync(add),
+                            always_show_selector,
                         )
                         .await
                     }
@@ -163,6 +171,16 @@ fn noun_command(noun: &'static Noun) -> clap::Command {
                 .args(["asin", "title"])
                 .multiple(true)
                 .required(true),
+        )
+        .arg(
+            Arg::new("always_show_selector")
+                .long("always-show-selector")
+                .action(ArgAction::SetTrue)
+                .help(
+                    "Always show the manual selector when filtering items \
+                     using --title, even if the filter only returned a single \
+                     item (overrides config)",
+                ),
         );
     let mut remove = clap::Command::new("remove")
         .about(format!("Remove titles from {}", noun.phrase))
@@ -329,6 +347,7 @@ async fn noun_add(
     asins: Vec<String>,
     titles: Vec<String>,
     sync: bool,
+    always_show_selector: bool,
 ) -> Result<()> {
     let client = ctx.client().await?;
     let marketplace = ctx.marketplace_single()?;
@@ -345,11 +364,13 @@ async fn noun_add(
                     asins,
                     titles,
                     crate::commands::items::PodcastMode::ItemsOnly,
+                    always_show_selector,
                 )
                 .await?
             }
             AddTitleSource::Catalog => {
-                resolve_catalog_titles(client, &marketplace, asins, titles).await?
+                resolve_catalog_titles(client, &marketplace, asins, titles, always_show_selector)
+                    .await?
             }
         }
     };
