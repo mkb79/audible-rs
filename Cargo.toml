@@ -57,7 +57,7 @@ secrecy = { version = "0.10", features = ["serde"] }
 zeroize = "1.8"
 
 # Auth helpers
-totp-rs = "5.7"
+totp-rs = "6.0"
 scraper = "0.27"
 
 # Config & serialization
