@@ -139,7 +139,7 @@ reqwest = { version = "0.13", default-features = false, features = ["native-tls"
 # Not linked into the release binary.
 [build-dependencies]
 prost-build = "0.14"
-protox = "0.9"
+protox = "0.10"
 
 [dev-dependencies]
 insta = "1.47"
