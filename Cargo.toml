@@ -58,7 +58,7 @@ zeroize = "1.8"
 
 # Auth helpers
 totp-rs = "5.7"
-scraper = "0.27"
+scraper = "0.29"
 
 # Config & serialization
 serde = { version = "1.0", features = ["derive"] }
