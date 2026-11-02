@@ -699,7 +699,24 @@ mod tests {
             "expected ambiguous error for multi-match title"
         );
 
-        // (e) combined: asins + title, cross-source dedupe
+        // (e) title matching single item with always_show_selector=true
+        // in non-TTY context → Err (ambiguous)
+        // Tests run without a terminal, so the "many" branch bails.
+        let err = resolve_asins(
+            &db,
+            MP,
+            vec![],
+            vec!["jedi".into()],
+            PodcastMode::ItemsOnly,
+            true,
+        )
+        .await;
+        assert!(
+            err.is_err(),
+            "expected ambiguous error for single-match title with always_show_selector=true"
+        );
+
+        // (f) combined: asins + title, cross-source dedupe
         let result = resolve_asins(
             &db,
             MP,
