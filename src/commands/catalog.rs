@@ -40,15 +40,18 @@ fn hit_label(hit: &CatalogHit) -> String {
 /// Resolves `--title` queries against the catalog
 /// (`GET /1.0/catalog/products?title=…`, the audible-cli approach) into a
 /// deduped, order-preserving ASIN list after the explicit `asins`.
-/// Per query: 0 hits → warning + skip; 1 → taken (echoed); several →
-/// interactive multi-select on a TTY, else an error listing the
-/// candidates. Hits whose full title contains the query verbatim
-/// shortlist the fuzzier rest — the reference's 100%-shortlist.
+/// Per query: 0 hits → warning + skip;
+/// 1 + `always_show_selector=false` → taken (echoed);
+/// several or (1 + `always_show_selector=true`) → interactive multi-select
+/// on a TTY, else an error listing the candidates. Hits whose full title
+/// contains the query verbatim shortlist the fuzzier rest — the reference's
+/// 100%-shortlist.
 pub(crate) async fn resolve_catalog_titles(
     client: &Client,
     marketplace: &str,
     asins: Vec<String>,
     queries: Vec<String>,
+    always_show_selector: bool,
 ) -> Result<Vec<String>> {
     let mut result = Vec::new();
     let mut seen = HashSet::new();
@@ -82,7 +85,7 @@ pub(crate) async fn resolve_catalog_titles(
         }
         match hits.as_slice() {
             [] => eprintln!("no catalog title matches {query:?}"),
-            [hit] => {
+            [hit] if !always_show_selector => {
                 eprintln!("{query:?} → {}", hit_label(hit));
                 push(hit.asin.clone());
             }

@@ -96,7 +96,8 @@ impl super::Command for DownloadCommand {
             .mut_arg("missing", |a| a.help_heading(H_SELECTION))
             .mut_arg("include_archived", |a| a.help_heading(H_SELECTION))
             .mut_arg("include_podcasts", |a| a.help_heading(H_SELECTION))
-            .mut_arg("exclude_podcasts", |a| a.help_heading(H_SELECTION));
+            .mut_arg("exclude_podcasts", |a| a.help_heading(H_SELECTION))
+            .mut_arg("always_show_selector", |a| a.help_heading(H_SELECTION));
         cmd.arg(
                 Arg::new("allow_external")
                     .help_heading(H_SELECTION)
@@ -583,6 +584,16 @@ fn add_source_args(cmd: clap::Command) -> clap::Command {
                 .action(ArgAction::SetTrue)
                 .help("Skip all podcast shows and episodes (overrides config)"),
         )
+        .arg(
+            Arg::new("always_show_selector")
+                .long("always-show-selector")
+                .action(ArgAction::SetTrue)
+                .help(
+                    "Always show the manual selector when filtering items \
+                     using --title, even if the filter only returned a single \
+                     item (overrides config)",
+                ),
+        )
         .group(
             // Not `required`: the `reorganize`/`orphans` subcommands need no
             // source. The download path enforces a source manually (see `run`).
@@ -695,6 +706,14 @@ async fn resolve_source(
         .await?
     };
 
+    let always_show_selector = if matches.get_flag("always_show_selector") {
+        true
+    } else {
+        ctx.settings_view()
+            .map(|v| v.always_show_selector())
+            .unwrap_or(false)
+    };
+
     let titles: Vec<String> = crate::commands::strings(matches, "title");
     let resolved = crate::commands::items::resolve_asins(
         &db,
@@ -704,6 +723,7 @@ async fn resolve_source(
         crate::commands::items::PodcastMode::Download {
             include: include_podcasts,
         },
+        always_show_selector,
     )
     .await?;
 

@@ -157,6 +157,11 @@ fn setup(ctx: &Ctx) -> Result<()> {
         &chapter_default(default.chapter_type.as_deref()),
     )?;
 
+    let always_show_selector = ask_yes_no(
+        "Always show the manual selector, even if there is only a single option for the selection",
+        default.always_show_selector.unwrap_or(false),
+    )?;
+
     section("File names");
 
     let filename_mode = ask_choice(
@@ -277,6 +282,7 @@ fn setup(ctx: &Ctx) -> Result<()> {
     let include_podcasts_value = bool_str(include_podcasts);
     let record_changes_value = bool_str(record_changes);
     let decrypt_keep_source_value = decrypt_keep_source.map(bool_str);
+    let always_show_selector_value = bool_str(always_show_selector);
 
     // Every question we skipped: not asked ⇒ the key must not survive in the
     // config either. `setup` is repeatable, so a previous run's
@@ -300,7 +306,7 @@ fn setup(ctx: &Ctx) -> Result<()> {
         ("db.change_retention_days", change_retention_days.as_deref()),
     ];
 
-    let fields: [(&str, &str); 8] = [
+    let fields: [(&str, &str); 9] = [
         ("settings.default.download_dir", download_dir.as_str()),
         ("settings.default.filename_mode", filename_mode.as_str()),
         ("settings.default.overwrite", overwrite.as_str()),
@@ -310,6 +316,10 @@ fn setup(ctx: &Ctx) -> Result<()> {
         ),
         ("settings.default.decrypt", decrypt_value),
         ("settings.default.include_podcasts", include_podcasts_value),
+        (
+            "settings.default.always_show_selector",
+            always_show_selector_value,
+        ),
         ("db.auto_sync", auto_sync.as_str()),
         ("db.record_changes", record_changes_value),
     ];

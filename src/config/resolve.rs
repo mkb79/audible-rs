@@ -197,6 +197,12 @@ impl<'a> SettingsView<'a> {
     pub fn db_override(&self) -> Option<&'a super::schema::DbConfig> {
         self.pick(|s| s.db.as_ref())
     }
+
+    /// Always show the manual selector when filtering items by title,
+    /// even if the filter only returned a single item.
+    pub fn always_show_selector(&self) -> bool {
+        self.pick(|s| s.always_show_selector).unwrap_or(false)
+    }
 }
 
 /// Resolves the marketplace set: `-m/--marketplace` → `AUDIBLE_MARKETPLACE`

@@ -65,6 +65,16 @@ pub(super) fn command() -> clap::Command {
                 .default_value("high")
                 .help("Audio quality"),
         )
+        .arg(
+            Arg::new("always_show_selector")
+                .long("always-show-selector")
+                .action(ArgAction::SetTrue)
+                .help(
+                    "Always show the manual selector when filtering items \
+                     using --title, even if the filter only returned a single \
+                     item (overrides config)",
+                ),
+        )
         .args(super::codec_args())
         .arg(super::dir_arg())
         .arg(
@@ -105,11 +115,19 @@ pub(super) async fn run(ctx: &Ctx, matches: &clap::ArgMatches) -> Result<()> {
         )
         .await?
     } else {
+        let always_show_selector = if matches.get_flag("always_show_selector") {
+            true
+        } else {
+            ctx.settings_view()
+                .map(|v| v.always_show_selector())
+                .unwrap_or(false)
+        };
         super::resolve_titles(
             ctx,
             &marketplace,
             matches,
             !matches.get_flag("allow_external"),
+            always_show_selector,
         )
         .await?
     };

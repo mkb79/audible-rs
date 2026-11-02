@@ -176,6 +176,11 @@ pub struct Settings {
     /// run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include_podcasts: Option<bool>,
+    /// Always show the manual selector when filtering items by title,
+    /// even if the filter only returned a single item (built-in: `false`).
+    /// `--always-show-selector` overrides this per run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub always_show_selector: Option<bool>,
 }
 
 /// The reserved name of the fallback settings bundle.
