@@ -316,7 +316,10 @@ fn setup(ctx: &Ctx) -> Result<()> {
         ),
         ("settings.default.decrypt", decrypt_value),
         ("settings.default.include_podcasts", include_podcasts_value),
-        ("settings.default.always_show_selector", always_show_selector_value),
+        (
+            "settings.default.always_show_selector",
+            always_show_selector_value,
+        ),
         ("db.auto_sync", auto_sync.as_str()),
         ("db.record_changes", record_changes_value),
     ];
