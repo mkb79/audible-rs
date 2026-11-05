@@ -21,9 +21,11 @@ use super::changes::print_changes;
 use super::*;
 
 /// `library sync` — also reused by `collections archive … --sync`
-/// (AUD-111), which runs a plain delta sync after an archive mutation.
-/// `print_summary = false` is the reflection poller's quiet mode: apply
-/// everything, print nothing to stdout (failures still error).
+/// (AUD-111), which runs a plain delta sync after an archive mutation
+/// and `download … --sync`, which runs a plain delta sync before
+/// selecting items to download. `print_summary = false` is the
+/// reflection poller's quiet mode: apply everything, print nothing
+/// to stdout (failures still error).
 pub(crate) async fn sync(
     ctx: &Ctx,
     full: bool,
