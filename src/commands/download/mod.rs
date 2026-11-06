@@ -98,6 +98,17 @@ impl super::Command for DownloadCommand {
             .mut_arg("include_podcasts", |a| a.help_heading(H_SELECTION))
             .mut_arg("exclude_podcasts", |a| a.help_heading(H_SELECTION));
         cmd.arg(
+                Arg::new("sync")
+                    .help_heading(H_SELECTION)
+                    .long("sync")
+                    .action(ArgAction::SetTrue)
+                    .help(
+                        "Do a library sync before downloading. \
+                         This makes newly added titles show up \
+                         when filtering using --title or --missing",
+                    ),
+            )
+            .arg(
                 Arg::new("allow_external")
                     .help_heading(H_SELECTION)
                     .long("allow-external")
@@ -352,6 +363,11 @@ impl super::Command for DownloadCommand {
                 .map(|v| v.include_podcasts())
                 .unwrap_or(true)
         };
+
+        if matches.get_flag("sync") {
+            super::library::sync(ctx, false, !include_podcasts, false, true).await?;
+        }
+
         let (asins, external) = resolve_source(
             ctx,
             &marketplace,
